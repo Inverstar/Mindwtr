@@ -108,6 +108,19 @@ docker rm -f mindwtr-test
 
 ---
 
+## ⚠️ 历史遗留：GHCR 上的 `1.3.7` 是修复前的旧镜像
+
+`ghcr.io/inverstar/mindwtr-merged:1.3.7` 是 2026-11-02 在 apps 仓构建的**有 bug 的版本**
+（缺 `WORKDIR /app`，容器起来就 `error: ENOENT`）。修复后的镜像是 `1.3.7-r2`。
+
+所以：
+
+- chart 的 `image.tag` 现在必须是 `1.3.7-r2`，**不要回退到 `1.3.7`**
+- 本 workflow 的「tag 已存在就跳过」判断对 `1.3.7` 也成立，不会自动修好它
+- 要修的话，手动跑一次：`upstream_version=1.3.7`、`tag_suffix=r2` 之外，
+  把 `tag_suffix` 留空并勾 `force`，用新构建覆盖 `1.3.7`
+- 上游发到 1.3.8 之后就不存在这个问题了，直接用 `1.3.8`
+
 ## 镜像名与仓库归属
 
 `ghcr.io/inverstar/mindwtr-merged` 里的 `inverstar` 是 GitHub **账号名**，
