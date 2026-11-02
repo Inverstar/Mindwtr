@@ -38,17 +38,16 @@ ghcr.io/inverstar/mindwtr-merged:<上游版本>
 
 workflow：`.github/workflows/olares-image.yml`
 
-| 触发 | 说明 |
-|---|---|
-| 手动 `workflow_dispatch` | 可指定上游版本、MCP 版本、tag 后缀、是否强制重建 |
-| push 到 `olares-app` | 改动 `olares/**` 或本 workflow 时自动跑一次，幂等（tag 已存在即跳过） |
-| 每天 UTC 18:00 | ⚠️ 仅当 `olares-app` 是默认分支时生效；`main` 是默认分支时不会触发 |
+**只有手动触发**（`workflow_dispatch`），没有 push / 定时。
+
+理由：Olares 那边的 chart 本来就要手动提 PR 才能升级，镜像先自动构建出来没有任何
+收益，只会堆出一批没人处理的 run。什么时候构建、构建哪个版本，由你决定。
 
 **版本自动跟随**，三个输入都留空就是「全用最新」：
 
 | 输入 | 留空时的行为 |
 |---|---|
-| `upstream_version` | `gh api repos/dongdongbh/Mindwtr/releases/latest` → `1.3.7` |
+| `upstream_version` | `gh api repos/dongdongbh/Mindwtr/releases/latest` → 当前 `1.3.7` |
 | `mcp_version` | `registry.npmjs.org/mindwtr-mcp/latest` → 当前 `1.1.13` |
 | `tag_suffix` | 不加后缀，tag 就是上游版本号 |
 
@@ -71,20 +70,40 @@ workflow：`.github/workflows/olares-image.yml`
 > - `schedule`：「Scheduled workflows **will only run on the default branch**.」
 >   ——定时任务跑的是默认分支的最新提交，这条无法绕过。
 >
-> 所以本仓用 `push` 触发器解决「首次注册 + 之后持续有效」：推到 `olares-app`
-> 且改动 `olares/**` 时自动跑一次（tag 已存在就跳过，约 20 秒）。
-> 手动触发用：
+> 所以本仓不依赖默认分支，也不用 push 触发器：workflow 已经跑过（注册完成），
+> 之后一律用带 `ref` 的 CLI 触发：
 >
 > ```bash
 > gh workflow run olares-image.yml --ref olares-app
 > ```
 >
-> **代价**：`main` 是默认分支时，`schedule` 永远不会触发（Actions 侧边栏里也点不到
-> Run workflow 按钮，只能走 CLI/API）。想要真正的每日自动检查，只有一条路——
-> 把本仓默认分支改成 `olares-app`（Settings → Branches → Default branch），
-> `main` 仍然保持与上游一致，只是不再是「默认」分支。
+> **万一哪天 dispatch 报 404**（workflow 记录被清掉），恢复办法是把
+> `olares-image.yml` 里的 push 触发器临时加回来，往 `olares-app` 推一次任意改动
+> 让它跑起来完成注册，然后再删掉。文件注释里留了可直接取消注释的片段。
 
-手动触发的典型用法：
+## 上游发新版后的完整流程
+
+```bash
+# 1. 出镜像（版本自动取上游最新 release，约 8 分钟）
+cd C:/Night/github.com/Inverstar/Mindwtr
+gh workflow run olares-image.yml --ref olares-app
+gh run watch $(gh run list --workflow=olares-image.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+
+# 2. 确认镜像已推到 GHCR（tag 就是上游版本号，例如 1.3.8）
+#    页面：https://github.com/Inverstar?tab=packages&repo_name=Mindwtr
+
+# 3. 去 apps 仓改 chart：values.yaml 的 image.tag、Chart.yaml 的 version 加一位
+cd C:/Night/github.com/Inverstar/apps
+
+# 4. 提 PR（标题必须符合 bot 格式，版本号必须严格大于 main 上的）
+gh pr create --base main --head feature/mindwtr \
+  --title "[UPDATE][mindwtr][1.1.6] 升级镜像到 1.3.8"
+```
+
+第 3 步之后记得重新打包 chart zip 上传 Olares，`imagePullPolicy: IfNotPresent`
+意味着 tag 没变就不会重新拉镜像。
+
+### 输入速查
 
 | 场景 | 输入 |
 |---|---|
@@ -92,7 +111,13 @@ workflow：`.github/workflows/olares-image.yml`
 | 指定上游版本 | `upstream_version=1.3.8` |
 | 指定 MCP 版本 | `mcp_version=1.1.14` |
 | 同一版本要重建（改了 Dockerfile） | `tag_suffix=r2`，得到 `1.3.8-r2` |
-| 覆盖已存在的 tag | 勾 `force` |
+| 覆盖已存在的 tag | `force=true` |
+
+```bash
+gh workflow run olares-image.yml --ref olares-app                        # 跟最新
+gh workflow run olares-image.yml --ref olares-app -f upstream_version=1.3.8
+gh workflow run olares-image.yml --ref olares-app -f tag_suffix=r3      # 同版本重建
+```
 
 **为什么重建必须换 tag**：Olares 的 Deployment 用 `imagePullPolicy: IfNotPresent`，
 沿用旧 tag 时节点不会重新拉取，新镜像根本不会生效。
