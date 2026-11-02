@@ -203,11 +203,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: 失败时的排查提示
+        if: failure()
+        run: |
+          echo "::error::构建或推送失败，先看上方日志里的 ERROR 行。"
+          echo "如果出现 'permission_denied: write_package'，说明 GHCR 包没有给本仓库写权限——"
+          echo "包是由 Inverstar/apps 创建的，GITHUB_TOKEN 只能写「已授权给当前仓库」的包。"
+          echo "修复：打开 https://github.com/users/${{ github.repository_owner }}/packages/container/${{ env.IMAGE_NAME }}/settings"
+          echo "      → Manage Actions access → Add repository → ${{ github.repository }} → 角色选 Write → Add"
+
       - name: Summary
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SKIPPED: ${{ steps.vars.outputs.skip }}
         run: |
+          if [ "$SKIPPED" = "true" ]; then
+            HEAD="⏭ 跳过（tag 已存在）"
+          elif [ "$JOB_STATUS" = "success" ]; then
+            HEAD="✅ 构建并推送完成"
+          else
+            HEAD="❌ 失败（见上方日志）"
+          fi
           {
-            echo "### ${{ steps.vars.outputs.skip == 'true' && '⏭ 跳过（tag 已存在）' || '✅ 构建完成' }}"
+            echo "### ${HEAD}"
             echo ""
             echo "| 字段 | 值 |"
             echo "|---|---|"
