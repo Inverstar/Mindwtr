@@ -1,0 +1,157 @@
+# Olares 三合一镜像（mindwtr-merged）
+
+把上游两个官方镜像 + npm 上的 MCP helper 拼成一个镜像，供 Olares 上的 Mindwtr 应用使用。
+
+```
+ghcr.io/inverstar/mindwtr-merged:<上游版本>
+```
+
+> 本目录只做「拼装」，**不编译源码**：内容全部来自上游已发布的
+> `ghcr.io/dongdongbh/mindwtr-cloud` 和 `ghcr.io/dongdongbh/mindwtr-app`，
+> 加上 npm 包 `mindwtr-mcp`。所以上游发版后几分钟就能出一个新镜像。
+
+---
+
+## 目录内容
+
+| 文件 | 作用 |
+|---|---|
+| `Dockerfile` | 三阶段拼装：cloud 提供 `/app` 源码与 bun，app 提供 nginx + PWA，npm 装 MCP helper |
+| `start.sh` | 容器内进程编排：Cloud → 等 `/ready` → MCP helper → 等 `/healthz` → nginx |
+| `nginx.conf` | 单端口分流：`/mcp`、`/healthz` → helper；`/health`、`/ready`、`/v1/*` → Cloud；其余 → PWA |
+| `patch-cloud.py` | 构建期给 Cloud 的 `server.ts` 注入 `/mcp` 转发分支（幂等） |
+| `compose.yaml` | 本机冒烟测试用的参考 compose |
+
+## 容器内拓扑
+
+| 进程 | 监听 | 对外 |
+|---|---|---|
+| `bun` → Cloud | `127.0.0.1:8787` | 否 |
+| `node` → MCP helper | `127.0.0.1:8723` | 否 |
+| `nginx` → 统一入口 | `0.0.0.0:8080` | **是** |
+
+---
+
+## 构建
+
+### GitHub Actions（推荐）
+
+workflow：`.github/workflows/olares-image.yml`
+
+| 触发 | 说明 |
+|---|---|
+| 手动 Run workflow | 可指定上游版本、MCP 版本、tag 后缀、是否强制重建 |
+| 每天 UTC 18:00 | 检查上游最新 release，有新版本才构建；tag 已存在则跳过 |
+
+> **定时任务只在默认分支上生效。** 这个 workflow 目前在 `olares-app` 分支上，
+> 只有手动触发可用。想让自动跟随上游发版跑起来，把它合并到 `main`。
+
+手动触发的典型用法：
+
+| 场景 | 输入 |
+|---|---|
+| 跟上游最新版 | 全部留空 |
+| 指定版本 | `upstream_version=1.3.8` |
+| 同一版本要重建（改了 Dockerfile） | `tag_suffix=r2`，得到 `1.3.8-r2` |
+| 覆盖已存在的 tag | 勾 `force` |
+
+**为什么重建必须换 tag**：Olares 的 Deployment 用 `imagePullPolicy: IfNotPresent`，
+沿用旧 tag 时节点不会重新拉取，新镜像根本不会生效。
+
+### 本机手动构建
+
+```bash
+cd olares
+
+docker buildx build \
+  --platform linux/amd64 \
+  --load \
+  --build-arg CLOUD_IMAGE=ghcr.io/dongdongbh/mindwtr-cloud:1.3.7 \
+  --build-arg APP_IMAGE=ghcr.io/dongdongbh/mindwtr-app:1.3.7 \
+  --build-arg MCP_VERSION=1.1.13 \
+  -t mindwtr-merged:test \
+  .
+```
+
+构建成功的标志（缺这行说明 patch 失败）：
+
+```
+BUILD: Cloud /mcp passthrough patch applied.
+[patch-cloud] PATCH OK: 已在 .../server.ts 插入 /mcp 与 /healthz 转发分支。
+```
+
+### 本机冒烟测试
+
+```bash
+CLOUD_TOKEN=$(openssl rand -hex 32)
+MCP_TOKEN=$(openssl rand -hex 32)
+
+docker run -d --name mindwtr-test -p 8080:8080 \
+  -e MINDWTR_CLOUD_AUTH_TOKENS="$CLOUD_TOKEN" \
+  -e MINDWTR_MCP_HTTP_TOKEN="$MCP_TOKEN" \
+  -e MINDWTR_MCP_CLOUD_TOKEN="$CLOUD_TOKEN" \
+  mindwtr-merged:test
+
+sleep 15
+curl -s http://localhost:8080/health   # ok
+curl -s http://localhost:8080/ready    # ok
+curl -s http://localhost:8080/healthz  # ok
+
+# 必须输出 /app，否则 bun --filter 会 ENOENT
+docker exec mindwtr-test sh -c 'pwd; ls -l /app/package.json'
+
+# 末尾应出现「全部就绪，对外入口端口 8080」
+docker logs mindwtr-test 2>&1 | tail -20
+
+docker rm -f mindwtr-test
+```
+
+---
+
+## 镜像名与仓库归属
+
+`ghcr.io/inverstar/mindwtr-merged` 里的 `inverstar` 是 GitHub **账号名**，
+不是仓库名。任何属于这个账号、带 `packages: write` 的仓库都能推同一个镜像名。
+
+所以这个构建从 `Inverstar/apps` 搬到 `Inverstar/Mindwtr` 之后：
+
+- chart 里 `repository: ghcr.io/inverstar/mindwtr-merged` **不需要改**
+- GHCR Package 页面可能仍显示关联到旧仓库，属 UI 展示，不影响 pull
+- 需要的话可在 Package 设置 → Manage repository 里切换关联
+
+---
+
+## 环境变量（运行时注入，不进镜像层）
+
+| 变量 | 谁校验 | 规则 |
+|---|---|---|
+| `MINDWTR_CLOUD_AUTH_TOKENS` | Cloud | 逗号分隔；每个 20-512 字符，字符集 `[A-Za-z0-9._~+/=-]` |
+| `MINDWTR_MCP_HTTP_TOKEN` | MCP helper | ≥ 16 字符 |
+| `MINDWTR_MCP_CLOUD_TOKEN` | Cloud | 必须是上面某个 token |
+| `MINDWTR_CLOUD_CORS_ORIGIN` | Cloud | `NODE_ENV=production` 下必填，start.sh 有兜底默认值 |
+
+**数据按 token 分命名空间**：Cloud 用 `sha256(token)` 当文件名（`<hash>.json`），
+换 token 等于换一个空数据集。迁移数据的正确做法是把旧 `<hash>.json`
+复制成新 token 的 `<hash>.json`，不要去猜旧 token。
+
+---
+
+## 已修复的两个启动阻断（2026-11-02）
+
+| 症状 | 根因 | 修复位置 |
+|---|---|---|
+| 容器起来几毫秒就 `error: ENOENT` 退出 | 最终阶段 `FROM app AS merged` 基于 nginx 基底，没有 `WORKDIR`，cwd 是 `/`；`bun run --filter` 找不到 `/app/package.json` | Dockerfile 加 `WORKDIR /app`；start.sh 再 `cd /app` 兜底 |
+| Cloud 导入期抛 `MINDWTR_CLOUD_CORS_ORIGIN must be set in production.` | 镜像 `ENV NODE_ENV=production`，`apps/cloud/src/server-config.ts` 在 production 下强制要求显式 origin | start.sh 用 `: "${MINDWTR_CLOUD_CORS_ORIGIN:=http://localhost:5173}"` 兜底；chart 侧传真实应用域名 |
+
+---
+
+## 发版之后要做什么
+
+镜像推好了，Olares 不会自动升级，还得改 chart：
+
+1. `Inverstar/apps` → `mindwtr/values.yaml`：`image.tag` 改成新 tag
+2. `mindwtr/Chart.yaml`：`version` 加一位（如 1.1.5 → 1.1.6）
+3. 提 PR，标题必须符合 bot 格式：`[UPDATE][mindwtr][1.1.6] 说明`
+   - 版本号必须**严格大于** main 上的版本
+   - 被 bot 关掉的 PR 不能重开，要新建
+4. 重新打包 chart zip 上传 Olares

@@ -1,0 +1,185 @@
+name: Build mindwtr-merged (Olares)
+
+# 把上游两个官方镜像（mindwtr-cloud + mindwtr-app）和 npm 上的 MCP helper
+# 拼成一个三合一镜像，供 Olares 上的 Mindwtr 应用使用。
+#
+# 本仓库只做「拼装」，不编译源码：
+#   - 上游发版并推好 mindwtr-cloud / mindwtr-app 之后，这里跟着打一个合并镜像
+#   - 镜像名固定为 ghcr.io/<owner>/mindwtr-merged，<owner> 是本仓库的账号名，
+#     所以从 Inverstar/apps 搬到本仓库后，chart 里的 repository 不需要改
+#
+# 触发方式：
+#   1. workflow_dispatch —— 手动，可指定版本 / tag 后缀 / 强制重建
+#   2. schedule          —— 每天检查上游是否有新版本，有则自动构建
+#      ⚠️ 定时任务只在**默认分支**上生效。想让自动更新跑起来，需要把这个
+#         workflow 合并到 main；只待在 olares-app 分支时只能用手动触发。
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: '上游版本号（留空 = 自动取 dongdongbh/Mindwtr 最新 release）'
+        required: false
+        default: ''
+      mcp_version:
+        description: 'mindwtr-mcp npm 包版本'
+        required: false
+        default: '1.1.13'
+      tag_suffix:
+        description: '镜像 tag 后缀（留空 = 直接用版本号；需要重建同版本时填 r2/r3）'
+        required: false
+        default: ''
+      force:
+        description: '强制重建（忽略「该 tag 已存在」的跳过判断）'
+        required: false
+        type: boolean
+        default: false
+
+  schedule:
+    # 每天 UTC 18:00（北京 02:00）检查一次上游新版本
+    - cron: '0 18 * * *'
+
+# 同一时间只允许一个构建；手动触发的排在新任务后面，不取消正在跑的
+concurrency:
+  group: olares-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # 版本来源仓库（上游）。fork 里跑也取上游的版本号，因为镜像内容全部来自上游镜像。
+  UPSTREAM_REPO: dongdongbh/Mindwtr
+  IMAGE_NAME: mindwtr-merged
+  DEFAULT_MCP_VERSION: '1.1.13'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve versions
+        id: vars
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.upstream_version }}
+          INPUT_MCP: ${{ github.event.inputs.mcp_version }}
+          INPUT_SUFFIX: ${{ github.event.inputs.tag_suffix }}
+          INPUT_FORCE: ${{ github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # --- 上游版本号 -------------------------------------------------------
+          VERSION="${INPUT_VERSION:-}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+            echo "自动取到上游最新版本：$VERSION"
+          fi
+          # release tag 形如 v1.3.7，镜像 tag 用 1.3.7
+          VERSION="${VERSION#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::版本号格式不对：$VERSION（期望 1.3.7 或 v1.3.7）"
+            exit 1
+          fi
+
+          # --- MCP 版本 ---------------------------------------------------------
+          MCP="${INPUT_MCP:-$DEFAULT_MCP_VERSION}"
+
+          # --- 目标 tag ---------------------------------------------------------
+          SUFFIX="${INPUT_SUFFIX:-}"
+          if [ -n "$SUFFIX" ]; then
+            TAG="${VERSION}-${SUFFIX}"
+          else
+            TAG="$VERSION"
+          fi
+
+          # Docker 仓库名必须全小写，github.repository_owner 会保留 Inverstar 的大小写
+          OWNER="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER}/${IMAGE_NAME}"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "mcp=$MCP"         >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE"     >> "$GITHUB_OUTPUT"
+
+          # --- 上游镜像是否已就绪 ----------------------------------------------
+          # 上游发版后 GHCR 上可能还没推完，直接构建会在 FROM 阶段失败。
+          for suffix in mindwtr-cloud mindwtr-app; do
+            REF="ghcr.io/dongdongbh/${suffix}:${VERSION}"
+            if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
+              echo "上游镜像就绪：$REF"
+            else
+              echo "::error::上游镜像尚未发布：$REF（等上游 workflow 跑完再重试）"
+              exit 1
+            fi
+          done
+
+          # --- 目标 tag 是否已存在 ----------------------------------------------
+          if [ "${INPUT_FORCE:-false}" = "true" ]; then
+            echo "force=true，忽略已存在的 tag，强制重建。"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif docker buildx imagetools inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+            echo "${IMAGE}:${TAG} 已存在，跳过构建。需要重建请勾选 force。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${IMAGE}:${TAG} 不存在，开始构建。"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.vars.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: olares
+          file: olares/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            CLOUD_IMAGE=ghcr.io/dongdongbh/mindwtr-cloud:${{ steps.vars.outputs.version }}
+            APP_IMAGE=ghcr.io/dongdongbh/mindwtr-app:${{ steps.vars.outputs.version }}
+            MCP_VERSION=${{ steps.vars.outputs.mcp }}
+          tags: |
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
+            ${{ steps.vars.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+            org.opencontainers.image.description=Mindwtr merged image (Cloud + MCP helper + PWA) for Olares
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ steps.vars.outputs.skip == 'true' && '⏭ 跳过（tag 已存在）' || '✅ 构建完成' }}"
+            echo ""
+            echo "| 字段 | 值 |"
+            echo "|---|---|"
+            echo "| 镜像 | \`${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}\` |"
+            echo "| 上游版本 | \`${{ steps.vars.outputs.version }}\` |"
+            echo "| MCP 版本 | \`${{ steps.vars.outputs.mcp }}\` |"
+            echo "| 架构 | linux/amd64, linux/arm64 |"
+            echo ""
+            echo "> 记得把 Inverstar/apps 里 \`mindwtr/values.yaml\` 的 \`image.tag\` 改成上面的 tag，"
+            echo "> 并把 \`Chart.yaml\` 的 version 加一位，再提 PR。"
+          } >> "$GITHUB_STEP_SUMMARY"
