@@ -40,8 +40,9 @@ workflow：`.github/workflows/olares-image.yml`
 
 | 触发 | 说明 |
 |---|---|
-| 手动 Run workflow | 可指定上游版本、MCP 版本、tag 后缀、是否强制重建 |
-| 每天 UTC 18:00 | 检查上游最新 release，有新版本才构建；tag 已存在则跳过 |
+| 手动 `workflow_dispatch` | 可指定上游版本、MCP 版本、tag 后缀、是否强制重建 |
+| push 到 `olares-app` | 改动 `olares/**` 或本 workflow 时自动跑一次，幂等（tag 已存在即跳过） |
+| 每天 UTC 18:00 | ⚠️ 仅当 `olares-app` 是默认分支时生效；`main` 是默认分支时不会触发 |
 
 **版本自动跟随**，三个输入都留空就是「全用最新」：
 
@@ -55,19 +56,33 @@ workflow：`.github/workflows/olares-image.yml`
 强制重新解析基础镜像），MCP helper 用 npm 上最新的 `mindwtr-mcp`，所以不存在
 「镜像里还是旧代码」的情况。构建日志里会打印实际用到的三个版本。
 
-> **关于「必须合并到 main 才能跑」这个说法，准确规则是这样的**
-> （[官方文档](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)）：
+> **分支约定：`main` 与上游 `dongdongbh/Mindwtr` 完全一致，不放任何本仓改动。**
+> 所有构建文件只活在 `olares-app` 分支上。
+>
+> 这样能跑起来，靠的是下面这条官方规则
+> （[events-that-trigger-workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)）：
 >
 > - `workflow_dispatch`：「This event will only trigger a workflow run if the workflow
->   file exists on the default branch.」——文件必须在默认分支上才会被**注册**。
-> - 注册之后，「Run workflow」按钮带一个 **Branch 下拉框**，可以选任意分支跑；
->   也可以 `gh workflow run olares-image.yml --ref <分支>`。
-> - `schedule`：「Scheduled workflows will only run on the default branch.」
->   ——定时任务跑的是默认分支的最新提交，所以 `olares/` 也必须一起在默认分支上。
+>   file **exists on the default branch**.」——文件不在默认分支时它**不会被注册**，
+>   第一次 dispatch 会 404（实测：`workflow ... not found on the default branch`）。
+> - 但紧接着一句：「Once a workflow has **run at least once**, you can dispatch it
+>   against **any branch or tag** via the GitHub API or GitHub CLI.」——只要跑过一次，
+>   之后 `gh workflow run --ref <分支>` 就能对着任意分支跑，文件在不在默认分支都无所谓。
+> - `schedule`：「Scheduled workflows **will only run on the default branch**.」
+>   ——定时任务跑的是默认分支的最新提交，这条无法绕过。
 >
-> 因此本仓的做法是：`main` 上同时有 `.github/workflows/olares-image.yml` 和
-> `olares/`（从 `olares-app` 快进合并）。之后改构建文件仍然可以在特性分支上做，
-> 用 Branch 下拉框对着分支试跑，确认没问题再合并。
+> 所以本仓用 `push` 触发器解决「首次注册 + 之后持续有效」：推到 `olares-app`
+> 且改动 `olares/**` 时自动跑一次（tag 已存在就跳过，约 20 秒）。
+> 手动触发用：
+>
+> ```bash
+> gh workflow run olares-image.yml --ref olares-app
+> ```
+>
+> **代价**：`main` 是默认分支时，`schedule` 永远不会触发（Actions 侧边栏里也点不到
+> Run workflow 按钮，只能走 CLI/API）。想要真正的每日自动检查，只有一条路——
+> 把本仓默认分支改成 `olares-app`（Settings → Branches → Default branch），
+> `main` 仍然保持与上游一致，只是不再是「默认」分支。
 
 手动触发的典型用法：
 

@@ -2,3 +2,4 @@
 
 # Olares 构建文件必须是 LF：start.sh 的 shebang 若带 CR，容器里会变成 /bin/sh^M 直接报错
 olares/** text eol=lf
+.github/workflows/olares-image.yml text eol=lf

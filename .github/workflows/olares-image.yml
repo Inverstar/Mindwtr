@@ -10,18 +10,26 @@ name: Build mindwtr-merged (Olares)
 #
 # 触发方式：
 #   1. workflow_dispatch —— 手动，可指定版本 / tag 后缀 / 强制重建
-#   2. schedule          —— 每天检查上游是否有新版本，有则自动构建
+#   2. push              —— 推到 olares-app 分支且改动 olares/ 时自动跑一次（幂等：
+#                            tag 已存在会直接跳过，约 20 秒）
+#   3. schedule          —— 每天检查上游是否有新版本（⚠️ 见下方「默认分支」说明）
 #
 # 关于「默认分支」的官方规则（docs.github.com/actions/reference/workflows-and-actions/
 # events-that-trigger-workflows）：
 #   - workflow_dispatch：「This event will only trigger a workflow run if the workflow
-#     file exists on the default branch.」文件必须在默认分支上才注册；
-#     注册之后，UI 的 Run workflow 有 Branch 下拉框，可以选任意分支跑。
+#     file exists on the default branch.」——文件不在默认分支时，它不会被注册，
+#     第一次 dispatch 会 404（实测过）。
+#   - 「Once a workflow has run at least once, you can dispatch it against any branch
+#     or tag via the GitHub API or GitHub CLI.」——只要跑过一次，之后用 CLI/API
+#     可以对任意分支 dispatch，文件不在默认分支也没关系（也已实测）。
 #   - schedule：「Scheduled workflows will only run on the default branch.」
-#     定时任务跑的是默认分支的最新提交，所以 olares/ 也必须一起在默认分支上。
+#     定时任务跑的是默认分支的最新提交。
 #
-# 结论：本文件与 olares/ 目录都在 main（默认分支）上，所以定时任务和手动触发都可用；
-# 改动仍然可以放在特性分支上，用 Run workflow 的 Branch 下拉框直接对着分支跑。
+# 本仓的约定：**main 保持与上游 dongdongbh/Mindwtr 完全一致**，不放任何本仓改动；
+# 构建文件只活在 olares-app 分支上。所以：
+#   - 手动触发用 `gh workflow run olares-image.yml --ref olares-app`（已验证可用）
+#   - 下面的 push 触发器负责「首次注册」和「改构建文件后自动重跑」
+#   - schedule 段只有在 olares-app 成为默认分支时才会生效；main 是默认分支时它是空转
 
 on:
   workflow_dispatch:
@@ -44,8 +52,18 @@ on:
         type: boolean
         default: false
 
+  # 改构建文件就自动跑一次。真正的构建由「tag 已存在则跳过」兜住，
+  # 所以正常情况下这里只是 20 秒的幂等检查；同时也保证 workflow 始终处于已注册状态。
+  push:
+    branches:
+      - olares-app
+    paths:
+      - 'olares/**'
+      - '.github/workflows/olares-image.yml'
+
   schedule:
-    # 每天 UTC 18:00（北京 02:00）检查一次上游新版本
+    # 每天 UTC 18:00（北京 02:00）检查一次上游新版本。
+    # 只有在 olares-app 是默认分支时才会触发，main 是默认分支时这段不生效。
     - cron: '0 18 * * *'
 
 # 同一时间只允许一个构建；手动触发的排在新任务后面，不取消正在跑的
