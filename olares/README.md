@@ -43,15 +43,39 @@ workflow：`.github/workflows/olares-image.yml`
 | 手动 Run workflow | 可指定上游版本、MCP 版本、tag 后缀、是否强制重建 |
 | 每天 UTC 18:00 | 检查上游最新 release，有新版本才构建；tag 已存在则跳过 |
 
-> **定时任务只在默认分支上生效。** 这个 workflow 目前在 `olares-app` 分支上，
-> 只有手动触发可用。想让自动跟随上游发版跑起来，把它合并到 `main`。
+**版本自动跟随**，三个输入都留空就是「全用最新」：
+
+| 输入 | 留空时的行为 |
+|---|---|
+| `upstream_version` | `gh api repos/dongdongbh/Mindwtr/releases/latest` → `1.3.7` |
+| `mcp_version` | `registry.npmjs.org/mindwtr-mcp/latest` → 当前 `1.1.13` |
+| `tag_suffix` | 不加后缀，tag 就是上游版本号 |
+
+镜像本身永远由上游 `mindwtr-cloud:<版本>` + `mindwtr-app:<版本>` 拼装（`pull: true`
+强制重新解析基础镜像），MCP helper 用 npm 上最新的 `mindwtr-mcp`，所以不存在
+「镜像里还是旧代码」的情况。构建日志里会打印实际用到的三个版本。
+
+> **关于「必须合并到 main 才能跑」这个说法，准确规则是这样的**
+> （[官方文档](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)）：
+>
+> - `workflow_dispatch`：「This event will only trigger a workflow run if the workflow
+>   file exists on the default branch.」——文件必须在默认分支上才会被**注册**。
+> - 注册之后，「Run workflow」按钮带一个 **Branch 下拉框**，可以选任意分支跑；
+>   也可以 `gh workflow run olares-image.yml --ref <分支>`。
+> - `schedule`：「Scheduled workflows will only run on the default branch.」
+>   ——定时任务跑的是默认分支的最新提交，所以 `olares/` 也必须一起在默认分支上。
+>
+> 因此本仓的做法是：`main` 上同时有 `.github/workflows/olares-image.yml` 和
+> `olares/`（从 `olares-app` 快进合并）。之后改构建文件仍然可以在特性分支上做，
+> 用 Branch 下拉框对着分支试跑，确认没问题再合并。
 
 手动触发的典型用法：
 
 | 场景 | 输入 |
 |---|---|
-| 跟上游最新版 | 全部留空 |
-| 指定版本 | `upstream_version=1.3.8` |
+| 跟上游最新版（最常用） | 全部留空 |
+| 指定上游版本 | `upstream_version=1.3.8` |
+| 指定 MCP 版本 | `mcp_version=1.1.14` |
 | 同一版本要重建（改了 Dockerfile） | `tag_suffix=r2`，得到 `1.3.8-r2` |
 | 覆盖已存在的 tag | 勾 `force` |
 

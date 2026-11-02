@@ -11,8 +11,17 @@ name: Build mindwtr-merged (Olares)
 # 触发方式：
 #   1. workflow_dispatch —— 手动，可指定版本 / tag 后缀 / 强制重建
 #   2. schedule          —— 每天检查上游是否有新版本，有则自动构建
-#      ⚠️ 定时任务只在**默认分支**上生效。想让自动更新跑起来，需要把这个
-#         workflow 合并到 main；只待在 olares-app 分支时只能用手动触发。
+#
+# 关于「默认分支」的官方规则（docs.github.com/actions/reference/workflows-and-actions/
+# events-that-trigger-workflows）：
+#   - workflow_dispatch：「This event will only trigger a workflow run if the workflow
+#     file exists on the default branch.」文件必须在默认分支上才注册；
+#     注册之后，UI 的 Run workflow 有 Branch 下拉框，可以选任意分支跑。
+#   - schedule：「Scheduled workflows will only run on the default branch.」
+#     定时任务跑的是默认分支的最新提交，所以 olares/ 也必须一起在默认分支上。
+#
+# 结论：本文件与 olares/ 目录都在 main（默认分支）上，所以定时任务和手动触发都可用；
+# 改动仍然可以放在特性分支上，用 Run workflow 的 Branch 下拉框直接对着分支跑。
 
 on:
   workflow_dispatch:
@@ -22,9 +31,9 @@ on:
         required: false
         default: ''
       mcp_version:
-        description: 'mindwtr-mcp npm 包版本'
+        description: 'mindwtr-mcp 版本（留空 = 自动取 npm 上 latest）'
         required: false
-        default: '1.1.13'
+        default: ''
       tag_suffix:
         description: '镜像 tag 后缀（留空 = 直接用版本号；需要重建同版本时填 r2/r3）'
         required: false
@@ -101,7 +110,25 @@ jobs:
           fi
 
           # --- MCP 版本 ---------------------------------------------------------
-          MCP="${INPUT_MCP:-$DEFAULT_MCP_VERSION}"
+          # 留空就去 npm 查 latest，保证每次构建都用最新发布的 mindwtr-mcp；
+          # 查不到时回退到下面的固定值，避免因为 registry 抖动直接构建失败。
+          MCP="${INPUT_MCP:-}"
+          if [ -z "$MCP" ]; then
+            MCP="$(curl -fsSL --max-time 20 https://registry.npmjs.org/mindwtr-mcp/latest \
+                   | jq -r '.version // empty')" || MCP=""
+            if [ -n "$MCP" ]; then
+              echo "自动取到 npm 最新 mindwtr-mcp：$MCP"
+            else
+              MCP="$DEFAULT_MCP_VERSION"
+              echo "::warning::查询 npm 失败，回退到 mindwtr-mcp@${MCP}"
+            fi
+          fi
+
+          # 指定版本时校验它在 npm 上确实存在，省掉 8 分钟后 npm install 才报错
+          if ! curl -fsSL --max-time 20 -o /dev/null "https://registry.npmjs.org/mindwtr-mcp/${MCP}"; then
+            echo "::error::npm 上不存在 mindwtr-mcp@${MCP}"
+            exit 1
+          fi
 
           # --- 目标 tag ---------------------------------------------------------
           SUFFIX="${INPUT_SUFFIX:-}"
@@ -152,6 +179,8 @@ jobs:
           file: olares/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          # 始终重新解析基础镜像，避免命中本地/缓存里的旧层
+          pull: true
           build-args: |
             CLOUD_IMAGE=ghcr.io/dongdongbh/mindwtr-cloud:${{ steps.vars.outputs.version }}
             APP_IMAGE=ghcr.io/dongdongbh/mindwtr-app:${{ steps.vars.outputs.version }}
