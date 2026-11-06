@@ -1,3 +1,4 @@
+import { getContextsSaveCriteria } from './contexts-filter';
 import { applyFocusSavedFilter, buildFocusControlsModel, planFocusFilterCriterionRemoval,
     planFocusFilterSave } from './focus-controls';
 import { readNativeFocusControls } from './native-host-contract-focus-controls';
@@ -86,7 +87,10 @@ const scopeFor = (model: FocusControlsModel, controls: FocusControlState,
     const raw = state.settings.savedFilters ?? [];
     if (operation.type === 'save') {
         if (!model.perspective.canSavePerspective || model.filter.state.savedFilterId !== null) return null;
-        return { before: null, creation: focusSavedFilterCreation(state, controls) };
+        const creation = focusSavedFilterCreation(state, controls);
+        if (operation.view === 'contexts' && getContextsSaveCriteria(creation.currentCriteria, [], 'all',
+            [controls.filters.searchQuery]) === null) return null;
+        return { before: null, creation };
     }
     const id = operation.type === 'delete' ? operation.id : controls.savedFilterId;
     if (!id) return null;
@@ -131,7 +135,7 @@ const plannedResult = (request: FocusSavedFilterRequest, after: SavedFilter): Fo
             ? { ...request.controls, savedFilterId: null } : request.controls,
 });
 
-/** Pure validation of a cold journal, before opening native SQLite. */
+
 const readPrepared = (value: unknown): PreparedFocusSavedFilter | null => {
     const envelope = detach<Record<string, unknown>>(value);
     if (!envelope || !exact(envelope, ['request', 'prepared']) || !record(envelope.prepared)) return null;
@@ -159,6 +163,8 @@ const readPrepared = (value: unknown): PreparedFocusSavedFilter | null => {
             priorities: selections.priorities, energyLevels: selections.energyLevels,
             timeEstimates: selections.timeEstimates, contextMatchMode: selections.contextMatchMode,
             tagMatchMode: selections.tagMatchMode, anyDateRange: selections.anyDateRange }), ...request.controls.preservedCriteria };
+        if (request.operation.type === 'save' && request.operation.view === 'contexts'
+            && getContextsSaveCriteria(visibleMaximum, [], 'all', [request.controls.filters.searchQuery]) === null) return null;
         if (!same(scope.creation.currentCriteria, visibleMaximum)
             || !resolveTaskPerspectiveForFeatures({
                 sortBy: scope.creation.effectiveSortBy,
@@ -260,7 +266,7 @@ export function createFocusSavedFilterMethods(deps: {
                 try { logInfo('Native Context filter saved', {
                     scope: 'native-host', category: 'storage', force: true,
                     context: { releaseCheck: 'v1.3.8/context-filter-save', outcome: 'confirmed' },
-                }); } catch { /* Logging must not change the durable save outcome. */ }
+                }); } catch {                                                         }
             }
             return saved.ok ? { ok: true, value: prepared.result } : saved;
         },

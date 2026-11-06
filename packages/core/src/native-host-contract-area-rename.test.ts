@@ -22,7 +22,7 @@ const task = (id: string, areaId: string, overrides: Partial<Task> = {}): Task =
     rev: 7, revBy: 'old-device', createdAt: NOW, updatedAt: NOW, ...overrides,
 });
 
-// These mutations model a saved sync/other-writer change, rather than a UI-only projection.
+
 let updateSavedData: (() => void) | undefined;
 const setSavedState: typeof useTaskStore.setState = (...args) => {
     useTaskStore.setState(...args); updateSavedData?.();
@@ -85,7 +85,7 @@ describe('prepared native Area rename', () => {
         const prepared = structuredClone(plan.value.prepared);
         prepared.version = version;
         if (version === 1) {
-            // Historical v1 retained the source compatibility color for a colorless destination.
+
             for (const pair of prepared.effect.projects) pair.after.color = pair.before.color;
         }
         const frozen = JSON.parse(JSON.stringify({ request: input, prepared }));
@@ -231,8 +231,8 @@ describe('prepared native Area rename', () => {
         const { methods, request, data } = await open({ areas: [source, destination, duplicate, tombstone],
             projects: [sourceLive, sourceDeleted, destinationStale, destinationExact],
             tasks: [direct, deleted, dual, unrelatedTask] });
-        // A mixed-version store can still contain duplicate live names even though
-        // a fresh load currently normalizes them; rename resolves the first raw row.
+
+
         setSavedState({ _allAreas: [source, destination, duplicate, tombstone],
             _allTasks: [direct, deleted, dual, unrelatedTask] });
         const input = request(source.id, ' HOME ');
@@ -412,7 +412,7 @@ describe('prepared native Area rename', () => {
     });
 });
 
-// Actual normal-load/recovery boundaries shared by the three concrete Area commands.
+
 type RecoveryMode = 'rename' | 'merge' | 'delete' | 'restore' | 'fresh';
 async function openAreaRecovery(mode: RecoveryMode) {
     await flushPendingSave(); resetForTests();
@@ -480,6 +480,73 @@ async function openAreaRecovery(mode: RecoveryMode) {
     };
 }
 const recoveryModes: RecoveryMode[] = ['rename', 'merge', 'delete', 'restore', 'fresh'];
+
+describe('Projects list Area rename refuses a taken name (RN 8b31620e4)', () => {
+    const RUN_ID = '00000000-0000-4000-8000-000000001489';
+
+    it('reports a name another live Area holds, trimmed and in any case, and allows the Area its own name', async () => {
+        const { methods } = await open({ areas: [area('work', 'Work', 0), area('home', 'Home', 1),
+            area('gone', 'Old', 2, { deletedAt: NOW })] });
+        expect(methods.checkAreaRename({ areaId: 'work', name: '  home ' })).toEqual({ ok: true, value: { nameTaken: true, saveDisabled: true } });
+        expect(methods.checkAreaRename({ areaId: 'work', name: 'WORK' })).toEqual({ ok: true, value: { nameTaken: false, saveDisabled: false } });
+        expect(methods.checkAreaRename({ areaId: 'work', name: 'Old' })).toEqual({ ok: true, value: { nameTaken: false, saveDisabled: false } });
+        expect(methods.checkAreaRename({ areaId: 'work', name: '   ' })).toEqual({ ok: true, value: { nameTaken: false, saveDisabled: true } });
+        expect(methods.checkAreaRename({ areaId: 'work', name: 7 } as never)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    });
+
+    it('refuses a taken name without merging the Areas or saving', async () => {
+        const { methods, data, saves } = await open({ areas: [area('work', 'Work', 0), area('home', 'Home', 1)],
+            projects: [project('linked', 'work', 'Work')] });
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'work', name: ' HOME ' }))
+            .toEqual({ ok: true, value: { outcome: 'taken', id: 'work', areaId: 'work', name: 'Work' } });
+        expect(data().areas.map((row) => [row.id, row.name, row.deletedAt])).toEqual([['work', 'Work', undefined], ['home', 'Home', undefined]]);
+        expect(data().projects[0].areaId).toBe('work');
+        expect(saves()).toBe(0);
+    });
+
+    it('stores a free trimmed name once, keeps the same name unchanged, and refuses a blank name or a gone Area', async () => {
+        const { methods, data, saves } = await open({ areas: [area('work', 'Work', 0), area('home', 'Home', 1)],
+            projects: [project('linked', 'work', 'Work')] });
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'work', name: '  Office ' }))
+            .toEqual({ ok: true, value: { outcome: 'saved', id: 'work', areaId: 'work', name: 'Office' } });
+        expect(data().areas.find((row) => row.id === 'work')?.name).toBe('Office');
+        expect(data().projects[0].areaTitle).toBe('Office');
+        const afterSave = saves();
+        expect(afterSave).toBeGreaterThan(0);
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'work', name: 'Office' }))
+            .toEqual({ ok: true, value: { outcome: 'unchanged', id: 'work', areaId: 'work', name: 'Office' } });
+        expect(data().areas.filter((row) => row.name === 'Office')).toHaveLength(1);
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'work', name: '  ' })).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'missing', name: 'Desk' })).toMatchObject({ ok: false, error: { code: 'STALE_REVISION' } });
+        expect(await methods.runAreaRename({ requestId: 'not-a-uuid', areaId: 'work', name: 'Desk' })).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    });
+
+    it('lands the name on disk once when its first save fails and the same request is retried', async () => {
+        let failing = true;
+        const { methods, data } = await open({ areas: [area('work', 'Work', 0), area('home', 'Home', 1)],
+            projects: [project('linked', 'work', 'Work')] }, () => failing);
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'work', name: 'Office' })).toMatchObject({ ok: false, error: { code: 'SAVE_FAILED' } });
+        expect(data().areas.find((row) => row.id === 'work')?.name).toBe('Work');
+        failing = false;
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'work', name: 'Office' })).toMatchObject({ ok: true, value: { areaId: 'work', name: 'Office' } });
+        expect(data().areas.filter((row) => !row.deletedAt).map((row) => [row.id, row.name])).toEqual([['work', 'Office'], ['home', 'Home']]);
+        expect(data().projects[0]).toMatchObject({ areaId: 'work', areaTitle: 'Office' });
+        expect(useTaskStore.getState().persistenceFailure).toBeNull();
+    });
+
+    it('is not blocked by an earlier unrelated failed save once the disk recovers', async () => {
+        let failing = false;
+        const { methods, data } = await open({ areas: [area('work', 'Work', 0), area('home', 'Home', 1)] }, () => failing);
+        failing = true;
+        await useTaskStore.getState().updateArea('home', { color: '#ef4444' });
+        await flushPendingSave().catch(() => undefined);
+        expect(useTaskStore.getState().persistenceFailure).not.toBeNull();
+        failing = false;
+        expect(await methods.runAreaRename({ requestId: RUN_ID, areaId: 'work', name: 'Office' })).toMatchObject({ ok: true, value: { outcome: 'saved', name: 'Office' } });
+        expect(data().areas.map((row) => [row.id, row.name, row.color])).toEqual([['work', 'Office', '#3b82f6'], ['home', 'Home', '#ef4444']]);
+    });
+});
+
 
 describe('Area durable recovery baselines', () => {
     it.each(recoveryModes.flatMap((mode) => ['synchronous', 'microtask'].map((timing) => ({ mode, timing }))))
@@ -600,7 +667,7 @@ describe('Area durable recovery baselines', () => {
         const before = structuredClone(env.data()); const writes = env.writes();
         const other = structuredClone(frozen); other.request.requestId = '00000000-0000-4000-8000-000000000592';
         other.prepared.request.requestId = other.request.requestId;
-        // Fresh creation requires ID==UUID, so a different valid frozen payload is supplied by a second preparation below in ownership guards.
+
         if (mode !== 'fresh') expect(await env.commit(other)).toMatchObject({ ok: false, error: { code: 'SAVE_FAILED' } });
         expect(await env.commit(frozen)).toMatchObject({ ok: true });
         expect(env.data()).toEqual(before); expect(env.writes()).toBe(writes);

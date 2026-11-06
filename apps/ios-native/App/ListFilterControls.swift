@@ -1,7 +1,11 @@
 import SwiftUI
 
-/// The RN TaskFilterSheet contents shared by the two core list DTOs.
-/// Query, paging and edit ownership remain with the calling screen's model.
+private struct ListFilterPickerRow: Identifiable {
+    let value: CoreObject
+    let kind: String
+    var id: Data { Data((kind + "-" + value.text(kind == "tokens" ? "value" : "id")).utf8) }
+}
+
 struct ListFilterControls: View {
     let data: CoreObject
     let strings: CoreObject
@@ -184,10 +188,12 @@ struct ListFilterControls: View {
                         id: prefix + "-filter-picker-search", value: $pickerQuery)
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    // Keep the accepted projection in layout while refreshing to preserve the scroll position.
+
                     Group {
                         let items = picker.objects("items")
-                        ForEach(items.indices, id: \.self) { index in pickerOption(items[index]) }
+                        ForEach(items.map { ListFilterPickerRow(value: $0, kind: pickerName) }) { row in
+                            pickerOption(row.value)
+                        }
                         if pickerCurrent && items.isEmpty {
                             Text(localized("search.noResults")).rnFont(14).foregroundStyle(palette.secondary).padding(.vertical, 28)
                         }
@@ -199,7 +205,7 @@ struct ListFilterControls: View {
                             .accessibilityIdentifier(prefix + "-filter-picker-more")
                         }
                         if pickerName == "tokens" {
-                            // Give the bounded match controls one lazy child so their index IDs cannot collide with token rows.
+
                             VStack(alignment: .leading, spacing: 0) {
                                 let controls = filters.objects("matchModes")
                                 ForEach(controls.indices, id: \.self) { index in
@@ -236,7 +242,7 @@ struct ListFilterControls: View {
         return Button { apply(item.object("edit")) } label: {
             HStack(spacing: 12) {
                 Text(label).rnFont(14).strikethrough(excluded).frame(maxWidth: .infinity, alignment: .leading)
-                if selected { Image(systemName: "checkmark").font(.system(size: 16)) }
+                if selected { Image(systemName: "checkmark").font(.system(size: 16)).accessibilityHidden(true) }
                 if excluded { Text(localized("filters.excluded")).rnFont(12, .semibold) }
             }
             .foregroundStyle(excluded ? palette.danger : selected ? palette.tint : palette.text)
@@ -244,6 +250,7 @@ struct ListFilterControls: View {
             .overlay(alignment: .bottom) { palette.border.frame(height: 0.5) }
         }
         .buttonStyle(.plain).disabled(!pickerEnabled)
+        .accessibilityLabel(label)
         .accessibilityAddTraits(selected ? .isSelected : []).accessibilityValue(excluded ? localized("filters.excluded") : "")
         .accessibilityIdentifier(prefix + "-filter-" + (token ? "token-" + label : "project-" + item.text("id")))
     }
@@ -335,7 +342,7 @@ struct ListFilterControls: View {
         })
     }
     private var projectSummary: String {
-        // Chips include selected projects beyond the first picker window.
+
         summary(data.objects("chips").filter {
             ["toggleProject", "removeProject", "cycleProject"].contains($0.object("action").object("filterEdit").text("type"))
         }.map { ($0.flag("excluded") ? localized("filters.excluded") + ": " : "") + $0.text("label") })

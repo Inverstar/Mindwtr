@@ -15,12 +15,14 @@ swiftc -parse-as-library "$app/App/NativeCalendarEventEditor.swift" \
   -o "$app/.build/calendar-editor-lifetime-check"
 "$app/.build/calendar-editor-lifetime-check"
 python3 apps/ios-native/scripts/check-project-download-fixture.test.py
+python3 apps/ios-native/scripts/check-label-keys.test.py
+python3 apps/mobile/modules/whisper-engine/scripts/prepare_vendor.py "$repo/node_modules/whisper.rn"
 export MINDWTR_CORE_BUNDLE="$app/Resources/core-host.js"
 export MINDWTR_CRYPTO_TEST_BUNDLE="$app/.build/crypto-test-host.js"
 export MINDWTR_ATTACHMENT_UPLOAD_TEST_BUNDLE="$app/.build/attachment-upload-test-host.js"
 export TZ=America/New_York
-# CI pipes this output through tee. Flush each XCTest line so a timeout does
-# not leave a buffered, misleading last test in the uploaded evidence.
+
+
 test_command=(swift test --package-path "$app" --jobs 2)
 if command -v stdbuf >/dev/null 2>&1; then
   test_command=(stdbuf -oL -eL "${test_command[@]}")

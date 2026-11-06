@@ -1,5 +1,22 @@
-// Split from i18n-translations.ts to make community translation contributions easier.
+
 export const csOverrides: Record<string, string> = {
+    "taskEdit.startAdvanceReminderLabel": "Před začátkem",
+    "settings.speechUseGemini": "Použít Gemini",
+    "settings.speechNativeUnsupported": "Tento poskytovatel řeči zde zatím není podporován. Pro hlasové zadávání vyberte Gemini, OpenAI nebo Whisper.",
+    "settings.speechGeminiDisclosure": "Nahrávky se odesílají přímo do Gemini k přepisu. Mindwtr je neshromažďuje.",
+    "settings.speechGeminiCredentialShared": "Tento klíč API pro Gemini používá také textová umělá inteligence Gemini na tomto zařízení.",
+    "quickAdd.audioStopAndSave": "Zastavit a uložit",
+    "quickAdd.audioTooLarge": "Nahrávka je příliš velká. Zkuste kratší nahrávku.",
+    "quickAdd.audioNoSpeech": "V nahrávce nebyla rozpoznána žádná řeč.",
+    "quickAdd.audioNotRetained": "Uchovávání zvuku je vypnuté. Po restartování aplikace přepis nepokračuje.",
+    "quickAdd.audioSingleTaskOnly": "Nahrávku lze uložit k jedné úloze. Odstraňte řádky dalších úloh.",
+    "settings.aiConfigureTextAssistant": "Nastavit textového asistenta",
+    "settings.aiCredentialPresent": "Klíč API je dostupný",
+    "settings.aiCredentialMissing": "Žádný uložený klíč API",
+    "settings.aiConsentRecordFailed": "Váš souhlas byl přijat, ale nepodařilo se jej uložit na tomto zařízení. Můžete být dotázáni znovu.",
+    "settings.aiConfigurationSaved": "Nastavení AI uloženo",
+    "settings.aiCredentialSaved": "Klíč API uložen",
+    "settings.aiCredentialCleared": "Klíč API odstraněn",
     "attachments.webUploadRequiresCloud": "Nahrávání v prohlížeči vyžaduje synchronizaci s vlastním cloudovým serverem.",
     "attachments.webUploadEncrypted": "Nahrávání v prohlížeči vyžaduje vypnuté šifrování synchronizace.",
     "attachments.webUploadOffline": "Bez připojení nelze nahrávat soubory.",
@@ -22,11 +39,11 @@ export const csOverrides: Record<string, string> = {
     "timeline.reorderConflict": "Pořadí se změnilo jinde. Zkuste to znovu.",
     "timeline.reorderFailed": "Nové pořadí nelze uložit. Zkuste to znovu.",
     "timeline.reorderInstructions": "Stiskněte mezerník pro výběr řádku, šipku nahoru nebo dolů pro přesun ve skupině, mezerník pro umístění nebo Escape pro zrušení.",
-    'task.doneTagOutcomeUnknown': "Změnu štítků se nepodařilo potvrdit. Restartujte Mindwtr a znovu načtěte uložená data.",
-    "task.copyTaskLink": "Kopírovat odkaz na úkol",
-    "task.copyTaskId": "Kopírovat ID úkolu",
     "task.addToChecklist": "Přidat do kontrolního seznamu…",
     "task.addedToChecklist": "Přidáno do kontrolního seznamu",
+    'task.doneTagOutcomeUnknown': "Změnu štítků se nepodařilo potvrdit. Restartujte Mindwtr a znovu načtěte uložená data.",
+    "task.copyTaskLink": "Kopírovat odkaz Mindwtr",
+    "task.copyTaskId": "Kopírovat ID úkolu",
     "task.linkNotFound": "Tento úkol není v této knihovně. Možná byl odstraněn nebo ještě nebyl synchronizován s tímto zařízením.",
     'task.doneCompletedAtOutcomeUnknown': "Změnu času dokončení se nepodařilo potvrdit. Restartujte Mindwtr a znovu načtěte uložená data.",
     'task.destinationOutcomeUnknown': "Změnu cíle se nepodařilo potvrdit. Restartujte Mindwtr a znovu načtěte uložená data.",
@@ -114,7 +131,7 @@ export const csOverrides: Record<string, string> = {
         'settings.automationCaptureCopyFailed': "Token zachycení se nepodařilo zkopírovat.",
         'settings.automationCaptureLoadFailed': 'Nastavení automatizovaného zachytávání se nepodařilo načíst.',
         'settings.automationCaptureUpdateFailed': 'Nastavení automatizovaného zachytávání se nepodařilo aktualizovat.',
-        // Ratchet backfill (i18n-fallback-20260730-12): new en.ts keys
+
         'accessibility.skipToContent': 'Přeskočit na obsah',
         'accessibility.mainContent': 'Hlavní obsah',
         'quickAdd.pastedImageTitle': 'Snímek obrazovky',
@@ -980,6 +997,7 @@ export const csOverrides: Record<string, string> = {
         'review.projectsStepDesc': 'Ověřte, že každý aktivní projekt má další krok.',
         'review.projectsHint': 'Projděte každý projekt. Má aspoň jeden konkrétní Další krok? Pokud ne, přidejte ho teď. Dokončené projekty označte jako hotové.',
         'review.hasNextAction': 'Má další krok',
+    'review.projectDeferred': 'Naplánováno',
         'review.needsAction': 'Potřebuje krok',
         'review.noActiveTasks': 'Žádné aktivní úkoly',
         'review.somedayStep': 'Někdy/Možná',
@@ -1404,6 +1422,7 @@ export const csOverrides: Record<string, string> = {
         'ai.addSteps': 'Přidat kroky',
         'ai.working': 'Pracuji…',
         'ai.breakdownTitle': 'Navržené kroky',
+        'copilot.suggest': 'Navrhnout',
         'copilot.suggested': 'Navrženo',
         'copilot.applyHint': 'Klepnutím použijete',
         'copilot.applied': 'Použito',
@@ -2158,7 +2177,7 @@ export const csOverrides: Record<string, string> = {
         'settings.syncMobile.useRedirectUri': 'Použít přesměrovací URI',
         'settings.syncMobile.webdavEndpointIsReachable': 'Endpoint WebDAV je dostupný.',
 
-        // Mind sweep (guided capture)
+
         'mindSweep.launchButton': 'Vyčistit hlavu',
         'mindSweep.title': 'Vyčistit hlavu',
         'mindSweep.intro': 'Projděte několik seznamů podnětů a zapište vše, co vás napadne. Netřiďte ani neorganizujte — každá položka skončí ve schránce a zpracujete ji později.',

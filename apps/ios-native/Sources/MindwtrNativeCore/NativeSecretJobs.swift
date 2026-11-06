@@ -1,8 +1,7 @@
 import Foundation
 import Security
 
-/// SecItem work is synchronous and cannot be rolled back by cancelling its caller.
-/// Only plain records cross this serial worker; two retained replies bound memory.
+
 final class NativeSecretJobs: @unchecked Sendable {
     static let maximumBytes = 64 * 1024
     private let condition = NSCondition()
@@ -93,7 +92,7 @@ final class NativeSecretJobs: @unchecked Sendable {
         let job = Job(id: id, registryID: registryID, token: token, operation: operation,
                       account: account, value: value, accessibility: accessibility)
         jobs[id] = job
-        // Enqueue while admission is locked, so serial execution follows admission order.
+
         worker.async { [self] in execute(job) }
         condition.unlock()
         return job
@@ -106,6 +105,38 @@ final class NativeSecretJobs: @unchecked Sendable {
                 kSecAttrService as String: name,
                 kSecAttrAccount as String: bytes, kSecAttrGeneric as String: bytes,
                 kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+    }
+
+    private func executionQuery(_ input: [String: Any]) -> [String: Any] {
+        #if os(macOS)
+        if let bytes = input[kSecAttrAccount as String] as? Data,
+           input[kSecAttrGeneric as String] as? Data == bytes, let account = String(data: bytes, encoding: .utf8) {
+            var result = input; result[kSecAttrAccount as String] = account; return result
+        }
+        #endif
+        return input
+    }
+    private func copyMatching(_ input: [String: Any], result: inout CFTypeRef?) -> OSStatus {
+        let status = SecItemCopyMatching(executionQuery(input) as CFDictionary, &result)
+        #if os(macOS)
+        if status == errSecItemNotFound, let bytes = input[kSecAttrAccount as String] as? Data,
+           input[kSecAttrGeneric as String] as? Data == bytes {
+            result = nil; return SecItemCopyMatching(input as CFDictionary, &result)
+        }
+        #endif
+        return status
+    }
+    private func deleteMatching(_ input: [String: Any]) -> OSStatus {
+        let current = SecItemDelete(executionQuery(input) as CFDictionary)
+        #if os(macOS)
+        if let bytes = input[kSecAttrAccount as String] as? Data, input[kSecAttrGeneric as String] as? Data == bytes {
+            let previous = SecItemDelete(input as CFDictionary)
+            if current != errSecSuccess && current != errSecItemNotFound { return current }
+            if previous != errSecSuccess && previous != errSecItemNotFound { return previous }
+            return current == errSecSuccess || previous == errSecSuccess ? errSecSuccess : errSecItemNotFound
+        }
+        #endif
+        return current
     }
 
     private func status(_ operation: String, alias: String, work: () -> OSStatus) -> OSStatus {
@@ -137,7 +168,7 @@ final class NativeSecretJobs: @unchecked Sendable {
             input[kSecMatchLimit as String] = kSecMatchLimitOne
             input[kSecReturnData as String] = true
             var item: CFTypeRef?
-            let result = status("get", alias: alias) { SecItemCopyMatching(input as CFDictionary, &item) }
+            let result = status("get", alias: alias) { copyMatching(input, result: &item) }
             if result == errSecItemNotFound { continue }
             try check(result)
             guard let bytes = item as? Data, bytes.count <= Self.maximumBytes,
@@ -158,7 +189,7 @@ final class NativeSecretJobs: @unchecked Sendable {
             #endif
             try job.token.check()
             var attributes: CFTypeRef?
-            let result = status("ai-metadata", alias: alias) { SecItemCopyMatching(input as CFDictionary, &attributes) }
+            let result = status("ai-metadata", alias: alias) { copyMatching(input, result: &attributes) }
             try job.token.check()
             if result == errSecItemNotFound { continue }
             return result == errSecSuccess ? "present" : "unavailable"
@@ -166,8 +197,7 @@ final class NativeSecretJobs: @unchecked Sendable {
         return "absent"
     }
 
-    /// Private fixed-account metadata uses the same bounded job registry and serial drain.
-    /// No generic request can select this operation or receive credential data from it.
+
     func inspectAIProviderItem(account: String, cancellation: NativeAttachmentCancellation) throws -> String {
         guard ["mindwtr-ai-key_openai", "mindwtr-ai-key_gemini", "mindwtr-ai-key_anthropic"].contains(account) else {
             throw HostFailure("AI provider device metadata request is invalid")
@@ -187,24 +217,25 @@ final class NativeSecretJobs: @unchecked Sendable {
         }
         return metadata
     }
-    private func write(_ job: Job) throws {
+    private func write(_ job: Job, enforceUnlocked: Bool = false) throws {
         let base = query(job.account, alias: "no-auth")
         var input = base
         input[kSecValueData as String] = Data(job.value!.utf8)
         input[kSecAttrAccessible as String] = job.accessibility == "after-first-unlock"
             ? kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly : kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let result = status("set", alias: "no-auth") { SecItemAdd(input as CFDictionary, nil) }
+        let result = status("set", alias: "no-auth") { SecItemAdd(executionQuery(input) as CFDictionary, nil) }
         if result == errSecDuplicateItem {
-            let changes = [kSecValueData as String: Data(job.value!.utf8)]
-            try check(status("update", alias: "no-auth") { SecItemUpdate(base as CFDictionary, changes as CFDictionary) })
+            var changes: [String: Any] = [kSecValueData as String: Data(job.value!.utf8)]
+            if enforceUnlocked { changes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly }
+            try check(status("update", alias: "no-auth") { SecItemUpdate(executionQuery(base) as CFDictionary, changes as CFDictionary) })
         } else { try check(result) }
-        // Stage1 intentionally retains legacy/auth aliases; no write-induced migration.
+
     }
     private func delete(_ account: String) throws {
         var failure: Error?
         for alias in ["legacy", "auth", "no-auth"] {
             let input = query(account, alias: alias)
-            let result = status("delete", alias: alias) { SecItemDelete(input as CFDictionary) }
+            let result = status("delete", alias: alias) { deleteMatching(input) }
             if result == errSecItemNotFound { continue }
             do { try check(result) } catch { if failure == nil { failure = error } }
         }
@@ -214,8 +245,8 @@ final class NativeSecretJobs: @unchecked Sendable {
     private func execute(_ job: Job) {
         let answer: [String: Any], succeeded: Bool
         do {
-            // This is the last cancellation boundary: a started synchronous
-            // SecItem operation completes even if close arrives during the call.
+
+
             guard !job.token.isCancelled else { throw HostFailure("Secure storage bridge is closed") }
             if job.operation == "ai-metadata" {
                 answer = ["id": job.id, "secureItem": try inspectAIProviderItem(job)]
@@ -246,10 +277,10 @@ final class NativeSecretJobs: @unchecked Sendable {
         condition.unlock(); registry.remove(job.registryID)
         return (String(decoding: try JSONSerialization.data(withJSONObject: answer), as: UTF8.self), completed)
     }
-    /// Do not abort accepted work: finally compensation still runs in this runtime.
+
     func drain() { worker.sync {} }
-    /// The selected attachment owner compares the same read-only account at its
-    /// serialized mutation boundaries. This does not lock external Keychain writers.
+
+
     func readCloudTokenForAttachmentOwner(cancellation: NativeAttachmentCancellation) throws -> String? {
         try readForAttachmentOwner("mindwtr_cloud_token", cancellation: cancellation)
     }
@@ -258,6 +289,80 @@ final class NativeSecretJobs: @unchecked Sendable {
     }
     func readEncryptionKeyForAttachmentOwner(cancellation: NativeAttachmentCancellation) throws -> String? {
         try readForAttachmentOwner("mindwtr_sync_encryption_key_v1", cancellation: cancellation)
+    }
+    func readAIRequestKey(provider: NativeAISettingsProjection.Provider, cancellation: NativeAttachmentCancellation) throws -> String? {
+        try readForAttachmentOwner("mindwtr-ai-key_" + provider.rawValue, cancellation: cancellation)
+    }
+
+    func replaceOpenAIConfigurationCredential(value: String, cancellation: NativeAttachmentCancellation) throws {
+        try replaceAIConfigurationCredential(provider: .openai, value: value, cancellation: cancellation)
+    }
+    func clearOpenAIConfigurationCredential(cancellation: NativeAttachmentCancellation) throws {
+        try clearAIConfigurationCredential(provider: .openai, cancellation: cancellation)
+    }
+    func replaceAIConfigurationCredential(provider: NativeAISettingsProjection.Provider, value: String, cancellation: NativeAttachmentCancellation) throws {
+        guard !value.isEmpty, value.utf16.count <= 4000, value.utf8.count <= Self.maximumBytes else {
+            throw HostFailure("AI credential input is invalid")
+        }
+        try performAIConfigurationMutation(cancellation: cancellation) {
+            let account = "mindwtr-ai-key_" + provider.rawValue
+            let job = Job(id: "ai-configuration", registryID: UUID(), token: cancellation,
+                operation: "set", account: account, value: value, accessibility: "when-unlocked")
+            try self.write(job, enforceUnlocked: true)
+            guard let written = try self.read(account), Data(written.utf8) == Data(value.utf8) else {
+                throw HostFailure("AI credential replacement could not be verified")
+            }
+            var input = self.query(account, alias: "no-auth")
+            input[kSecMatchLimit as String] = kSecMatchLimitOne; input[kSecReturnAttributes as String] = true
+            var result: CFTypeRef?
+            try self.check(self.status("verify", alias: "no-auth") { self.copyMatching(input, result: &result) })
+            guard let attributes = result as? [String: Any] else {
+                throw HostFailure("AI credential replacement could not be verified")
+            }
+            let accessibility = attributes[kSecAttrAccessible as String] as? String
+            #if os(iOS)
+            guard accessibility == kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String else {
+                throw HostFailure("AI credential replacement could not be verified")
+            }
+            #else
+            if let accessibility, accessibility != kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String {
+                throw HostFailure("AI credential replacement could not be verified")
+            }
+            #endif
+        }
+    }
+
+    func clearAIConfigurationCredential(provider: NativeAISettingsProjection.Provider, cancellation: NativeAttachmentCancellation) throws {
+        try performAIConfigurationMutation(cancellation: cancellation) {
+            let account = "mindwtr-ai-key_" + provider.rawValue
+            var failure: Error?
+            do { try self.delete(account) } catch { failure = error }
+            for alias in ["legacy", "auth", "no-auth"] {
+                var input = self.query(account, alias: alias)
+                input[kSecMatchLimit as String] = kSecMatchLimitOne; input[kSecReturnAttributes as String] = true
+                var attributes: CFTypeRef?
+                let result = self.status("verify-clear", alias: alias) { self.copyMatching(input, result: &attributes) }
+                if result == errSecItemNotFound { continue }
+                do {
+                    try self.check(result)
+                    throw HostFailure("AI credential clear could not be verified")
+                } catch { if failure == nil { failure = error } }
+            }
+            if let failure { throw failure }
+        }
+    }
+
+    private func performAIConfigurationMutation(cancellation: NativeAttachmentCancellation, _ work: () throws -> Void) throws {
+        try cancellation.check()
+        try worker.sync {
+            condition.lock(); let open = accepting; condition.unlock()
+            guard open else { throw HostFailure("Secure storage bridge is closed") }
+            try cancellation.check()
+            try work()
+            condition.lock(); let stillOpen = accepting; condition.unlock()
+            guard stillOpen else { throw HostFailure("Secure storage bridge is closed") }
+        }
+        try cancellation.check()
     }
     private func readForAttachmentOwner(_ account: String, cancellation: NativeAttachmentCancellation) throws -> String? {
         try cancellation.check()

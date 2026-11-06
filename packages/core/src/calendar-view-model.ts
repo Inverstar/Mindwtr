@@ -1,24 +1,6 @@
-/**
- * The Calendar screen's logic, shared by the React Native screen and the native
- * host contract (native-host-contract-calendar.ts): what each view mode lists and
- * in which order, the period it shows and how navigation moves it, the titles,
- * labels, counts and empty states, the tones each item is drawn in, and the plan
- * behind every action (reschedule, done, remove from calendar, task from event,
- * scheduling a task on a day).
- *
- * The screen keeps React state, gestures, scrolling, layout measurement, theme
- * colors and the platform I/O (reading device calendars and ICS feeds, opening
- * an event in the calendar app). Day cells and the composer reuse
- * calendar-day-items.ts, calendar-scheduling.ts and calendar-composer.ts.
- *
- * Heading dates come from a CalendarDates: the React Native screen keeps its
- * `toLocaleDateString` headings (createCalendarLocaleDates); the contract builds
- * them from date-fns patterns through its DateFormatter
- * (createCalendarPatternDates), because the native host's engine has no Intl.
- * The patterns give the same English text. Clock times format through a
- * DateFormatter (the app's configured `safeFormatDate` on mobile,
- * `createDateFormatter` in the contract).
- */
+
+
+
 import { taskMatchesAreaFilterSelection, type AreaFilterSelection } from './area-filter';
 import {
     buildCalendarDayItems,
@@ -70,35 +52,33 @@ import type { AppSettings, Area, Project, Section, Task } from './types';
 
 type Translate = (key: string) => string;
 
-// ---------------------------------------------------------------------------
-// View modes and week density.
 
 export type CalendarViewMode = 'month' | 'day' | 'week' | 'schedule';
 
 export const CALENDAR_WEEK_VISIBLE_DAYS_MIN = 2;
 export const CALENDAR_WEEK_VISIBLE_DAYS_MAX = 7;
-// Five days = a school or work week on one phone screen; a 390px phone gives
-// each column ~67px, which the compact column styles are sized for.
+
+
 export const CALENDAR_WEEK_VISIBLE_DAYS_DEFAULT = 5;
 
-/** The timeline covers the whole day; free-slot search keeps the working day (8–23). */
+
 export const CALENDAR_DAY_START_HOUR = 0;
 export const CALENDAR_DAY_END_HOUR = 24;
 export const CALENDAR_DAY_MINUTES = (CALENDAR_DAY_END_HOUR - CALENDAR_DAY_START_HOUR) * 60;
 export const CALENDAR_SNAP_MINUTES = 5;
-/** The schedule view looks this many days ahead and shows at most this many days with items. */
+
 export const CALENDAR_SCHEDULE_DAYS = 45;
 export const CALENDAR_SCHEDULE_MAX_SECTIONS = 18;
 export const CALENDAR_PLANNING_LIMIT = 6;
 export const CALENDAR_SEARCH_LIMIT = 8;
 export const CALENDAR_COMPOSER_CANDIDATE_LIMIT = 10;
-/** A month cell previews two items, and none once it holds six or more. */
+
 export const CALENDAR_MONTH_PREVIEW_ITEMS = 2;
 export const CALENDAR_MONTH_PREVIEW_HIDDEN_AT = 6;
 export const CALENDAR_WEEK_ALL_DAY_ITEMS = 3;
-/** The day view's pinned all-day card shows this many chips before "+N more", like desktop's all-day row. */
+
 export const CALENDAR_DAY_ALL_DAY_ITEMS = 4;
-/** A timeline tap opens the composer with this duration. */
+
 export const CALENDAR_TAP_DURATION_MINUTES = 30;
 
 /** The grid steps a day timeline may snap to, shortest first. */
@@ -172,11 +152,7 @@ export const coerceCalendarWeekVisibleDays = (value?: number | null): number => 
     );
 };
 
-/**
- * Resolves one requested density change while filtering duplicate samples from
- * a continuous slider gesture. The caller stores the returned value before
- * starting persistence so later gesture frames cannot enqueue the same write.
- */
+
 export const getCalendarWeekVisibleDaysUpdate = ({
     currentVisibleDays,
     requestedVisibleDays,
@@ -189,16 +165,13 @@ export const getCalendarWeekVisibleDaysUpdate = ({
     return current === requested ? null : requested;
 };
 
-/** The week density choices, fewest days first. */
+
 export const CALENDAR_WEEK_DENSITY_VALUES: readonly number[] = Array.from(
     { length: CALENDAR_WEEK_VISIBLE_DAYS_MAX - CALENDAR_WEEK_VISIBLE_DAYS_MIN + 1 },
     (_, index) => CALENDAR_WEEK_VISIBLE_DAYS_MIN + index,
 );
 
-// ---------------------------------------------------------------------------
-// Days, weeks and months.
 
-/** The key the day maps use (month is 0-based): `${year}-${month}-${day}`. */
 export const calendarDateKey = (date: Date): string => (
     `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
 );
@@ -227,7 +200,7 @@ export const isAllDayScheduledTask = (task: Pick<Task, 'startTime'>): boolean =>
     Boolean(task.startTime) && !hasTimeComponent(task.startTime)
 );
 
-/** The locale tag calendar headings format with: the user's date format, language, calendar system and device locale. */
+
 export const getCalendarLocale = (params: {
     language: string;
     settings: Pick<AppSettings, 'dateFormat' | 'calendarSystem'> | undefined;
@@ -260,7 +233,7 @@ export function getCalendarMonthDates(monthDate: Date, calendarSystem: string): 
     return dates;
 }
 
-/** The month grid: blank cells up to the month's first weekday, then its days. */
+
 export function getCalendarMonthGrid(currentMonthDate: Date, monthDates: readonly Date[], weekStartIndex: number): (Date | null)[] {
     const firstDay = (currentMonthDate.getDay() - weekStartIndex + 7) % 7;
     const cells: (Date | null)[] = [];
@@ -283,11 +256,7 @@ export const getCalendarWeekDays = (weekStartTime: number): Date[] => Array.from
     return date;
 });
 
-/**
- * The window the screen shows, and the one to fetch external events for: the
- * week, 45 days from the selected day, or the month (day view included). A
- * "show future recurrence" task paints every occurrence in it.
- */
+
 export function getCalendarVisibleRange({
     calendarSystem,
     currentMonthDate,
@@ -316,10 +285,7 @@ export function getCalendarVisibleRange({
     return { rangeStart, rangeEnd };
 }
 
-// ---------------------------------------------------------------------------
-// Navigation.
 
-/** What the screen is showing: the mode, the selected day (null: none in month view) and a day of the visible month. */
 export type CalendarPeriodState = {
     viewMode: CalendarViewMode;
     selectedDate: Date | null;
@@ -328,11 +294,7 @@ export type CalendarPeriodState = {
 
 export type CalendarPeriodMove = 'previous' | 'next' | 'today';
 
-/**
- * Previous, next and Today: the month view moves its month; the day and week
- * views move the selected day by one day or one week (the month follows it);
- * Today selects today in every view. The schedule view only has Today.
- */
+
 export function moveCalendarPeriod(
     state: CalendarPeriodState,
     move: CalendarPeriodMove,
@@ -351,7 +313,7 @@ export function moveCalendarPeriod(
     return shiftCalendarSelectedDate(state, state.viewMode === 'week' ? direction * 7 : direction);
 }
 
-/** The selected day moved by `daysDelta`; the visible month follows it. Nothing moves without a selected day. */
+
 export function shiftCalendarSelectedDate(state: CalendarPeriodState, daysDelta: number): CalendarPeriodState {
     if (!state.selectedDate) return state;
     const next = new Date(state.selectedDate);
@@ -359,23 +321,17 @@ export function shiftCalendarSelectedDate(state: CalendarPeriodState, daysDelta:
     return { ...state, selectedDate: next, visibleMonthDate: next };
 }
 
-/** Switching mode: the day, week and schedule views select today when nothing is selected. */
+
 export function selectCalendarViewMode(state: CalendarPeriodState, viewMode: CalendarViewMode, now: Date = new Date()): CalendarPeriodState {
     if (!needsCalendarSelectedDate(viewMode) || state.selectedDate) return { ...state, viewMode };
     const next = new Date(now);
     return { viewMode, selectedDate: next, visibleMonthDate: next };
 }
 
-// ---------------------------------------------------------------------------
-// Labels.
 
 const translateWith = (t: Translate) => (key: string, values?: I18nTemplateValues) => resolveI18nText(t, key, { values });
 
-/**
- * The heading dates of the calendar: the month title, a week's day range, the
- * day title, the details title, a short date, a month cell's spoken date, and
- * the short weekday labels (index 0 is Sunday).
- */
+
 export type CalendarDates = {
     monthYear: (date: Date) => string;
     monthDay: (date: Date) => string;
@@ -386,7 +342,7 @@ export type CalendarDates = {
     weekdays: readonly string[];
 };
 
-/** Headings as the React Native screen draws them: `toLocaleDateString` under the user's locale tag. */
+
 export const createCalendarLocaleDates = (locale: string): CalendarDates => ({
     monthYear: (date) => date.toLocaleDateString(locale, { year: 'numeric', month: 'long' }),
     monthDay: (date) => date.toLocaleDateString(locale, { month: 'short', day: 'numeric' }),
@@ -397,20 +353,13 @@ export const createCalendarLocaleDates = (locale: string): CalendarDates => ({
     weekdays: getShortWeekdayLabels(locale),
 });
 
-/**
- * Headings from date-fns patterns through the user's DateFormatter, with no
- * Intl: the native host's engine has none. The patterns follow the locale's
- * day/month order and give the React Native screen's English text (en-US and
- * en-GB); other languages get date-fns's words in the same order. Weekday
- * labels follow getShortWeekdayLabels' rules (no trailing period, three
- * characters, or the narrow form when three would collide).
- */
+
 export const createCalendarPatternDates = (formatDate: DateFormatter): CalendarDates => {
     const sample = formatDate(new Date(2001, 10, 22), 'P');
     const dayFirst = sample.indexOf('22') !== -1 && sample.indexOf('11') !== -1 && sample.indexOf('22') < sample.indexOf('11');
     const pattern = (monthFirst: string, dayFirstPattern: string) => (date: Date) => formatDate(date, dayFirst ? dayFirstPattern : monthFirst);
-    // Index 0 is Sunday (2023-01-01), like getShortWeekdayLabels. Built in the current time
-    // zone on each call; a module-load Date shifts every label by a day after a zone change.
+
+
     const weekdayLabels = (token: string) => Array.from({ length: 7 }, (_, day) => formatDate(new Date(2023, 0, 1 + day), token));
     const short = weekdayLabels('EEE').map((label) => label.replace(/\.+$/, ''));
     let weekdays = short;
@@ -435,7 +384,7 @@ export const formatCalendarWeekTitle = (weekDays: readonly Date[], dates: Calend
     `${dates.monthDay(weekDays[0])} - ${dates.monthDay(weekDays[6])}`
 );
 
-/** The month grid's weekday header, starting on the week's first day. */
+
 export const getCalendarDayNames = (dates: CalendarDates, weekStartIndex: number): string[] => (
     Array.from({ length: 7 }, (_, index) => dates.weekdays[(index + weekStartIndex) % 7])
 );
@@ -446,7 +395,7 @@ const formatWithToday = (label: string, date: Date, now: Date, today: string): s
     `${label}${isSameCalendarDate(date, now) ? ` · ${today}` : ''}`
 );
 
-/** The selected day's month-details title, the planning list's subtitle and the day view's title. */
+
 export function formatCalendarSelectedDateLabels(selectedDate: Date | null, options: { dates: CalendarDates; t: Translate; now?: Date }) {
     if (!selectedDate) return { long: '', planning: '', dayTitle: '' };
     const { dates, t } = options;
@@ -458,7 +407,7 @@ export function formatCalendarSelectedDateLabels(selectedDate: Date | null, opti
     };
 }
 
-/** The schedule view's day heading ("Wed, Oct 28 · Today"). */
+
 export const formatCalendarScheduleDayTitle = (date: Date, options: { dates: CalendarDates; t: Translate; now?: Date }): string => formatWithToday(
     options.dates.shortDate(date),
     date,
@@ -467,10 +416,6 @@ export const formatCalendarScheduleDayTitle = (date: Date, options: { dates: Cal
 );
 
 
-/**
- * A month cell's spoken label: the date, then its task and event counts.
- * Counts use each locale's singular and plural forms.
- */
 export const getCalendarMonthCellAccessibilityLabel = (
     date: Date,
     counts: { taskCount: number; eventCount: number },
@@ -491,7 +436,7 @@ export const getCalendarModeOptions = (t: Translate): { value: CalendarViewMode;
     ];
 };
 
-/** The previous/next labels of a mode's period navigation, and Today. */
+
 export const getCalendarNavigationLabels = (viewMode: CalendarViewMode, t: Translate) => {
     const tr = translateWith(t);
     const unit = viewMode === 'day' ? 'Day' : viewMode === 'week' ? 'Week' : 'Month';
@@ -502,7 +447,7 @@ export const getCalendarNavigationLabels = (viewMode: CalendarViewMode, t: Trans
     };
 };
 
-/** The screen's fixed labels, in the current language. */
+
 export const getCalendarScreenText = (t: Translate) => {
     const tr = translateWith(t);
     return {
@@ -525,18 +470,18 @@ export const getCalendarScreenText = (t: Translate) => {
         weekDensityHint: tr('calendar.mobile.swipeUpOrDownToShowMoreOrFewerDays'),
         weekDensityMore: tr('calendar.mobile.showMoreDays'),
         weekDensityFewer: tr('calendar.mobile.showFewerDays'),
-        /** The density slider's spoken value ("5 days"). */
+
         weekDensityValue: (dayCount: number) => (dayCount === 1
             ? tr('calendar.mobile.1Day')
             : tr('calendar.mobile.visibleDayCount', { dayCount })),
-        /** A density tick's label ("Show 5 visible days"). */
+
         weekDensityChoice: (dayCount: number) => (dayCount === 1
             ? tr('calendar.mobile.show1VisibleDay')
             : tr('calendar.mobile.showVisibleDayCount', { dayCount })),
     };
 };
 
-/** The task composer's fixed labels; the quick-add help drops the priority and estimate tokens while their features are off. */
+
 export const getCalendarComposerText = (t: Translate, options: { priorities: boolean; timeEstimates: boolean }) => {
     const tr = translateWith(t);
     return {
@@ -555,15 +500,14 @@ export const getCalendarComposerText = (t: Translate, options: { priorities: boo
     };
 };
 
-/** A duration chip: "15m", "1h", "1.5h". */
+
 export const formatCalendarDurationChip = (minutes: number): string => {
     if (minutes < 60) return `${minutes}m`;
     const hours = minutes / 60;
     return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`;
 };
 
-// A localized "10:00 AM" wraps and clips in the 56px timeline gutter, so drop the :00 an hour
-// line already implies. 24-hour locales ("13:00") fit as-is and would be left a bare "13".
+
 export const compactHourLabel = (label: string): string => (
     /[^\d\s.:]/.test(label) ? label.replace(/[.:]00/, '') : label
 );
@@ -573,7 +517,7 @@ export const formatCalendarHourLabel = (hour: number, formatDate: DateFormatter)
     return compactHourLabel(formatDate(sample, 'p'));
 };
 
-/** The timeline's hour labels, midnight to midnight. */
+
 export const getCalendarHourLabels = (formatDate: DateFormatter): string[] => Array.from(
     { length: CALENDAR_DAY_END_HOUR - CALENDAR_DAY_START_HOUR + 1 },
     (_, index) => formatCalendarHourLabel(CALENDAR_DAY_START_HOUR + index, formatDate),
@@ -590,7 +534,7 @@ export const formatCalendarClockRange = (start: Date, end: Date, formatDate: Dat
 
 const PROJECTED_RECURRENCE_LABEL_DATE_FORMAT = 'MMM d';
 
-/** "Projected · Oct 31": the label a projected occurrence carries after its title or time. */
+
 export const getProjectedRecurrenceDisplayLabel = (task: Task, projectedLabel: string, formatDate: DateFormatter): string => {
     const occurrenceDateLabel = formatDate(getTaskCalendarOccurrenceDate(task), PROJECTED_RECURRENCE_LABEL_DATE_FORMAT);
     return occurrenceDateLabel ? `${projectedLabel} · ${occurrenceDateLabel}` : projectedLabel;
@@ -598,7 +542,7 @@ export const getProjectedRecurrenceDisplayLabel = (task: Task, projectedLabel: s
 
 export const getCalendarProjectedLabel = (t: Translate): string => translateWith(t)('calendar.projectedRecurrence');
 
-/** "Title · Projected · Oct 31" for a projected occurrence, the title otherwise. */
+
 export const getCalendarItemTitle = (item: CalendarDayItem, projectedLabel: string, formatDate: DateFormatter): string => (
     item.kind !== 'event' && isProjectedRecurringTask(item.task)
         ? `${item.title} · ${getProjectedRecurrenceDisplayLabel(item.task, projectedLabel, formatDate)}`
@@ -611,7 +555,7 @@ const getCalendarTimedDueLabel = (task: Task, options: { t: Translate; formatDat
     return due ? `${options.t('calendar.due')} ${options.formatDate(due, 'p')}` : '';
 };
 
-/** One compact month row keeps the due clock, including a same-day scheduled task. */
+
 export function getCalendarMonthItemTitle(
     item: CalendarDayItem,
     date: Date,
@@ -623,11 +567,11 @@ export function getCalendarMonthItemTitle(
     const due = safeParseDueDate(item.task.dueDate);
     if (!due || !isSameCalendarDate(due, date)) return title;
     if (!hasTimeComponent(item.task.dueDate)) return title;
-    // Keep the exact clock visible even when a compact row truncates its title.
+
     return `${options.formatDate(due, 'p')} · ${options.t('calendar.due')} · ${title}`;
 }
 
-/** Appends the projected label to a time or kind label. */
+
 export const withCalendarProjectedLabel = (label: string, task: Task, projectedLabel: string, formatDate: DateFormatter): string => (
     isProjectedRecurringTask(task) ? `${label} · ${getProjectedRecurrenceDisplayLabel(task, projectedLabel, formatDate)}` : label
 );
@@ -651,15 +595,7 @@ export const getCalendarComposerErrorText = (error: CalendarComposerError, t: Tr
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tasks and events by day.
 
-/**
- * Done, archived and reference tasks are excluded here: they belong to the
- * completed look-back, filed by completion date, not to the scheduled/deadline
- * buckets (#955). Recurring tasks that show their future occurrences paint
- * every occurrence in the visible range.
- */
 export const getCalendarRangeTasks = (
     visibleTasks: readonly Task[],
     range: { rangeStartMs: number; rangeEndMs: number },
@@ -670,7 +606,7 @@ export const getCalendarRangeTasks = (
     projectedAtIso,
 );
 
-/** Tasks the planning, search and composer lists offer, by title. */
+
 export const getCalendarSchedulableTasks = (visibleTasks: readonly Task[]): Task[] => (
     visibleTasks.filter(isSchedulableCalendarTask).sort((a, b) => a.title.localeCompare(b.title))
 );
@@ -695,7 +631,7 @@ export const indexCalendarDeadlineTasks = (tasks: readonly Task[]): Map<string, 
     return map;
 };
 
-/** Finished work on the day it was completed, when the look-back is on (#955), in the area filter. */
+
 export const indexCalendarCompletedTasks = (
     allTasks: readonly Task[],
     options: {
@@ -717,7 +653,7 @@ export const indexCalendarCompletedTasks = (
     return map;
 };
 
-/** An event on every local day it touches; one that ends at midnight does not reach the next day. */
+
 export const indexCalendarEvents = (events: readonly ExternalCalendarEvent[]): Map<string, ExternalCalendarEvent[]> => {
     const map = new Map<string, ExternalCalendarEvent[]>();
     for (const event of events) {
@@ -766,12 +702,12 @@ export const getCalendarDayItems = (
     options: { preserveTimedDeadlines?: boolean } = {},
 ): CalendarDayItem[] => buildCalendarDayItems({ ...lists, ...options });
 
-/** Month details use the same scheduled-over-deadline choice as other views. */
+
 export const getCalendarDetailsTaskLists = (lists: Pick<CalendarDayLists, 'deadlines' | 'scheduled'>) => {
     return { deadlines: getCalendarDistinctDeadlines(lists.deadlines, lists.scheduled), scheduled: lists.scheduled };
 };
 
-/** A day's distinct tasks: scheduled, due or completed that day. */
+
 export const countCalendarDayTasks = (lists: CalendarDayLists): number => {
     const ids = new Set<string>();
     for (const task of lists.deadlines) ids.add(task.id);
@@ -780,7 +716,7 @@ export const countCalendarDayTasks = (lists: CalendarDayLists): number => {
     return ids.size;
 };
 
-/** The day view's timed tasks: scheduled at a clock time, still open. */
+
 export const getCalendarDayTimedTasks = (scheduled: readonly Task[]): Task[] => scheduled.filter((task) => (
     isTimedScheduledTask(task)
     && !task.deletedAt
@@ -788,7 +724,7 @@ export const getCalendarDayTimedTasks = (scheduled: readonly Task[]): Task[] => 
     && task.status !== 'reference'
 ));
 
-/** Items without a clock time: date-only deadlines, completions, starts and all-day events. */
+
 export const isCalendarAllDayItem = (item: CalendarDayItem): boolean => (
     (item.kind === 'deadline' && !hasTimeComponent(item.task.dueDate))
     || item.kind === 'completed'
@@ -801,7 +737,7 @@ export const isCalendarTimedItem = (item: CalendarDayItem): boolean => (
     || (item.kind === 'event' && !item.event.allDay)
 );
 
-/** The schedule view: up to 18 days with items, from `start` over the next 45 days. */
+
 export function getCalendarScheduleSections(
     start: Date,
     itemsForDate: (date: Date) => CalendarDayItem[],
@@ -818,13 +754,7 @@ export function getCalendarScheduleSections(
     return sections;
 }
 
-// ---------------------------------------------------------------------------
-// External calendars.
 
-/**
- * A calendar's color: the user's pick, then the feed's own, then a stable
- * palette color for its id (#974), shown in the theme's variant.
- */
 export const getCalendarSourceColor = (sourceId: string, options: { override?: string; feedColor?: string; theme?: string } = {}): string => (
     themeExternalCalendarDisplayColor(resolveExternalCalendarColor(sourceId, options.override, options.feedColor), options.theme)
 );
@@ -841,7 +771,7 @@ export const getCalendarSourceNames = (calendars: readonly ExternalCalendarSubsc
     new Map(calendars.map((calendar) => [calendar.id, calendar.name]))
 );
 
-/** An event's time: "All day", or its clock range. */
+
 export const formatCalendarEventTime = (event: ExternalCalendarEvent, options: { t: Translate; formatDate: DateFormatter }): string => {
     if (event.allDay) return options.t('calendar.allDay');
     const start = safeParseDate(event.start);
@@ -849,13 +779,10 @@ export const formatCalendarEventTime = (event: ExternalCalendarEvent, options: {
     return start && end ? formatCalendarClockRange(start, end, options.formatDate) : '';
 };
 
-// ---------------------------------------------------------------------------
-// Surfaces. Tones name the theme color a part is drawn in; `source` is the
-// event's calendar color.
 
 export type CalendarTone = 'tint' | 'danger' | 'secondary' | 'text' | 'input' | 'none' | 'source';
 
-/** A month cell: which items it previews, whether it shows the counts, and its spoken label. */
+
 export function getCalendarMonthCell(
     date: Date,
     lists: CalendarDayLists,
@@ -864,8 +791,8 @@ export function getCalendarMonthCell(
     const items = getCalendarDayItems(lists);
     const taskCount = countCalendarDayTasks(lists);
     const eventCount = lists.events.length;
-    // One-off items claim the cell's few visible rows before projected
-    // recurring occurrences, which repeat every day.
+
+
     const previewItems = orderCalendarDayItemsForLimitedSlots(items)
         .slice(0, items.length >= CALENDAR_MONTH_PREVIEW_HIDDEN_AT ? 0 : CALENDAR_MONTH_PREVIEW_ITEMS);
     return {
@@ -878,7 +805,7 @@ export function getCalendarMonthCell(
     };
 }
 
-/** How a month cell draws one preview item. */
+
 export const getCalendarMonthPreviewTones = (item: CalendarDayItem) => {
     const projected = item.kind !== 'event' && isProjectedRecurringTask(item.task);
     return {
@@ -898,12 +825,7 @@ export const getCalendarMonthPreviewTones = (item: CalendarDayItem) => {
     };
 };
 
-/**
- * An all-day lane capped at `limit` chips, as desktop draws it: one-off items
- * take the slots before projected recurring ones, and `hiddenCount` is what a
- * "+N more" chip counts. `expanded` shows every item; `hiddenCount` stays the
- * collapsed count so the screen can keep offering the toggle.
- */
+
 export function getCalendarAllDayLane(items: readonly CalendarDayItem[], limit: number, expanded = false) {
     const all = orderCalendarDayItemsForLimitedSlots(items.filter(isCalendarAllDayItem));
     return {
@@ -912,20 +834,15 @@ export function getCalendarAllDayLane(items: readonly CalendarDayItem[], limit: 
     };
 }
 
-/** The overflow chip's label: "+2 more", as desktop writes it. */
+
 export const formatCalendarAllDayMore = (hiddenCount: number, t: Translate): string => `+${hiddenCount} ${t('calendar.more')}`;
 
-/** The week view's all-day lane: its first three items; a projected one cannot be pressed. */
+
 export const getCalendarWeekAllDayItems = (items: readonly CalendarDayItem[]): CalendarDayItem[] => (
     getCalendarAllDayLane(items, CALENDAR_WEEK_ALL_DAY_ITEMS).items
 );
 
-/**
- * An all-day chip, in the week lane and the day card alike, as desktop draws
- * it: a fill with a colored left edge (the event's calendar, the tint for a
- * scheduled or projected task, danger for a deadline), and a completed item
- * crossed out and muted.
- */
+
 export const getCalendarWeekAllDayTones = (item: CalendarDayItem) => {
     const projected = item.kind !== 'event' && isProjectedRecurringTask(item.task);
     const completed = item.kind === 'completed';
@@ -945,13 +862,13 @@ export const getCalendarWeekAllDayTones = (item: CalendarDayItem) => {
     };
 };
 
-/** The day view's pinned all-day card: the week lane's chips, but a projected item still opens; completed items have no action. */
+
 export const getCalendarDayAllDayTones = (item: CalendarDayItem) => ({
     ...getCalendarWeekAllDayTones(item),
     disabled: item.kind === 'completed',
 });
 
-/** A schedule view row's time line and spoken label. */
+
 export function getCalendarScheduleItemText(
     item: CalendarDayItem,
     options: {
@@ -1001,7 +918,7 @@ export const getCalendarScheduleItemTones = (item: CalendarDayItem) => {
     };
 };
 
-/** A month-details row of a deadline or scheduled task: its time line, and whether it offers Done. */
+
 export function getCalendarDetailsTaskRow(
     task: Task,
     kind: 'deadline' | 'scheduled',
@@ -1029,7 +946,7 @@ export function getCalendarDetailsTaskRow(
     };
 }
 
-/** A month-details event row: the title with its calendar's name, and its time. */
+
 export const getCalendarDetailsEventRow = (
     event: ExternalCalendarEvent,
     options: { t: Translate; formatDate: DateFormatter; sourceNames: Map<string, string> },
@@ -1045,7 +962,7 @@ const clampToDay = (startMs: number, endMs: number, dayStartMs: number, dayEndMs
     start: Math.max(startMs, dayStartMs),
     end: Math.min(endMs, dayEndMs),
 });
-/** Timeline coordinates are local clock minutes, including across a DST change. */
+
 export const getCalendarWallMinutes = (dayStart: Date, instant: Date): number => (
     instant.getFullYear() !== dayStart.getFullYear() || instant.getMonth() !== dayStart.getMonth() || instant.getDate() !== dayStart.getDate()
         ? 24 * 60
@@ -1060,32 +977,29 @@ const layoutInput = (id: string, startMs: number, endMs: number, dayStartMs: num
 
 export type CalendarTimelineEvent = {
     event: ExternalCalendarEvent;
-    /** Clamped to the day. */
+
     start: Date;
     end: Date;
-    /** The clamped part's clock range. */
+
     timeLabel: string;
     layout: CalendarTimedLayout | undefined;
 };
 
 export type CalendarTimelineTask = {
     task: Task;
-    /** The task's own start (not clamped). */
+
     start: Date;
     durationMinutes: number;
-    /** Clamped to the day. */
+
     displayStart: Date;
     displayEnd: Date;
     layout: CalendarTimedLayout | undefined;
     projected: boolean;
-    /** "9:00 AM-9:30 AM", with the projected label after it for an occurrence. */
+
     timeLabel: string;
 };
 
-/**
- * The day view's timeline: its timed events (in feed order), then its timed
- * tasks, each clamped to the day, side by side where they overlap.
- */
+
 export function getCalendarDayTimeline(options: {
     events: readonly ExternalCalendarEvent[];
     tasks: readonly Task[];
@@ -1158,7 +1072,7 @@ export type CalendarWeekTimedEntry =
     };
 type WithoutLayout<T> = T extends unknown ? Omit<T, 'layout'> : never;
 
-/** A week column's timed items in time order, clamped to the day, side by side where they overlap. */
+
 export function getCalendarWeekTimedEntries(options: {
     items: readonly CalendarDayItem[];
     dayStart: Date;
@@ -1209,7 +1123,7 @@ export function getCalendarWeekTimedEntries(options: {
         : { ...entry, layout: layouts.get(`task:${entry.item.task.id}`) }));
 }
 
-/** The day and week start of the timeline for `date`. */
+
 export const getCalendarDayBounds = (date: Date): { dayStart: Date; dayEnd: Date } => {
     const dayStart = new Date(date);
     dayStart.setHours(CALENDAR_DAY_START_HOUR, 0, 0, 0);
@@ -1218,7 +1132,7 @@ export const getCalendarDayBounds = (date: Date): { dayStart: Date; dayEnd: Date
     return { dayStart, dayEnd };
 };
 
-/** Minutes into the timeline for the current-time line (drawn on today only), null outside it. */
+
 export const getCalendarNowMinutes = (now: Date): number | null => {
     const minutes = (now.getHours() - CALENDAR_DAY_START_HOUR) * 60 + now.getMinutes();
     if (minutes < 0 || minutes > CALENDAR_DAY_MINUTES) return null;
@@ -1231,8 +1145,6 @@ export const snapCalendarTimelineMinutes = (rawMinutes: number, snapMinutes: num
     return Math.max(0, Math.min(CALENDAR_DAY_MINUTES - CALENDAR_TAP_DURATION_MINUTES, snappedMinutes));
 };
 
-// ---------------------------------------------------------------------------
-// Planning, search and free slots.
 
 export const getCalendarPlanningTasks = (
     visibleTasks: readonly Task[],
@@ -1250,12 +1162,12 @@ const matchingTitles = (tasks: readonly Task[], query: string, limit: number): T
     return tasks.filter((task) => !needle || task.title.toLowerCase().includes(needle)).slice(0, limit);
 };
 
-/** The schedule search under a selected day: nothing until something is typed. */
+
 export const getCalendarSearchResults = (schedulableTasks: readonly Task[], query: string): Task[] => (
     query.trim() ? matchingTitles(schedulableTasks, query, CALENDAR_SEARCH_LIMIT) : []
 );
 
-/** The composer's existing-task list: every schedulable task until something is typed. */
+
 export const getCalendarComposerCandidates = (schedulableTasks: readonly Task[], query: string): Task[] => (
     matchingTitles(schedulableTasks, query, CALENDAR_COMPOSER_CANDIDATE_LIMIT)
 );
@@ -1268,7 +1180,7 @@ type SlotOptions = {
     now?: Date;
 };
 
-/** The first free slot of the working day (8–23, from now on today), snapped to five minutes. */
+
 export const findCalendarFreeSlot = (day: Date, durationMinutes: number, options: SlotOptions): Date | null => findFreeSlotForDay({
     day,
     dayEndHour: DEFAULT_CALENDAR_DAY_END_HOUR,
@@ -1282,7 +1194,7 @@ export const findCalendarFreeSlot = (day: Date, durationMinutes: number, options
     timeEstimatesEnabled: options.timeEstimatesEnabled,
 });
 
-/** Whether `startTime` for `durationMinutes` overlaps nothing on its day. */
+
 export const isCalendarSlotFree = (day: Date, startTime: Date, durationMinutes: number, options: SlotOptions): boolean => isSlotFreeForDay({
     day,
     dayEndHour: CALENDAR_DAY_END_HOUR,
@@ -1296,15 +1208,12 @@ export const isCalendarSlotFree = (day: Date, startTime: Date, durationMinutes: 
     timeEstimatesEnabled: options.timeEstimatesEnabled,
 });
 
-/** A planning or search row's second line: "Schedule · 10:00 AM-10:30 AM", or "Schedule" when the day is full. */
+
 export const getCalendarScheduleActionLabel = (slot: Date | null, durationMinutes: number, options: { t: Translate; formatDate: DateFormatter }): string => {
     const slotLabel = slot ? formatCalendarTimeRange(slot, durationMinutes, options.formatDate) : null;
     return slotLabel ? `${options.t('calendar.scheduleAction')} · ${slotLabel}` : options.t('calendar.scheduleAction');
 };
 
-// ---------------------------------------------------------------------------
-// The composer as the screen holds it: the shared state plus the picked day
-// and the free-text start time.
 
 export type CalendarViewComposerState = CalendarComposerState & {
     date: Date;
@@ -1326,19 +1235,17 @@ export const isCalendarComposerSaveDisabled = (composer: CalendarComposerState |
     composer ? (composer.mode === 'new' ? !composer.title.trim() : !composer.selectedTaskId) : true
 );
 
-/** The time fields' placeholders: 9:00 and 9:30 in the user's clock. */
+
 export const getCalendarComposerPlaceholders = (formatDate: DateFormatter) => ({
     start: formatDate(new Date(2000, 0, 1, 9, 0), 'p', '09:00'),
     end: formatDate(new Date(2000, 0, 1, 9, 30), 'p', '09:30'),
 });
 
-/** Show a derived time in the user's clock while preserving raw edits. */
+
 export const formatCalendarComposerClockValue = (value: string, date: Date | null, formatDate: DateFormatter): string => (
     date && value === formatCalendarTimeInputValue(date) ? formatDate(date, 'p', value) : value
 );
 
-// ---------------------------------------------------------------------------
-// Actions.
 
 export type CalendarSheetButton<Id extends string> = { id: Id; label: string; style: 'default' | 'destructive' | 'cancel' };
 
@@ -1346,11 +1253,7 @@ export type CalendarTaskSheet =
     | { kind: 'projected'; title: string; message: string; buttons: CalendarSheetButton<'ok'>[] }
     | { kind: 'actions'; title: string; buttons: CalendarSheetButton<'edit' | 'unschedule' | 'done' | 'delete' | 'cancel'>[] };
 
-/**
- * What pressing a task offers: Edit, Remove from calendar (when it has a
- * start), Done (while open), Delete and Cancel. A projected occurrence only
- * explains itself.
- */
+
 export function getCalendarTaskSheet(task: Task, t: Translate): CalendarTaskSheet {
     if (isProjectedRecurringTask(task)) {
         return {
@@ -1372,7 +1275,7 @@ export function getCalendarTaskSheet(task: Task, t: Translate): CalendarTaskShee
     return { kind: 'actions', title: task.title, buttons };
 }
 
-/** What pressing an event offers: Create task, Open in calendar (when the host can open it) and Cancel. */
+
 export function getCalendarEventSheet(event: ExternalCalendarEvent, options: { canOpen: boolean; t: Translate }) {
     const { t } = options;
     const buttons: CalendarSheetButton<'createTask' | 'openInCalendar' | 'cancel'>[] = [
@@ -1383,9 +1286,9 @@ export function getCalendarEventSheet(event: ExternalCalendarEvent, options: { c
     return { title: event.title || t('calendar.eventFallbackTitle'), buttons };
 }
 
-/** Done from the calendar also takes the task off today's focus. */
+
 export const CALENDAR_DONE_UPDATES: Readonly<Partial<Task>> = { status: 'done', isFocusedToday: false };
-/** Remove from calendar: the start goes; the due date stays. */
+
 export const CALENDAR_UNSCHEDULE_UPDATES: Readonly<Partial<Task>> = { startTime: undefined };
 
 export type CalendarToast = { tone: 'info' | 'warning' | 'success'; title: string; message: string; durationMs: number };
@@ -1399,11 +1302,7 @@ export const getCalendarToasts = (t: Translate) => ({
     openEventFailed: { tone: 'warning', title: t('calendar.cannotOpenEventTitle'), message: t('calendar.openFromCalendarApp'), durationMs: 4200 } as CalendarToast,
 });
 
-/**
- * A dragged block let go at `startMinutes` into its day. A projected
- * occurrence never moves; a slot that overlaps something is refused with the
- * time-conflict toast; otherwise the task starts there.
- */
+
 export function planCalendarTaskMove(options: {
     taskId: string;
     dayStartMs: number;
@@ -1420,12 +1319,12 @@ export function planCalendarTaskMove(options: {
     return { kind: 'move', updates: { startTime: nextStart.toISOString() } };
 }
 
-/** Convert minutes on a local calendar day to wall-clock time across DST. */
+
 export const getCalendarMovedStart = (dayStartMs: number, startMinutes: number, currentStart?: Date | null): Date => {
     const start = new Date(dayStartMs);
     if (currentStart && calendarDateKey(currentStart) === calendarDateKey(start)
         && getCalendarWallMinutes(start, currentStart) === startMinutes) return currentStart;
-    // ponytail: a new drop onto a repeated clock minute picks its first occurrence; choosing the second needs a fold-aware gesture coordinate.
+
     start.setHours(0, startMinutes, 0, 0);
     return start;
 };

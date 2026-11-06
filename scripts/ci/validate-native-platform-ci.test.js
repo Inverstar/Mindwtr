@@ -19,7 +19,7 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(workflow.match(/- "packages\/core\/package\.json"/g)).toHaveLength(2);
   expect(workflow).toContain('android_client: ${{ steps.filter.outputs.android_client }}');
   expect(workflow).toContain('apps/android-native/*|apps/mobile/modules/sync-file-lock/*|apps/mobile/modules/sync-file-transition-cas/*|packages/core/src/*|packages/core/package.json|');
-  // The native app builds RN's File Sync lock C++ (S5): its job installs the NDK and CMake and checks the packaged JNI.
+
   expect(workflow).toContain('ndk;27.1.12297006 cmake;3.22.1');
   expect(workflow).toContain('name: Verify the native app\'s File Sync lock JNI');
   const clientJob = parse(workflow).jobs['android-client'];
@@ -32,8 +32,8 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(
     workflow.match(/- "apps\/mobile\/modules\/\*\*\/expo-module\.config\.json"/g),
   ).toHaveLength(2);
-  // The maintained iOS sources live outside the gitignored generated ios/
-  // project, so the triggers must name them directly or edits skip CI.
+
+
   expect(workflow.match(/- "apps\/mobile\/ios-app-intents\/\*\*"/g)).toHaveLength(2);
   expect(workflow.match(/- "apps\/mobile\/widgets-ios\/\*\*"/g)).toHaveLength(2);
   expect(workflow.match(/- "scripts\/ci\/setup-ruby\.sh"/g)).toHaveLength(2);
@@ -45,8 +45,8 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(workflow).toMatch(
     /apps\/mobile\/modules\/\*\/ios\/\*\|apps\/mobile\/modules\/\*\/expo-module\.config\.json\|/,
   );
-  // The generated projects are gitignored; filters on them never match a
-  // committed diff and only feign coverage.
+
+
   expect(workflow).not.toContain("apps/mobile/ios/**");
   expect(workflow).not.toContain("apps/mobile/android/**");
 
@@ -113,6 +113,8 @@ test("native CI generates clean projects and compiles Android and iOS sources", 
   expect(iosJob).toContain("name: Validate generated Watch Xcode project");
   expect(iosJob).toContain("name: Typecheck Watch receiver against the iOS SDK");
   expect(iosJob).toContain("apps/mobile/modules/watch-connectivity/ios/MindwtrWatchConnectivityReceiver.swift");
+  expect(iosJob).toContain("apps/mobile/modules/watch-connectivity/ios/MindwtrWatchPendingCommand.swift");
+  expect(iosJob).toContain("apps/mobile/modules/watch-connectivity/ios/MindwtrWatchRetainedAudio.swift");
   expect(workflow).toContain("CODE_SIGNING_ALLOWED=NO");
   expect(iosJob).toContain("name: Run attachment installer Swift recovery tests");
   expect(iosJob).toContain(
@@ -471,7 +473,7 @@ test("desktop Rust pull requests check and test the native library on Windows", 
   expect(windowsJob).toContain("needs: changes");
   expect(windowsJob).toContain("runs-on: windows-latest");
   expect(windowsJob).toContain(
-    "uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable",
+    "uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7",
   );
   expect(windowsJob).toContain("RUSTFLAGS: -C target-feature=-crt-static");
   expect(windowsJob).toContain(

@@ -4,10 +4,10 @@ struct CalendarScreen: View {
     @ObservedObject var model: CoreModel
     let palette: AppPalette
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var allDayExpanded = false
     @State private var weekOffset: CGFloat = 0
     @State private var measuredWeekdays = CalendarWeekdayMeasurements()
-    // RN's day card past its "+N more", kept across days as RN keeps it.
-    @State private var allDayExpanded = false
+
     @FocusState private var queryFocused: Bool
     @ScaledMetric(relativeTo: .body) private var monthCellHeight: CGFloat = 86
     @ScaledMetric(relativeTo: .body) private var weekHeaderHeight: CGFloat = 56
@@ -17,7 +17,7 @@ struct CalendarScreen: View {
     private var text: CoreObject { view.object("text") }
     private var entries: [CoreObject] { view.objects("items") }
     private var days: [CoreObject] { entries.filter { $0.text("type") == "day" } }
-    // RN geometry constants only; all time coordinates and overlap percentages come from core.
+
     private let pixelsPerMinute: CGFloat = 1.4
     private let gutter: CGFloat = 56
     private var hours: [String] { content["hourLabels"] as? [String] ?? [] }
@@ -28,7 +28,7 @@ struct CalendarScreen: View {
             state.text("selectedDate") + ":" + state.text("visibleMonth")
     }
     private var initialTimelineOffset: CGFloat {
-        // Core wall-clock minutes select the first-entry default, never a saved viewport.
+
         let minute = (content["nowMinutes"] as? NSNumber)?.doubleValue ?? 0
         return CGFloat(max(0, Int(minute / 60) - 1)) * 60 * pixelsPerMinute
     }
@@ -37,11 +37,18 @@ struct CalendarScreen: View {
         return Binding(get: { model.calendarViewportAnchors[key] }, set: { model.calendarViewportAnchors[key] = $0 })
     }
 
+    private var allDayListCap: CGFloat { dynamicTypeSize.isAccessibilitySize ? 260 : 200 }
+    private var minimumContentHeight: CGFloat {
+        let previous = max(320, weekHeaderHeight + allDayRowHeight + 4 + 48 + 160)
+        guard content.text("mode") == "day", entries.contains(where: { $0.text("type") == "item" && $0.text("lane") == "allDay" }) else { return previous }
+        return max(previous, allDayListCap + 2 * max(44, allDayRowHeight) + 28 + 160 + 48)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             if geometry.size.height < 360 || dynamicTypeSize.isAccessibilitySize {
                 ScrollView {
-                    calendarLayout(contentHeight: max(320, weekHeaderHeight + allDayRowHeight + 4 + 48 + 160))
+                    calendarLayout(contentHeight: minimumContentHeight)
                 }
                 .accessibilityIdentifier("calendar-layout-scroll")
             } else {
@@ -258,7 +265,7 @@ struct CalendarScreen: View {
         }
         .frame(width: canvasWidth, height: height)
         .accessibilityIdentifier("calendar-month-grid")
-        .refreshable { await model.refresh() }
+        .refreshable { await model.pullToRefresh() }
     }
 
     private func monthCell(_ cell: CoreObject, compact: Bool) -> some View {
@@ -321,10 +328,9 @@ struct CalendarScreen: View {
     private var day: some View {
         VStack(spacing: 0) {
             let allDay = entries.filter { $0.text("type") == "item" && $0.text("lane") == "allDay" }
+            let limit = content.number("allDayLimit")
+            let shown = !allDayExpanded && limit > 0 ? Array(allDay.prefix(limit)) : allDay
             if !allDay.isEmpty {
-                // Core sends every all-day item; collapsed, RN draws core's first allDayLimit and a "+N more" that expands in place.
-                let more = content.text("allDayMore")
-                let shown = allDayExpanded || more.isEmpty ? allDay : Array(allDay.prefix(content.number("allDayLimit")))
                 VStack(alignment: .leading, spacing: 4) {
                     Text(text.text("allDay")).rnFont(12, .semibold).foregroundStyle(palette.secondary)
                     ScrollView {
@@ -333,13 +339,17 @@ struct CalendarScreen: View {
                                 CalendarItemButton(item: shown[index].object("item"), model: model, palette: palette)
                             }
                         }
-                    }.frame(maxHeight: dynamicTypeSize.isAccessibilitySize ? 260 : 200)
-                    if !more.isEmpty {
+                    }
+                    .frame(maxHeight: allDayListCap).accessibilityIdentifier("calendar-all-day-items")
+                    if !content.text("allDayMore").isEmpty {
                         Button { allDayExpanded.toggle() } label: {
-                            Text(allDayExpanded ? text.text("allDayLess") : more).rnFont(12, .semibold).foregroundStyle(palette.secondary)
-                                .frame(minHeight: 44).contentShape(Rectangle())
+                            Text(allDayExpanded ? text.text("allDayLess") : content.text("allDayMore"))
+                                .rnFont(13, .semibold).fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain).accessibilityIdentifier("calendar-all-day-more")
+                        .buttonStyle(.plain).foregroundStyle(palette.secondary).disabled(!model.calendarActionsEnabled)
+                        .accessibilityValue(model.label(allDayExpanded ? "markdown.collapse" : "markdown.expand"))
+                        .accessibilityIdentifier("calendar-all-day-more")
                     }
                 }.padding(10).background(palette.card)
             }
@@ -370,8 +380,7 @@ struct CalendarScreen: View {
             let columnWidth = max(entries.contains { $0.text("lane") == "deadlineMarker" } ? 260 : 44, (geometry.size.width - gutter) / CGFloat(max(1, content.number("visibleDays"))))
             let canvasWidth = gutter + columnWidth * CGFloat(days.count)
             let allDayCount = days.map { day in
-                entries.filter { $0.text("type") == "item" && $0.text("lane") == "allDay" && $0.text("dayKey") == day.text("key") }.count
-                    + (day.text("allDayMore").isEmpty ? 0 : 1)
+                entries.filter { $0.text("type") == "item" && $0.text("lane") == "allDay" && $0.text("dayKey") == day.text("key") }.count + (day.text("allDayMore").isEmpty ? 0 : 1)
             }.max() ?? 0
             let visibleAllDayRows = min(allDayCount, geometry.size.height < 360 || dynamicTypeSize.isAccessibilitySize ? 1 : 2)
             let allDayHeight = CGFloat(visibleAllDayRows) * max(44, allDayRowHeight) + 4
@@ -408,17 +417,18 @@ struct CalendarScreen: View {
                                         ForEach(items.indices, id: \.self) { itemIndex in
                                             CalendarItemButton(item: items[itemIndex].object("item"), model: model, palette: palette, compact: true)
                                         }
-                                        // Core's "+N more": the hidden items live in this day's own view.
                                         if !days[index].text("allDayMore").isEmpty {
                                             Button { navigate(days[index].object("opens")) } label: {
-                                                Text(days[index].text("allDayMore")).rnFont(10, .semibold).foregroundStyle(palette.secondary)
+                                                Text(days[index].text("allDayMore")).rnFont(11, .semibold)
+                                                    .fixedSize(horizontal: false, vertical: true)
                                                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                                             }
-                                            .buttonStyle(.plain).disabled(!model.calendarActionsEnabled)
+                                            .buttonStyle(.plain).foregroundStyle(palette.secondary).disabled(!model.calendarActionsEnabled)
                                             .accessibilityIdentifier("calendar-week-all-day-more-" + days[index].text("key"))
                                         }
                                     }.padding(2)
                                 }.frame(width: columnWidth, height: allDayHeight)
+                                    .accessibilityIdentifier("calendar-week-all-day-" + days[index].text("key"))
                             }
                         }.overlay(alignment: .bottom) { palette.border.frame(height: 1) }
                     }
@@ -564,8 +574,7 @@ struct CalendarScreen: View {
     }
 }
 
-// iOS 16 ScrollViewReader restores a measured content anchor. The saved value uses
-// timeline minutes or day-column units so a size change never reuses stale pixels.
+
 private struct CalendarAnchoredScroll<Content: View>: View {
     let axis: Axis.Set
     @Binding var anchor: Double?
@@ -602,7 +611,7 @@ private struct CalendarAnchoredScroll<Content: View>: View {
                     let geometryChanged = restoredGeometry?.contentLength != position.contentLength
                         || restoredGeometry?.viewportLength != position.viewportLength
                         || restoredGeometry?.pointsPerUnit != position.pointsPerUnit
-                    // Keep the logical minute/day even when a rotation temporarily fits all content.
+
                     if anchor == nil { anchor = Double(initialOffset / position.pointsPerUnit) }
                     if geometryChanged {
                         restoredGeometry = position
@@ -615,8 +624,8 @@ private struct CalendarAnchoredScroll<Content: View>: View {
                             if start < target { target = start }
                             else if end > target + position.viewportLength { target = end - position.viewportLength }
                             target = min(maximum, max(0, target))
-                            // Preserve the manual logical offset unless the new geometry would
-                            // hide the current selection. A necessary reveal becomes its new anchor.
+
+
                             if target != restored { anchor = Double(target / position.pointsPerUnit) }
                         }
                         onOffset(target)
@@ -635,8 +644,8 @@ private struct CalendarAnchoredScroll<Content: View>: View {
                         lastOffset = offset
                         return
                     }
-                    // Geometry/restoration callbacks never replace the logical anchor. Once the
-                    // extent settles, ordinary touch, VoiceOver and programmatic scrolling all do.
+
+
                     if maximum > 0, abs(position.offset - offset) <= 1,
                        let previous = lastOffset, previous != offset {
                         anchor = Double(offset / position.pointsPerUnit)
@@ -755,7 +764,7 @@ private struct CalendarEntryList<LeadingContent: View>: View {
                 if restored, model.calendarCurrent, queryReset == nil,
                    let first = positions.filter({ $0.value >= 0 }).min(by: { $0.value < $1.value }) { model.calendarScrollAnchor = first.key }
             }
-            .refreshable { await model.refresh() }
+            .refreshable { await model.pullToRefresh() }
         }
     }
 

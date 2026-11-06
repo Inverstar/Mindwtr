@@ -1,5 +1,22 @@
-// Split from i18n-translations.ts to make community translation contributions easier.
+
 export const itOverrides: Record<string, string> = {
+    "taskEdit.startAdvanceReminderLabel": "Prima dell’inizio",
+    "settings.speechUseGemini": "Usa Gemini",
+    "settings.speechNativeUnsupported": "Questo fornitore vocale non è ancora supportato qui. Seleziona Gemini, OpenAI o Whisper per usare la cattura vocale.",
+    "settings.speechGeminiDisclosure": "Le registrazioni vengono inviate direttamente a Gemini per la trascrizione. Mindwtr non le raccoglie.",
+    "settings.speechGeminiCredentialShared": "Questa chiave API di Gemini viene usata anche dall’IA testuale di Gemini su questo dispositivo.",
+    "quickAdd.audioStopAndSave": "Interrompi e salva",
+    "quickAdd.audioTooLarge": "La registrazione è troppo grande. Prova con una registrazione più breve.",
+    "quickAdd.audioNoSpeech": "Non è stato rilevato parlato nella registrazione.",
+    "quickAdd.audioNotRetained": "La conservazione dell’audio è disattivata. La trascrizione non riprenderà dopo il riavvio dell’app.",
+    "quickAdd.audioSingleTaskOnly": "Una registrazione può essere salvata in una sola attività. Rimuovi le righe delle attività aggiuntive.",
+    "settings.aiConfigureTextAssistant": "Configura assistente di testo",
+    "settings.aiCredentialPresent": "Chiave API disponibile",
+    "settings.aiCredentialMissing": "Nessuna chiave API salvata",
+    "settings.aiConsentRecordFailed": "Il consenso è stato accettato, ma non è stato possibile salvarlo su questo dispositivo. Potrebbe essere richiesto di nuovo.",
+    "settings.aiConfigurationSaved": "Impostazioni IA salvate",
+    "settings.aiCredentialSaved": "Chiave API salvata",
+    "settings.aiCredentialCleared": "Chiave API rimossa",
     "attachments.webUploadRequiresCloud": "I caricamenti dal browser richiedono la sincronizzazione con un cloud autogestito.",
     "attachments.webUploadEncrypted": "I caricamenti dal browser richiedono la disattivazione della crittografia di sincronizzazione.",
     "attachments.webUploadOffline": "Non è possibile caricare file offline.",
@@ -23,11 +40,11 @@ export const itOverrides: Record<string, string> = {
     "timeline.reorderConflict": "L’ordine è cambiato altrove. Riprova.",
     "timeline.reorderFailed": "Impossibile salvare il nuovo ordine. Riprova.",
     "timeline.reorderInstructions": "Premi Spazio per selezionare una riga, Su o Giù per spostarla nel gruppo, Spazio per rilasciarla o Esc per annullare.",
-    'task.doneTagOutcomeUnknown': "Impossibile confermare la modifica dei tag. Riavvia Mindwtr per ricaricare i dati salvati.",
-    "task.copyTaskLink": "Copia link dell’attività",
-    "task.copyTaskId": "Copia ID dell’attività",
     "task.addToChecklist": "Aggiungi alla lista di controllo…",
     "task.addedToChecklist": "Aggiunto alla lista di controllo",
+    'task.doneTagOutcomeUnknown': "Impossibile confermare la modifica dei tag. Riavvia Mindwtr per ricaricare i dati salvati.",
+    "task.copyTaskLink": "Copia link Mindwtr",
+    "task.copyTaskId": "Copia ID dell’attività",
     "task.linkNotFound": "Questa attività non è presente in questa libreria. Potrebbe essere stata eliminata o non ancora sincronizzata su questo dispositivo.",
     'task.doneCompletedAtOutcomeUnknown': "Impossibile confermare la modifica della data di completamento. Riavvia Mindwtr per ricaricare i dati salvati.",
     'task.destinationOutcomeUnknown': "Impossibile confermare la modifica della destinazione. Riavvia Mindwtr per ricaricare i dati salvati.",
@@ -122,7 +139,7 @@ export const itOverrides: Record<string, string> = {
         'settings.automationCaptureLoadFailed': 'Impossibile caricare le impostazioni di acquisizione automatizzata.',
         'settings.automationCaptureUpdateFailed': 'Impossibile aggiornare le impostazioni di acquisizione automatizzata.',
         'taskEdit.quickAddTokenHint': 'Aggiunta rapida: {{token}}',
-        // App
+
         'app.name': 'Mindwtr',
         'donationPrompt.title': "Mantieni Mindwtr gratuito e indipendente",
         'donationPrompt.body': "Mindwtr non ha pubblicità, tracciamento o paywall. È creato da una sola persona e sostenuto da chi lo trova utile. Se ti aiuta a restare lucido, una piccola donazione aiuta a continuare a migliorarlo.",
@@ -135,7 +152,7 @@ export const itOverrides: Record<string, string> = {
         'markdown.openLinkFailed': "Impossibile aprire questo link. Verifica che l’app corrispondente sia installata. Puoi copiare il link e aprirlo lì.",
         'markdown.copyLinkFailed': "Impossibile copiare questo link.",
 
-        // Navigation
+
         'nav.main': 'Principale',
         'nav.inbox': 'Entrata',
         'nav.board': 'Lavagna',
@@ -156,7 +173,7 @@ export const itOverrides: Record<string, string> = {
         'nav.sectionOrganize': 'Organizza',
         'nav.sectionArchive': 'Archivio',
 
-        // Quick Add
+
         'quickAdd.help': 'L\'aggiunta rapida supporta /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> o !Area, @context, #tag, +Project, %Person (o %"Full Name").',
         'quickAdd.example': 'Esempio: Chiama la mamma /due:tomorrow @phone',
         'quickAdd.inlineHint': 'Prova: Chiama la mamma /due:tomorrow 5pm @phone #family',
@@ -227,10 +244,10 @@ export const itOverrides: Record<string, string> = {
         'quickDate.noDate': 'Nessuna data',
         'mobileHelp.appShortcuts': 'Tieni premuta l\'icona dell\'app per le scorciatoie Aggiungi attività, Focus e Calendario.',
 
-        // Checklist
+
         'checklist.progress': 'Avanzamento checklist',
 
-        // Keybindings (Desktop)
+
         'keybindings.helpTitle': 'Scorciatoie da tastiera',
         'keybindings.helpSubtitle': 'Premi Esc per chiudere',
         'keybindings.styleLabel': 'Stile scorciatoie',
@@ -279,13 +296,13 @@ export const itOverrides: Record<string, string> = {
         'keybindings.list.toggleDetails': 'Mostra/nascondi dettagli elenco',
         'keybindings.list.toggleDensity': 'Cambia densità',
 
-        // Tabs (Mobile)
+
         'tab.inbox': 'Entrata',
         'tab.board': 'Lavagna',
         'tab.calendar': 'Calendario',
         'tab.review': 'Revisione',
 
-        // List Views
+
         'list.inbox': 'Entrata',
         'list.todo': 'Da fare',
         'list.inProgress': 'In corso',
@@ -322,7 +339,7 @@ export const itOverrides: Record<string, string> = {
         'reference.empty': 'Nessun elemento salvato',
         'reference.emptyHint': 'Il materiale di riferimento contiene informazioni che potrebbero servirti in futuro: nessuna azione richiesta.',
 
-        // Status Labels
+
         'status.inbox': 'Entrata',
         'status.todo': 'Da fare',
         'status.next': 'Prossima',
@@ -334,7 +351,7 @@ export const itOverrides: Record<string, string> = {
         'status.archived': 'Archiviata',
         'status.active': 'Attiva',
 
-        // Priority Labels
+
         'priority.low': 'Bassa',
         'priority.medium': 'Media',
         'priority.high': 'Alta',
@@ -343,7 +360,7 @@ export const itOverrides: Record<string, string> = {
         'energyLevel.medium': 'Energia media',
         'energyLevel.high': 'Energia alta',
 
-        // Task Edit
+
         'taskEdit.editTask': 'Modifica attività',
         'taskEdit.tab.task': 'Attività',
         'taskEdit.tab.list': 'Elenco',
@@ -524,7 +541,7 @@ export const itOverrides: Record<string, string> = {
         'task.aria.dueTime': 'Ora di scadenza',
         'task.aria.location': 'Luogo',
 
-        // Recurrence Labels
+
         'recurrence.none': 'Nessuna',
         'recurrence.daily': 'Giornaliera',
         'recurrence.weekly': 'Settimanale',
@@ -561,7 +578,7 @@ export const itOverrides: Record<string, string> = {
         'recurrence.afterCompletion': 'Ripeti dopo il completamento',
         'recurrence.afterCompletionShort': 'dopo il completamento',
 
-        // Inbox (Mobile)
+
         'inbox.title': 'Entrata',
         'inbox.processButton': 'Elabora Entrata',
         'inbox.projectHint': 'Qualcosa che richiede più di un’azione? Durante l’elaborazione scegli «Sì, trasformalo in progetto» per dare un nome all’esito e alla sua prima azione successiva.',
@@ -599,7 +616,7 @@ export const itOverrides: Record<string, string> = {
         'inbox.noProject': 'Nessun progetto',
         'inbox.skip': 'Salta',
 
-        // Next Actions (Mobile)
+
         'next.title': 'Prossime azioni',
         'next.ready': 'attività pronte da affrontare',
         'next.current': 'Azioni correnti',
@@ -610,7 +627,7 @@ export const itOverrides: Record<string, string> = {
         'next.warningCount': 'elementi in Prossime azioni',
         'next.warningHint': 'Valuta di concentrarti su meno progetti. GTD consiglia di mantenere le Prossime azioni tra i 10 e i 15 elementi per avere maggiore chiarezza.',
 
-        // Contact / Contexts (Mobile updates)
+
     'contexts.new': 'Nuovo contesto',
     'tags.new': 'Nuova etichetta',
         'contexts.title': 'Contesti',
@@ -652,7 +669,7 @@ export const itOverrides: Record<string, string> = {
         'contexts.noContexts': 'Nessun contesto trovato. Aggiungi contesti come @casa, @lavoro, @computer alle tue attività',
         'contexts.noTasks': 'Nessuna attività attiva per questo contesto',
 
-        // Board
+
         'board.title': 'Lavagna',
         'board.next': 'Prossime azioni',
         'board.todo': 'Da fare',
@@ -663,7 +680,7 @@ export const itOverrides: Record<string, string> = {
         'board.dragTask': 'Trascina attività',
         'board.delete': 'Elimina',
 
-        // Calendar
+
         'calendar.title': 'Calendario',
         'calendar.addTask': 'Aggiungi nuova attività...',
         'calendar.schedulePlaceholder': 'Cerca attività da pianificare...',
@@ -701,7 +718,7 @@ export const itOverrides: Record<string, string> = {
         'shortcuts.captureUnavailable': 'Scorciatoia di acquisizione non disponibile',
         'shortcuts.missingTitle': 'Mindwtr non ha potuto leggere un titolo attività da quel link scorciatoia.',
 
-        // Projects
+
         'projects.title': 'Progetti',
         'projects.useAreaColor': "Usa il colore dell’area",
         'projects.colorSaveFailed': "Impossibile salvare il colore.",
@@ -793,7 +810,7 @@ export const itOverrides: Record<string, string> = {
         'projects.reviewAtHint': 'Data di promemoria per rivedere questo progetto.',
         'projects.noNextAction': 'Nessuna prossima azione',
 
-        // Review Steps
+
         'review.title': 'Revisione',
         'review.openTasks': 'Attività aperte',
         'review.intro': 'Fai chiarezza, aggiorna, e ritrova la creatività.',
@@ -859,6 +876,7 @@ export const itOverrides: Record<string, string> = {
         'review.projectsStepDesc': 'Assicurati che ogni progetto attivo abbia una prossima azione.',
         'review.projectsHint': 'Rivedi ogni progetto. Ha almeno una Prossima azione concreta? Se no, aggiungine una adesso. Contrassegna come completati i progetti conclusi.',
         'review.hasNextAction': 'Ha una prossima azione',
+    'review.projectDeferred': 'Pianificato',
         'review.needsAction': 'Serve un\'azione',
         'review.noActiveTasks': 'Nessuna attività attiva',
         'review.somedayStep': 'Un giorno/Forse',
@@ -881,7 +899,7 @@ export const itOverrides: Record<string, string> = {
         'review.nextStepBtn': 'Passo successivo',
         'review.stuckQuestion': 'Questo elemento è bloccato?',
         'review.stuckPrompt': 'Prova a riformularlo in modo più concreto, oppure eliminalo o incubalo se non è più rilevante.',
-        // Mobile Review keys
+
         'review.notSet': 'Non impostato',
         'review.description': 'Descrizione',
         'review.startTime': 'Rimanda a',
@@ -890,7 +908,7 @@ export const itOverrides: Record<string, string> = {
         'review.markDone': 'Segna come completata',
         'review.noTasks': 'Sei in pari. Nulla da rivedere adesso.',
 
-        // Processing
+
         'process.title': 'Elabora elemento',
         'process.refineTitle': 'Rifinisci l\'attività',
         'process.refineDesc': 'Chiarisci di cosa si tratta prima di decidere cosa farne.',
@@ -953,7 +971,7 @@ export const itOverrides: Record<string, string> = {
         'process.quickApplyHint': 'Applica queste scelte e passa al prossimo elemento dell\'Entrata.',
         'process.quickMoveHint': 'Sposta questo elemento e passa al prossimo dell\'Entrata.',
 
-        // Settings
+
         'settings.title': 'Impostazioni',
         'settings.subtitle': 'Personalizza la tua esperienza Mindwtr',
         'settings.appearance': 'Aspetto',
@@ -1018,7 +1036,7 @@ export const itOverrides: Record<string, string> = {
         'settings.logCleared': 'File di log cancellato.',
         'settings.logClearFailed': 'Impossibile cancellare il file di log.',
         'settings.shareUnavailable': 'La condivisione non è disponibile su questo dispositivo.',
-        // Mobile Settings
+
         'settings.useSystem': 'Usa tema di sistema',
         'settings.followDevice': 'Segui le impostazioni di aspetto del dispositivo',
         'settings.darkMode': 'Modalità scura',
@@ -1233,6 +1251,7 @@ export const itOverrides: Record<string, string> = {
         'ai.addSteps': 'Aggiungi passi',
         'ai.working': 'Elaborazione in corso...',
         'ai.breakdownTitle': 'Passi suggeriti',
+        'copilot.suggest': 'Suggerisci',
         'copilot.suggested': 'Suggerito',
         'copilot.applyHint': 'Tocca per applicare',
         'copilot.applied': 'Applicato',
@@ -1338,7 +1357,7 @@ export const itOverrides: Record<string, string> = {
         'digest.reviewDue': 'Revisione in scadenza',
         'digest.noItems': 'Nessun elemento urgente oggi.',
 
-        // Common
+
         'common.tasks': 'attività',
         'common.day': 'giorno',
         'common.days': 'giorni',
@@ -1391,7 +1410,7 @@ export const itOverrides: Record<string, string> = {
         'attachments.transcriptionUnavailable': 'La sintesi vocale non è pronta. Controlla le impostazioni IA e riprova.',
         'attachments.transcriptionFailed': 'Trascrizione non riuscita. Riprova.',
 
-        // Bulk Actions
+
         'bulk.select': 'Seleziona',
         'bulk.exitSelect': 'Fatto',
         'bulk.selected': 'selezionate',
@@ -1405,7 +1424,7 @@ export const itOverrides: Record<string, string> = {
         'bulk.confirmDeleteTitle': 'Elimina attività',
         'bulk.confirmDeleteBody': 'Eliminare le attività selezionate?',
 
-        // Sorting
+
         'sort.label': 'Ordina',
         'sort.default': 'Predefinito',
         'sort.due': 'Data di scadenza',
@@ -1423,7 +1442,7 @@ export const itOverrides: Record<string, string> = {
         'list.completedGroup.earlier': 'Prima',
         'list.completedGroup.notCompleted': 'Non completato',
 
-        // Agenda
+
         'agenda.active': 'elementi attivi',
         'agenda.collapseOtherSections': 'Solo focus',
         'agenda.expandOtherSections': 'Espandi sezioni',
@@ -1460,7 +1479,7 @@ export const itOverrides: Record<string, string> = {
         'focus.schedule': 'Oggi',
         'focus.nextActions': 'Prossime azioni',
 
-        // Task Age
+
         'taskAge.day': 'giorno fa',
         'taskAge.days': 'giorni fa',
         'taskAge.week': 'settimana fa',
@@ -1468,12 +1487,12 @@ export const itOverrides: Record<string, string> = {
         'taskAge.month': 'mese fa',
         'taskAge.months': 'mesi fa',
 
-        // Energy Contexts
+
         'context.energy.focused': 'Concentrato',
         'context.energy.lowenergy': 'Energia bassa',
         'context.energy.creative': 'Creativo',
 
-        // Waiting (Mobile)
+
         'waiting.title': 'In attesa',
         'waiting.subtitle': 'Attività in attesa di qualcun altro o di eventi esterni',
         'waiting.count': 'In attesa',
@@ -1483,7 +1502,7 @@ export const itOverrides: Record<string, string> = {
         'waiting.empty': 'Non stai aspettando nulla',
         'waiting.emptyHint': 'Parcheggia qui le attività quando la prossima mossa spetta a qualcun altro, così non le perderai di vista.',
 
-        // Someday (Mobile)
+
         'someday.title': 'Un giorno/Forse',
         'someday.subtitle': 'Idee e obiettivi che potresti voler perseguire in futuro',
         'someday.ideas': 'Idee',
@@ -1494,7 +1513,7 @@ export const itOverrides: Record<string, string> = {
         'someday.emptyHint': 'Parcheggia qui idee e obiettivi che potresti perseguire in futuro: fuori dai piedi, ma senza dimenticarle.',
         'done.emptyHint': 'Le attività completate finiscono qui, un registro continuo di ciò che hai portato a termine.',
 
-        // Search
+
         'search.title': 'Cerca',
         'search.placeholder': 'Cerca attività e progetti...',
         'search.scopeHint': 'Attività, progetti, persone',
@@ -1531,7 +1550,7 @@ export const itOverrides: Record<string, string> = {
         'search.due.nextWeek': 'Prossima settimana',
         'search.due.none': 'Nessuna scadenza',
 
-        // Archived
+
         'archived.tasksSegment': 'Attività',
         'archived.title': 'Archiviate',
         'archived.searchPlaceholder': 'Cerca attività archiviate...',
@@ -1714,11 +1733,11 @@ export const itOverrides: Record<string, string> = {
         'calendar.tasks': 'Attività',
         'calendar.scheduleHelp': 'Trascina o tocca per pianificare.',
         'calendar.addToCalendar': 'Aggiungi al calendario',
-        // English fallbacks keep shipped locale files in key parity.
+
         'bulk.contextPlaceholder': '@context',
         'bulk.tagPlaceholder': '#tag',
 
-        // Mind sweep (guided capture)
+
         'mindSweep.launchButton': 'Svuota la mente',
         'mindSweep.title': 'Svuota la mente',
         'mindSweep.intro': 'Scorri alcune liste di spunti e annota tutto ciò che ti viene in mente. Non filtrare né organizzare: ogni voce finisce in Entrata, da sistemare più tardi.',

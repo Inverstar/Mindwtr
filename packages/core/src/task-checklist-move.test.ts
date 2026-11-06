@@ -40,7 +40,7 @@ describe('canMoveTaskToChecklist', () => {
             { reminderPolicy: 'send' },
         ];
         for (const patch of blocked) expect(canMoveTaskToChecklist(task('a', { title: 'Buy milk', ...patch })), JSON.stringify(patch)).toBe(false);
-        // A whitespace-only description holds nothing.
+
         expect(canMoveTaskToChecklist(task('a', { description: '  ' }))).toBe(true);
     });
 
@@ -106,7 +106,21 @@ describe('moveTaskToChecklist store action', () => {
         expect(row('src').deletedAt).toBeUndefined();
         expect(row('src').status).toBe('inbox');
         expect(row('target').checklist).toBeUndefined();
-        // Undo again finds nothing to undo.
+
         expect((await useTaskStore.getState().undoMoveTaskToChecklist('src', 'target')).success).toBe(false);
+    });
+});
+
+describe('canonical title-only eligibility and deterministic identity',()=>{
+    it('retains every donor detail guard and the explicit newer-field compatibility guard',()=>{
+        const patches:Partial<Task>[]=[{status:'next'},{deletedAt:at},{purgedAt:at},{title:' '},{description:'note'},{attachments:[{id:'a',kind:'link',title:'a',uri:'https://example.com',createdAt:at}]},{checklist:[{id:'x',title:'x',isCompleted:false}]},
+            {startTime:at},{dueDate:at},{reviewAt:at},{recurrence:{rule:'daily'}},{relativeStartOffset:{amount:1,unit:'days'}},{contexts:['@a']},{tags:['#a']},{projectId:'p'},{sectionId:'s'},
+            {priority:'high'},{energyLevel:'low'},{timeEstimate:'15min'},{assignedTo:'Sam'},{location:'Home'},{timeSpentMinutes:5},{repeatReminderMinutes:10},{reminderPolicy:'send'}];
+        expect(canMoveTaskToChecklist(task('source'))).toBe(true);for(const patch of patches)expect(canMoveTaskToChecklist(task('source',patch)),JSON.stringify(patch)).toBe(false);
+        expect(canMoveTaskToChecklist(task('source'),null,{dueReminderLeadMinutes:30})).toBe(false);expect(canMoveTaskToChecklist(task('source'),null,{dueReminderLeadMinutes:0})).toBe(true);expect(canMoveTaskToChecklist(task('source'),null,{dueReminderLeadMinutes:null})).toBe(true);
+        expect(canMoveTaskToChecklist(task('source',{areaId:'default'}),'default')).toBe(true);expect(canMoveTaskToChecklist(task('source',{areaId:'other'}),'default')).toBe(false);
+    });
+    it('prefers existing checklists and keeps Unicode identities literal',()=>{const rows=[task('source'),task('plain',{title:'Packing'}),task('list',{title:'Packing list',checklist:[{id:'x',title:'x',isCompleted:false}]}),task('closed',{status:'done'})];
+        expect(getChecklistMoveTargets(rows,'source',' PACK ').map(row=>row.id)).toEqual(['list','plain']);expect(checklistItemIdForMovedTask('e\u0301')).not.toBe(checklistItemIdForMovedTask('é'));expect(checklistItemIdForMovedTask('源')).toMatch(/^[0-9a-f-]{36}$/);
     });
 });

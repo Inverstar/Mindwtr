@@ -39,6 +39,7 @@ export type ProjectActions = Pick<
     | 'commitPreparedProjectTaskOrder'
     | 'commitPreparedAreaCreate'
     | 'commitPreparedInboxOrganizeDestinationCreate'
+    | 'commitPreparedProjectOrganizeDestinationCreate'
     | 'commitPreparedAreaColor'
     | 'commitPreparedAreaRename'
     | 'commitPreparedAreaOrder'
@@ -128,7 +129,7 @@ export type ProjectCoreActions = Pick<
 export type SectionActions = Pick<ProjectActions, 'addSection' | 'commitPreparedProjectSectionCreate' | 'commitPreparedProjectSectionRename' | 'commitPreparedProjectSectionDelete' | 'updateSection' | 'deleteSection'>;
 export type ProjectToSectionActions = Pick<ProjectActions, 'convertProjectToSection' | 'undoProjectToSection'>;
 
-export type AreaActions = Pick<ProjectActions, 'addArea' | 'commitPreparedAreaCreate' | 'commitPreparedInboxOrganizeDestinationCreate' | 'commitPreparedAreaColor' | 'commitPreparedAreaRename' | 'commitPreparedAreaOrder' | 'commitPreparedAreaDelete' | 'updateArea' | 'deleteArea' | 'restoreArea' | 'reorderAreas'>;
+export type AreaActions = Pick<ProjectActions, 'addArea' | 'commitPreparedAreaCreate' | 'commitPreparedInboxOrganizeDestinationCreate' | 'commitPreparedProjectOrganizeDestinationCreate' | 'commitPreparedAreaColor' | 'commitPreparedAreaRename' | 'commitPreparedAreaOrder' | 'commitPreparedAreaDelete' | 'updateArea' | 'deleteArea' | 'restoreArea' | 'reorderAreas'>;
 
 export type OrderingActions = Pick<ProjectActions, 'reorderProjects' | 'reorderProjectTasks' | 'reorderBoardTasks' | 'reorderSections' | 'commitPreparedProjectSectionOrder' | 'commitPreparedProjectTaskOrder'>;
 
@@ -140,7 +141,7 @@ export type { AppData, Area, Person, Project, Section, Task, TaskStatus };
 
 export type DetachedProjectTask = { id: string; sectionId?: string };
 
-/** RN Undo's eligible-current-Task rule, shared with the native prepared effect. */
+
 export function projectDeleteUndoReattachments(projectId: string, links: readonly DetachedProjectTask[],
     sections: readonly Section[], tasks: readonly Task[]): { id: string; updates: Pick<Task, 'projectId' | 'sectionId'> }[] {
     const liveSectionIds = new Set(sections

@@ -24,6 +24,15 @@ const task = (overrides: Partial<Task>): Task => ({
 });
 
 describe('saved filters', () => {
+    it('preserves excluded projects and gives exclusions precedence over includes and No project', () => {
+        const criteria = { projects: ['p1', SAVED_FILTER_NO_PROJECT_ID], excludedProjects: ['p1', SAVED_FILTER_NO_PROJECT_ID], statuses: ['someday' as const] };
+        expect(normalizeFilterCriteria(criteria)).toEqual(criteria);
+        expect(hasActiveFilterCriteria({ excludedProjects: ['p1'] } as never)).toBe(true);
+        const tasks = [task({ id: 'in-p1', projectId: 'p1', status: 'someday' }), task({ id: 'no-project', status: 'someday' }), task({ id: 'other', projectId: 'p2', status: 'someday' })];
+        expect(applyFilter(tasks, criteria).map(item => item.id)).toEqual([]);
+        expect(applyFilter(tasks, { excludedProjects: ['p1', SAVED_FILTER_NO_PROJECT_ID] } as never).map(item => item.id)).toEqual(['other']);
+    });
+
     it('combines criteria with AND and values within a criterion with OR', () => {
         const tasks = [
             task({ id: 'desk-high', contexts: ['@desk'], tags: ['#urgent'], priority: 'high' }),
@@ -413,7 +422,7 @@ describe('saved filters', () => {
     });
 
     it('changes only the deleted entry: every other one stays as stored, in stored order', () => {
-        // A newer app's view and fields, stored after an older filter.
+
         const newer = {
             id: 'filter-newer',
             name: 'Board lane',
@@ -455,11 +464,11 @@ describe('saved filters', () => {
         const stored = [newer, { name: 'No id' }, undated, { ...undated, name: 'Calls again' }, 'not a filter'];
 
         const kept = keepSavedFilters(stored);
-        // Only the id-less entries go; a repeated id keeps its last copy at the first place.
+
         expect(kept).toEqual([newer, { ...undated, name: 'Calls again' }]);
         expect(kept[0]).toBe(newer);
 
-        // Screens: the newer app's view is hidden, an unknown sort is dropped, no timestamp is invented.
+
         expect(normalizeSavedFilters(stored)).toEqual([
             { id: 'filter-undated', name: 'Calls again', view: 'focus', criteria: {}, createdAt: '', updatedAt: '' },
         ]);

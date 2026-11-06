@@ -2,6 +2,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEve
 import { getProjectChoiceState, groupProjectsForPicker, useTaskStore, type Project } from '@mindwtr/core';
 import { ChevronDown, Plus } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { isImeComposing } from '../../lib/ime';
 import { ModalPortal } from '../ModalPortal';
 import { useDropdownPosition } from './use-dropdown-position';
 
@@ -17,7 +18,7 @@ interface ProjectSelectorProps {
     noMatchesLabel?: string;
     emptyLabel?: string;
     createProjectLabel?: string;
-    /** Heading above Someday / Waiting projects, which list after the active ones (#1467). */
+
     deferredLabel?: string;
     leadingOption?: { value: string; label: string };
     noProjectValue?: string;
@@ -85,7 +86,7 @@ export function ProjectSelector({
     );
     const areas = useTaskStore((state) => state.areas);
     const groups = useMemo(() => groupProjectsForPicker(filteredProjects, areas), [areas, filteredProjects]);
-    // Visual order: the arrow keys walk the DOM and Enter takes the first row, so both follow it.
+
     const filtered = useMemo(() => [...groups.active, ...groups.deferred], [groups]);
 
     useEffect(() => {
@@ -124,7 +125,7 @@ export function ProjectSelector({
         if (!options || options.length === 0) return;
         const list = Array.from(options);
         const index = list.findIndex((option) => option === document.activeElement);
-        // From the search box, Down starts at the top (the Enter target while searching).
+
         const nextIndex = index < 0
             ? (direction > 0 ? 0 : list.length - 1)
             : (index + direction + list.length) % list.length;
@@ -132,6 +133,7 @@ export function ProjectSelector({
     };
 
     const handleDropdownKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+        if (isImeComposing(event)) return;
         if (event.key === 'Escape') {
             event.preventDefault();
             event.stopPropagation();
@@ -173,7 +175,7 @@ export function ProjectSelector({
     };
 
     const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-        if (event.key !== 'Enter') return;
+        if (isImeComposing(event) || event.key !== 'Enter') return;
         const title = query.trim();
         if (!title) return;
 
@@ -193,8 +195,8 @@ export function ProjectSelector({
 
     const emptyStateLabel = normalizedQuery ? noMatchesLabel : (emptyLabel ?? noMatchesLabel);
     const showCreate = canCreate && Boolean(onCreateProject);
-    // While searching, the list runs matches, Create, then the fixed choices, and
-    // the row Enter picks (handleSearchKeyDown) is highlighted (#1461).
+
+
     const searching = Boolean(normalizedQuery);
     const enterTargetId = !searching
         ? undefined

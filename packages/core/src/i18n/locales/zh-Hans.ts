@@ -1,5 +1,6 @@
-// Split from i18n-translations.ts to make community translation contributions easier.
+
 export const zhHans: Record<string, string> = {
+    "taskEdit.startAdvanceReminderLabel": "开始前提醒",
     "taskEdit.advanceReminderLabel": "提前提醒",
     "taskEdit.advanceReminderMinutes": "提前 {count} 分钟",
     "taskEdit.advanceReminderHour": "提前 1 小时",
@@ -8,6 +9,25 @@ export const zhHans: Record<string, string> = {
     "taskEdit.advanceReminderWeek": "提前 1 周",
     "taskEdit.advanceReminderNeedsDueTime": "请设置截止日期和时间以使用提前提醒。",
     "taskEdit.advanceReminderSkipped": "请为此任务启用开始/截止提醒以使用提前提醒。",
+    "settings.speechUseGemini": "使用 Gemini",
+    "settings.speechNativeUnsupported": "此处暂不支持这个语音服务商。请选择 Gemini、OpenAI 或 Whisper 以使用语音录入。",
+    "settings.speechGeminiDisclosure": "录音会直接发送至 Gemini 进行转写。Mindwtr 不会收集这些录音。",
+    "settings.speechGeminiCredentialShared": "此 Gemini API 密钥也供本设备上的 Gemini 文本 AI 功能使用。",
+    "settings.speechOpenAIDisclosure": "录音会直接发送至 OpenAI 或你配置的转录服务器。在智能模式下，如果有 API 密钥，转录文本也会发送至 OpenAI。Mindwtr 不会收集这些数据。",
+    "settings.speechOpenAICredentialShared": "此 API 密钥也供本设备上的 OpenAI 文本 AI 功能使用，并会发送至所配置的转录服务器。",
+    "quickAdd.audioStopAndSave": "停止并保存",
+    "quickAdd.audioTooLarge": "录音文件过大。请尝试录制短一些的内容。",
+    "quickAdd.audioNoSpeech": "录音中未检测到语音。",
+    "quickAdd.audioNotRetained": "音频保留已关闭。重启应用后，转写将不会继续。",
+    "quickAdd.audioSingleTaskOnly": "一段录音只能保存到一个任务。请删除多余的任务行。",
+    "settings.aiConfigureTextAssistant": "配置文字助手",
+    "settings.aiRefreshModels": "刷新模型列表",
+    "settings.aiCredentialPresent": "API 密钥可用",
+    "settings.aiCredentialMissing": "未保存 API 密钥",
+    "settings.aiConsentRecordFailed": "已接受你的同意，但无法在此设备上保存。可能会再次询问。",
+    "settings.aiConfigurationSaved": "AI 设置已保存",
+    "settings.aiCredentialSaved": "API 密钥已保存",
+    "settings.aiCredentialCleared": "API 密钥已清除",
     "settings.gmailCapture": "Gmail",
     "settings.gmailCaptureDesc": "连接 Google，采集所选标签下的邮件。",
     "settings.gmailCaptureDisclosure": "Google 会授予整个邮箱的只读访问权限，即使 Mindwtr 只导入带有所选标签的邮件。Mindwtr 不会更改邮件或标签。导入的发件人和邮件正文会成为普通任务数据，可能进入你配置的同步、备份、导出或可选 AI 功能。仅限使用专门指定的测试账号。",
@@ -56,6 +76,8 @@ export const zhHans: Record<string, string> = {
     "timeline.reorderConflict": "顺序已在其他地方更改，请重试。",
     "timeline.reorderFailed": "无法保存新顺序，请重试。",
     "timeline.reorderInstructions": "按空格键选中行，用上下箭头在组内移动，再按空格键放下，或按 Escape 取消。",
+    "task.addToChecklist": "添加到清单…",
+    "task.addedToChecklist": "已添加到清单",
     "task.expandChecklist": "将清单项转换为项目任务",
     "task.keepChecklistDescription": "将原任务及其清单保留在项目中。",
     "task.expandChecklistDescription": "每个清单项创建一个任务，保留顺序和勾选状态。备注、附件和日期移至新项目；标签和情境保留在新任务中。原任务移至回收站，不复制专注标记。可以撤销此次转换。",
@@ -195,7 +217,7 @@ export const zhHans: Record<string, string> = {
         'settings.automationCaptureCopyFailed': "无法复制收集令牌。",
         'settings.automationCaptureLoadFailed': '无法加载自动化采集设置。',
         'settings.automationCaptureUpdateFailed': '无法更新自动化采集设置。',
-        // Ratchet backfill (i18n-fallback-20260730-12): new en.ts keys
+
         'accessibility.skipToContent': '跳转到内容',
         'accessibility.mainContent': '主要内容',
         'quickAdd.pastedImageTitle': '截图',
@@ -427,10 +449,8 @@ export const zhHans: Record<string, string> = {
         'list.taskDeleted': '任务已删除',
         'list.taskCopied': '任务已复制到剪贴板',
         'task.copyTitle': '复制标题',
-        "task.copyTaskLink": "复制任务链接",
+        "task.copyTaskLink": "复制 Mindwtr 链接",
         "task.copyTaskId": "复制任务 ID",
-        "task.addToChecklist": "添加到清单…",
-        "task.addedToChecklist": "已添加到清单",
         "task.linkNotFound": "此任务不在当前资料库中。它可能已被删除，或尚未同步到此设备。",
         'task.titleCopied': '标题已复制',
         'task.titlesCopied': '多个标题已复制',
@@ -781,6 +801,8 @@ export const zhHans: Record<string, string> = {
         'next.warningCount': '个任务在下一步行动中',
         'next.warningHint': '建议减少同时推进的项目。GTD 推荐保持 10–15 个下一步行动以保持清晰。',
         'contexts.title': '情境',
+        "contexts.collapseSidebar": "收起情境面板",
+        "contexts.expandSidebar": "展开情境面板",
         'contexts.filter': '按情境筛选任务',
         'contexts.dropAdd': '添加 {context}',
         'contexts.dropAdded': '已添加 {context}',
@@ -1146,6 +1168,7 @@ export const zhHans: Record<string, string> = {
         'review.projectsStepDesc': '确保每个活动项目都有下一步行动。',
         'review.projectsHint': '回顾每个项目。它至少有一个具体的下一步行动吗？如果没有，现在添加一个。将完成的项目标记为完成。',
         'review.hasNextAction': '有下一步行动',
+    'review.projectDeferred': '已安排',
         'review.needsAction': '需要行动',
         'review.noActiveTasks': '没有活动任务',
         'review.somedayStep': '将来/也许',
@@ -1653,6 +1676,7 @@ export const zhHans: Record<string, string> = {
         'ai.applySuggestion': '应用建议',
         'ai.addSteps': '添加步骤',
         'ai.breakdownTitle': '推荐步骤',
+        'copilot.suggest': '获取建议',
         'copilot.suggested': '建议',
         'copilot.applyHint': '点击应用',
         'copilot.applyAll': '全部应用',
@@ -2282,7 +2306,7 @@ export const zhHans: Record<string, string> = {
         'taskEdit.relativeStartDaysShort': '天',
         'taskEdit.relativeStartWeeksShort': '周',
         'taskEdit.relativeStartBeforeDue': '截止前',
-        // Mobile-only copy migrated from keyed helpers.
+
         'calendar.mobile.1Day': '1 天',
         'calendar.mobile.day': '日',
         'calendar.mobile.dayDetailsPanelHandle': '当天详情面板把手',
@@ -2584,7 +2608,6 @@ export const zhHans: Record<string, string> = {
         'captureNotification.channelName': '快速收集',
 
 
-        // Mind sweep (guided capture)
         'mindSweep.launchButton': '思绪清扫',
         'mindSweep.title': '思绪清扫',
         'mindSweep.intro': '跟着几组提示清单，把脑子里浮现的事情都写下来。不用筛选、不用整理——每一条都会进入收集箱，稍后再处理。',
@@ -2735,7 +2758,7 @@ export const zhHans: Record<string, string> = {
         'onboarding.toastReady': '“快速上手”已在项目中就绪。',
         'onboarding.toastFailed': '创建“快速上手”失败。',
 
-        // Settings — moved from apps/desktop settings/labels.ts (settings-i18n-20260724-01)
+
         'settings.integrations': '集成',
         'settings.searchPlaceholder': '搜索设置…',
         'settings.lookAndFeel': '外观与风格',

@@ -1,3 +1,5 @@
+import { applyPreparedCaptureData, applyPreparedCaptureLinesData } from './prepared-capture-data';
+import { nativeVoiceBasis, readNativeVoicePrepared, type NativePreparedVoiceCapture, type NativePreparedVoiceResult } from './native-voice-prepared';
 import { mapSqliteTaskRow, rawReadTaskSnapshot } from './sqlite-adapter';
 import { retainTaskTaxonomy, retainTaxonomyEffects } from './taxonomy-catalog';
 import { rawReadProjectSnapshot } from './sqlite-raw-snapshot';
@@ -92,9 +94,11 @@ type TaskActions = Pick<
     TaskStore,
     | 'addTask'
     | 'addTasks'
+    | 'commitPreparedVoiceRows'
     | 'commitPreparedCapture'
     | 'commitPreparedCaptureLines'
     | 'commitPreparedTaskEdit'
+    | 'commitPreparedTaskEdits'
     | 'commitPreparedTaskDraftV2'
     | 'commitPreparedArchivedTaskRestore'
     | 'commitPreparedArchivedTasksRestore'
@@ -102,12 +106,17 @@ type TaskActions = Pick<
     | 'commitPreparedTrashItemsPurge'
     | 'commitPreparedReferenceTasksMove'
     | 'commitPreparedInboxTasksMove'
+    | 'commitPreparedProjectTasksMove'
     | 'commitPreparedInboxTasksAddTag'
+    | 'commitPreparedProjectTasksAddTag'
     | 'commitPreparedInboxTasksRemoveTag'
+    | 'commitPreparedProjectTasksRemoveTag'
     | 'commitPreparedInboxTasksOrganize'
+    | 'commitPreparedProjectTasksOrganize'
     | 'commitPreparedReferenceTasksAddTag'
     | 'commitPreparedReferenceTasksRemoveTag'
     | 'commitPreparedArchivedTasksMutation'
+    | 'commitPreparedTaskChecklistMove'
     | 'commitPreparedTaskFocus'
     | 'commitPreparedFocusOrder'
     | 'commitPreparedBoardTask'
@@ -231,13 +240,11 @@ const logStartOnlyRecurringCompletions = (
                 scope: 'store', category: 'storage',
                 context: { releaseCheck: 'v1.3.5/start-only-recurrence', outcome: 'generated', count },
             });
-        } catch { /* Optional diagnostics must not interrupt completion or persistence. */ }
+        } catch {                                                                          }
     }
 };
 
-// `tasks` and `_tasksById` are derived from `_allTasks` by
-// prepareStoreStateUpdate (store.ts) on every write, so producers below only
-// ever write `_allTasks`.
+
 export type MutateTasksOptions = {
     selectTasks: (state: TaskStore) => Task[];
     buildUpdates: (task: Task, context: { now: string; state: TaskStore }) => Partial<Task>;
@@ -246,7 +253,7 @@ export type MutateTasksOptions = {
     ensureDeviceIdWhenEmpty?: boolean;
 };
 
-/** The existing mutation row formula, with caller-owned selection and context. */
+
 export const planTaskMutations = <TState,>({
     tasks,
     state,
@@ -317,7 +324,7 @@ export const mutateTasks = async (
     return missing ? actionFail(options.missingMessage ?? 'Task not found') : actionOk();
 };
 
-/** Full visible-row identity, with sorted object keys but untouched array and raw date values. */
+
 export const focusOrderToken = (tasks: readonly Task[]): string => JSON.stringify(tasks, (_key, value) =>
     value && typeof value === 'object' && !Array.isArray(value)
         ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value);
@@ -329,7 +336,7 @@ const changedFocusOrder = (task: Task, targets: ReadonlyMap<string, number>): nu
     return target !== undefined && task.focusOrder !== target ? target : undefined;
 };
 
-/** Exactly the task stamps used by reorderFocusedTasks through mutateTasks. */
+
 export const focusOrderEffect = (scope: PreparedFocusOrder['scope'], ids: readonly string[],
     deviceId: string, preparedAt: string, preserveHidden = false): PreparedFocusOrder['effect'] => {
     const byId = new Map(scope.tasks.map((task) => [task.id, task]));
@@ -414,12 +421,12 @@ export const prepareTaskUpdatesForStore = ({
     allProjects: AppData['projects'];
     allSections: AppData['sections'];
     allAreas: AppData['areas'];
-    /** Enables the settings-driven update rules (auto-archive on a completion edit). */
+
     settings?: AppData['settings'];
-    /** Frozen end of the preparation process's local day, for prepared replay validation. */
+
     futureBoundary?: string;
     futureDates?: FocusDateLookup;
-    /** Frozen preparation clock; ordinary RN callers retain the ambient default. */
+
     nowMs?: number;
     reserveProjectOrder?: boolean;
     projectOrderReserver?: ProjectOrderReserver;
@@ -454,7 +461,7 @@ export const prepareTaskUpdatesForStore = ({
     };
 };
 
-/** Shared batch preflight; save-only optimistic retries precede normalization. */
+
 export const prepareTaskBatchUpdatesForStore = ({
     updatesList,
     state,
@@ -532,7 +539,7 @@ export const prepareTaskBatchUpdatesForStore = ({
     return { ok: true, preparedUpdatesById, optimisticRetryProjectIds };
 };
 
-/** Applies a shared batch in source-array order, with one parent transition. */
+
 export const planTaskBatchUpdateEffects = ({
     preparedUpdatesById,
     allTasks,
@@ -588,8 +595,8 @@ export const planTaskBatchUpdateEffects = ({
             projectOrderReserver,
         );
         onTaskUpdated?.(task, updatedTask);
-        // Keep argument construction lazy: copying the collection once per
-        // non-recurring selection makes ordinary bulk moves quadratic.
+
+
         if (stampedNextRecurringTask) {
             const duplicateFollowUp = findExistingRecurringFollowUp(
                 [...newAllTasksBase, ...createdTasks],
@@ -614,7 +621,7 @@ export const planTaskBatchUpdateEffects = ({
     return { ...projectReactivation, createdTasks };
 };
 
-/** Calculates the exact rows affected by one already-prepared task update. */
+
 export const planTaskUpdateEffects = ({
     task,
     preparedUpdates,
@@ -656,7 +663,7 @@ export const planTaskUpdateEffects = ({
         nextRecurringTask,
         deviceId,
         getTaskOrder(task),
-        // This collection scan remains lazy for updates without a follow-up.
+
         (projectId) => getNextProjectOrder(projectId, allTasks),
     );
     const recurringDuplicateTask = findExistingRecurringFollowUp(allTasks, stampedNextRecurringTask, task.id);
@@ -679,14 +686,13 @@ export const planTaskUpdateEffects = ({
         recurringDuplicateTask, ...projectReactivation };
 };
 
-/** The relevant complete membership for Archive Restore, including legacy Section-only children. */
+
 export const archiveRestoreScope = (task: Task,
     data: { tasks: Task[]; projects: Project[]; sections: Section[]; areas: Area[] }): NativePreparedArchivedTaskRestore['scope'] => {
     const sourceSection = data.sections.find((row) => row.id === task.sectionId);
     const parentProject = data.projects.find((row) => row.id === (task.projectId ?? sourceSection?.projectId)) ?? null;
-    // A legacy Section-only Task can infer this archived Project during the
-    // shared container normalization, then reopen it. Freeze all of its owned
-    // rows before that single Task action, just as a direct Project child does.
+
+
     const fullParent = Boolean(parentProject?.status === 'archived'
         && (task.projectId === parentProject.id || sourceSection?.projectId === parentProject.id));
     const parentSections = parentProject
@@ -698,13 +704,13 @@ export const archiveRestoreScope = (task: Task,
             || (!row.projectId && row.sectionId !== undefined && sectionIds.has(row.sectionId)))
         : [task];
     return { task, parentProject, parentTasks, parentSections,
-        // Shared container resolution clears Area whenever Project/Section wins,
-        // even if a legacy raw areaId names a deleted or missing Area.
+
+
         sourceArea: parentProject ? null : data.areas.find((row) => row.id === task.areaId) ?? null,
         fullParent };
 };
 
-/** RN's one `updateTask({status:'inbox'})`, including implicit archived-parent reactivation. */
+
 export const archiveRestoreEffect = (scope: NativePreparedArchivedTaskRestore['scope'],
     deviceId: string, updateAt: string, futureBoundary: string,
     dates: FocusDateLookup): NativePreparedArchivedTaskRestore['effect'] | null => {
@@ -735,13 +741,13 @@ export const archiveRestoreEffect = (scope: NativePreparedArchivedTaskRestore['s
         ? { before: scope.parentProject, after: projectAfter } : null };
 };
 
-/** Archive one already-resolved occurrence and plan its frozen next instance. */
+
 export const planSkippedRecurringOccurrence = ({ task, allTasks, now, deviceId, projection, createId }: {
     task: Task;
     allTasks: Task[];
     now: string;
     deviceId: string;
-    /** Native prepared writes pass this frozen value; RN computes at the action boundary. */
+
     projection?: RecurrenceProjection | null;
     createId?: () => string;
 }): { updatedTask: Task; recurringCandidateTask: Task | null; recurringDuplicateTask: Task | null;
@@ -763,7 +769,7 @@ export const planSkippedRecurringOccurrence = ({ task, allTasks, now, deviceId, 
         tasks: recurringFollowUpTask ? [...updatedTasks, recurringFollowUpTask] : updatedTasks };
 };
 
-/** The bounded Focus witness contains only columns consulted by eligibility and the cap. */
+
 export const taskFocusWitnessRow = (task: Task): TaskFocusWitnessRow => ({
     id: task.id, status: task.status, createdAt: task.createdAt,
     projectId: task.projectId ?? null, sectionId: task.sectionId ?? null,
@@ -796,7 +802,7 @@ export const taskFocusScope = (state: TaskStore, task: Task): PreparedTaskFocus[
     };
 };
 
-/** Done reactivation needs an unambiguous live container; legacy Move is unchanged. */
+
 export const boardReactivationContainerAllowed = (task: Task, projects: readonly Project[], sections: readonly Section[]): boolean => {
     const validId = (id: unknown): id is string => typeof id === 'string' && id.trim().length > 0 && id.length <= 500;
     const sourceSections = sections.filter(row => row.id === task.sectionId);
@@ -811,7 +817,7 @@ export const boardReactivationContainerAllowed = (task: Task, projects: readonly
         && parents[0].deletedAt == null && parents[0].purgedAt == null;
 };
 
-/** Freeze only containers and compact Focus rows consumed by a status move. */
+
 export const boardMoveScope = (state: TaskStore, task: Task): PreparedBoardMove['scope'] => {
     const section = state._allSections.find(row => row.id === task.sectionId);
     const sourceSections = task.status === 'done' ? state._allSections.filter(row => row.id === task.sectionId)
@@ -827,7 +833,7 @@ export const boardMoveScope = (state: TaskStore, task: Task): PreparedBoardMove[
     };
 };
 
-/** The RN normalizer/planner is the sole source of the complete Move receipt. */
+
 export const boardMoveEffect = (before: Task, status: Task['status'], move: PreparedBoardMove, at: string): Task => {
     if (!['inbox', 'next', 'waiting', 'someday', 'done'].includes(before.status)
         || !['inbox', 'next', 'waiting', 'someday'].includes(status)
@@ -858,7 +864,7 @@ export const boardMoveEffect = (before: Task, status: Task['status'], move: Prep
     return plan.updatedTask;
 };
 
-/** Re-evaluate the RN star policy against the frozen local day and compact rows. */
+
 export const taskFocusAction = (scope: PreparedTaskFocus['scope'], preparedAt: string,
     futureBoundary: string, dates: FocusDateLookup): FocusStarAction => resolveFocusStarAction(scope.task, {
     tasks: scope.peers.map(asFocusTask), projects: scope.project ? [scope.project] : [],
@@ -868,7 +874,7 @@ export const taskFocusAction = (scope: PreparedTaskFocus['scope'], preparedAt: s
     endOfTodayIso: futureBoundary, frozenDates: dates,
 });
 
-/** Derive the complete Task receipt through the same normalizer/effect planner as RN updateTask. */
+
 export const taskFocusEffect = (scope: PreparedTaskFocus['scope'], focused: boolean,
     deviceId: string, preparedAt: string, futureBoundary: string, dates: FocusDateLookup): PreparedTaskFocus['effect'] | null => {
     const action = taskFocusAction(scope, preparedAt, futureBoundary, dates);
@@ -890,7 +896,7 @@ export const taskFocusEffect = (scope: PreparedTaskFocus['scope'], focused: bool
     return { task: { before: scope.task, after: planned.updatedTask } };
 };
 
-/** RN Reset's exact one-row field change, including the already-open write. */
+
 export const buildResetTaskChecklistUpdates = (task: Task): Partial<Task> => {
     const wasDone = task.status === 'done';
     return {
@@ -909,7 +915,7 @@ const INDEPENDENT_TASK_EDIT_FIELDS = new Set([
 
 type PreparedAffectedRows = Pick<PreparedInboxEffect, 'tasks' | 'projects' | 'sections'>;
 
-/** The SQLite representation, including every revision/stamp, is the durable receipt. */
+
 const samePreparedSqliteRow = (columns: readonly string[], jsonColumns: ReadonlySet<string>, left: unknown[], right: unknown[]) => (
     left.length === right.length && left.every((value, index) => {
         const other = right[index];
@@ -924,10 +930,10 @@ const taskJsonColumns = new Set(['relativeStartOffset', 'recurrence', 'tags', 'c
 const projectJsonColumns = new Set(['tagIds', 'attachments']);
 export const samePreparedTask = (left: Task, right: Task) => samePreparedSqliteRow(TASK_SQLITE_COLUMNS, taskJsonColumns,
     taskToSqliteRow(left), taskToSqliteRow(right));
-/** Board order preserves complete JSON cells as well as their stored scalar representation. */
+
 export const samePreparedBoardOrderTask = (left: Task, right: Task): boolean => samePreparedTask(left, right)
     && sameSectionDeleteJson({ ...left, pushCount: left.pushCount ?? 0 }, { ...right, pushCount: right.pushCount ?? 0 });
-/** Accept only these lossless RN hydration forms for BEFORE; saved AFTER stays exact. */
+
 export const samePreparedBoardOrderBefore = (raw: Task, frozen: Task): boolean => {
     const projected = { ...raw };
     if (typeof raw.recurrence === 'string' && ['daily', 'weekly', 'monthly', 'yearly'].includes(raw.recurrence)) {
@@ -967,16 +973,12 @@ const applyPreparedAffectedRows = (state: Pick<TaskStore, '_allTasks' | '_allPro
         ...input.sections.filter((row) => !row.before).map((row) => row.after)],
 });
 
-/** The highest live section order in [projectId], -1 for none (RN's Convert to section puts the new one after it). */
+
 export const taskToSectionOrderMax = (allSections: Section[], projectId: string): number => allSections
     .filter((section) => section.projectId === projectId && !section.deletedAt)
     .reduce((max, section) => Math.max(max, Number.isFinite(section.order) ? section.order : -1), -1);
 
-/**
- * RN's Convert to section and the native journal share one plan: the section (title and description trimmed, after the
- * project's last section), one task per non-empty checklist item in it (done when the item is checked), and the source
- * soft-deleted. [generateId] names the section first, then each new task in checklist order.
- */
+
 export const planTaskToSection = ({ sourceTask, allTasks, allProjects, allSections, allAreas, settings, deviceId, now,
     generateId = uuidv4 }: {
     sourceTask: Task; allTasks: Task[]; allProjects: AppData['projects']; allSections: Section[]; allAreas: AppData['areas'];
@@ -1049,7 +1051,7 @@ export const planTaskToSection = ({ sourceTask, allTasks, allProjects, allSectio
     return { ok: true, section, tasks, deletedSource };
 };
 
-/** The RN action and native journal share the same saved-source promotion policy. */
+
 export const planTaskPromotion = ({ sourceTask, title, color, areaId, allTasks, allProjects, allSections,
     allAreas, settings, deviceId, now, projectId }: {
     sourceTask: Task; title?: string; color?: string; areaId?: string;
@@ -1115,8 +1117,37 @@ const matchesPreparedTaskEdit = (current: Task, expected: Task, changes: Prepare
     ))
 );
 
-/** The existing duplicate row construction, shared with native preparation.
- * Generated IDs and order reservations may be supplied from an immutable journal. */
+const PREPARED_TASK_EDIT_CONFLICT: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared task edit conflicts with current data' };
+const PREPARED_TASK_EDIT_PROTECTED: PreparedTaskEditResult = { success: false, reason: 'invalid', error: 'Prepared task edit changes protected fields' };
+const preparedTaskEditChangesProtected = (changes: PreparedTaskEdit['changes']): boolean => ['id', 'createdAt', 'rev', 'revBy', 'updatedAt', 'deletedAt', 'purgedAt']
+    .some((field) => Object.prototype.hasOwnProperty.call(changes, field));
+
+const preparedTaskEditRefusal = (
+    state: Pick<TaskStore, '_allProjects' | '_allSections' | '_allAreas'>, current: Task, edit: PreparedTaskEdit,
+): PreparedTaskEditResult | null => {
+    if (!matchesPreparedTaskEdit(current, edit.before, edit.changes)) return PREPARED_TASK_EDIT_CONFLICT;
+    if (current.deletedAt || current.purgedAt || current.status === 'reference'
+        || isStatusListTaskReadOnly(current, state._allProjects)) {
+        return { success: false, reason: 'invalid', error: 'Task is not editable' };
+    }
+    const after = applyPreparedTaskEditChanges(edit);
+    const container = resolveTaskContainerAssignment({
+        projectId: after.projectId, sectionId: after.sectionId, areaId: after.areaId,
+        allProjects: state._allProjects, allSections: state._allSections, allAreas: state._allAreas,
+    });
+    if (!container.ok || !taskEditValuesEqual(container.projectId, after.projectId)
+        || !taskEditValuesEqual(container.sectionId, after.sectionId) || !taskEditValuesEqual(container.areaId, after.areaId)
+        || (after.projectId && !state._allProjects.some((project) => project.id === after.projectId && isSelectableProjectForTaskAssignment(project)))) {
+        return { success: false, reason: 'invalid', error: 'Prepared task destination is no longer available' };
+    }
+    return null;
+};
+
+const preparedTaskEditUpdate = (current: Task, changes: PreparedTaskEdit['changes'], deviceId: string, updatedAt: string): Task => ({
+    ...applyPreparedTaskEditChanges({ before: current, changes }),
+    rev: nextRevision(current.rev), revBy: deviceId, updatedAt,
+});
+
 export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, deviceId, projectOrder, boardOrder, generateId = uuidv4 }: {
     sourceTask: Task;
     asNextAction?: boolean;
@@ -1157,7 +1188,7 @@ export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, devi
             : isTaskFinished(sourceTask)
                 ? 'inbox'
                 : sourceTask.status,
-        // Normalized so the rrule's series stamp names the new series too.
+
         recurrence: typeof sourceTask.recurrence === 'object'
             ? normalizeRecurrenceForLoad({ ...sourceTask.recurrence, seriesId: newTaskId })
             : sourceTask.recurrence,
@@ -1167,9 +1198,8 @@ export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, devi
         cancelledAt: undefined,
         archivedAt: undefined,
         isFocusedToday: false,
-        // A copy is not in Today's Focus and was never archived with a
-        // project, so neither the focus position nor the restore
-        // metadata of the source belongs to it.
+
+
         focusOrder: undefined,
         boardOrder: undefined,
         statusBeforeProjectArchive: undefined,
@@ -1191,9 +1221,9 @@ export function buildDuplicateTask({ sourceTask, asNextAction, copyId, now, devi
     return newTask;
 }
 
-// Called while native command modules finish loading their store dependency. Keep the factory hoisted.
+
 export function createTaskActions({ set, get, getStorage, debouncedSave, flushPendingSave, trackImmediateSave, hasQueuedSnapshotSave, getSaveGeneration }: TaskActionContext): TaskActions {
-    // The family-specific full envelope and raw authority checks remain caller-owned.
+
     const commitPreparedRawReferenceBatch = async (input: {
         request: { taskIds: string[] }; effect: { tasks: { before: Task; after: Task }[];
             projects: { before: Project; after: Project }[]; sections: { before: Section; after: Section }[];
@@ -1202,8 +1232,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
     conflictMessage: string): Promise<PreparedTaskEditResult> => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: conflictMessage };
         const adapter = getStorage();
-        // These modules import the store, so they register themselves (store-reference-batch-modules.ts). Capture the
-        // adapter, yield once as the module load did, then retain every guard after the await.
+
+
         await Promise.resolve();
         const shared = referenceBatchModules.shared;
         try {
@@ -1211,9 +1241,9 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 scope: 'store', category: 'storage',
                 context: { releaseCheck: 'v1.3.5/reference-batch-registry', outcome: family && shared ? 'registered' : 'missing' },
             });
-        } catch { /* Diagnostics must not affect the guarded action. */ }
+        } catch {                                                       }
         if (!family || !shared) return result;
-        const { validateEnvelope, authorityMatches } = family(input);
+        const { validateEnvelope, authorityMatches, temporal } = family(input);
         const { historyRowLoadProjection, NativeReceiptSqliteAdapter } = shared;
         if (getStorage() !== adapter || !(adapter instanceof NativeReceiptSqliteAdapter) || !adapter.concurrentWritesGuarded
             || !validateEnvelope()) return result;
@@ -1244,7 +1274,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
             const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
             const settings = retainTaxonomyEffects(input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, input.effect.tasks, input.effect.projects);
-            const freshTasks = tasks.map((row) => historyRowLoadProjection(row, input.updateAt));
+            const freshTasks = tasks.map((row) => historyRowLoadProjection(row, input.updateAt, temporal));
             const freshProjects = projects.map(normalizeProjectLifecycleFields);
             clearDerivedCache();
             persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
@@ -1264,11 +1294,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
     };
     return ({
 
-    /**
-     * Add a new task to the store and persist to storage.
-     * @param title Task title
-     * @param initialProps Optional initial properties
-     */
+
     addTask: async (
         title: string,
         initialProps?: Partial<Task>,
@@ -1289,9 +1315,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id: result.ids?.[0] });
     },
 
-    /**
-     * Add multiple tasks in one store update and persistence snapshot.
-     */
+
     addTasks: async (items: Array<{
         title: string;
         initialProps?: Partial<Task>;
@@ -1383,9 +1407,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         if (newTasks.length === 0) {
             if (currentState.persistenceFailure) {
                 try {
-                    // A terminal flush dequeues its exhausted snapshot. Replay
-                    // must durably retry the unchanged optimistic capture
-                    // before native ingress is allowed to acknowledge it.
+
+
                     await get().persistSnapshot();
                     await flushPendingSave();
                 } catch (error) {
@@ -1424,6 +1447,54 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         });
 
         return actionOk({ id: resultIds[0], ids: resultIds });
+    },
+
+    commitPreparedVoiceRows: async (input: NativePreparedVoiceCapture | NativePreparedVoiceResult, authority) => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Voice rows changed before commit' };
+        const prepared = readNativeVoicePrepared(input);
+        if (!prepared || prepared.kind === 'settings') return result;
+        set(memory => {
+            const before = authority.state, durable = authority.snapshot;
+            if (memory.persistenceFailure || memory._allTasks !== before._allTasks || memory._allProjects !== before._allProjects
+                || memory._allSections !== before._allSections || memory._allAreas !== before._allAreas || memory._allPeople !== before._allPeople
+                || memory.settings !== before.settings || memory.lastDataChangeAt !== before.lastDataChangeAt) return memory;
+            const task = prepared.kind === 'capture' ? prepared.task : prepared.taskAfter;
+            const project = prepared.kind === 'capture' ? prepared.capture.project : prepared.project;
+            const current = durable.tasks.filter(row => row.id === task.id);
+            if (prepared.kind === 'capture') {
+                if (current.length || project && durable.projects.some(row => row.id === project.id)
+                    || project && findSelectableProjectByTitleAndArea(durable.projects, project.title, project.areaId)) return memory;
+            } else {
+                const raw = current.length === 1 ? rawReadTaskSnapshot(current[0]) : null;
+                if (!raw || !sameTaskSqliteRow(raw, prepared.taskBefore) || !taskEditValuesEqual(nativeVoiceBasis(durable), prepared.basis)
+                    || project && durable.projects.some(row => row.id === project.id)) return memory;
+            }
+            const deviceId = prepared.kind === 'capture' ? prepared.capture.deviceIdToInitialize : null;
+            if (prepared.kind === 'capture' && (deviceId ? (durable.settings.deviceId ?? null) !== null : durable.settings.deviceId !== task.revBy)) return memory;
+            if (project?.areaId && !(durable.areas ?? []).some(area => area.id === project.areaId && !area.deletedAt)) return memory;
+            const projects = project ? [...durable.projects, project] : durable.projects;
+            if (!task.deletedAt) {
+                const destination = resolveTaskContainerAssignment({ projectId: task.projectId, sectionId: task.sectionId, areaId: task.areaId,
+                    allProjects: projects, allSections: durable.sections ?? [], allAreas: durable.areas ?? [] });
+                if (!destination.ok || destination.projectId !== task.projectId || destination.sectionId !== task.sectionId
+                    || destination.areaId !== task.areaId || task.projectId && !projects.some(row => row.id === task.projectId && isSelectableProjectForTaskAssignment(row))) return memory;
+            }
+            const tasks = prepared.kind === 'capture' ? [...durable.tasks, task] : durable.tasks.map(row => row.id === task.id ? task : row);
+            const settings = retainTaskTaxonomy(deviceId ? { ...durable.settings, deviceId } : durable.settings,
+                prepared.kind === 'result' ? prepared.taskBefore : undefined, task);
+            const snapshot = { ...durable, tasks, projects, settings };
+            const freshTasks = tasks.map(row => normalizeTaskForLoad(row)), freshProjects = projects.map(normalizeProjectLifecycleFields);
+            clearDerivedCache();
+            persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
+                _allSections: durable.sections ?? [], _allAreas: durable.areas ?? [], _allPeople: durable.people ?? [], settings: durable.settings }, snapshot);
+            const lastDataChangeAt = getNextDataChangeAt(memory.lastDataChangeAt);
+            authority.saveBoundary = { taskReference: freshTasks, lastDataChangeAt, generation: getSaveGeneration(), failure: memory.persistenceFailure };
+            authority.rawSavedSnapshot = snapshot;
+            result = { success: true, id: task.id, outcome: 'applied' };
+            return { _allTasks: freshTasks, _allProjects: freshProjects, _allSections: durable.sections ?? [], _allAreas: durable.areas ?? [],
+                _allPeople: durable.people ?? [], settings, lastDataChangeAt };
+        });
+        return result;
     },
 
     commitPreparedCapture: async ({ task, project, deviceIdToInitialize, deviceIdBefore }, raw) => {
@@ -1465,40 +1536,13 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         }
         let result = actionFail('Prepared capture conflicts with current data');
         set((state) => {
-            const existingTask = state._allTasks.find((entry) => entry.id === task.id);
-            const existingProject = project && state._allProjects.find((entry) => entry.id === project.id);
-            const sameTask = existingTask && !existingTask.deletedAt && !existingTask.purgedAt
-                && JSON.stringify(taskToSqliteRow(existingTask)) === JSON.stringify(taskToSqliteRow(task));
-            const sameProject = existingProject && !existingProject.deletedAt && !existingProject.purgedAt
-                && JSON.stringify(projectToSqliteRow(existingProject)) === JSON.stringify(projectToSqliteRow(project!));
-            if ((existingTask && !sameTask) || (existingProject && !sameProject)) return state;
-            // A matching receipt precedes mutable container/creation checks. Never
-            // resurrect an operation-created project missing from an existing task.
-            if (existingTask) {
-                if (project && !sameProject) return state;
-                result = actionOk({ id: task.id });
-                return state;
-            }
-            if (project && !existingProject && findSelectableProjectByTitleAndArea(state._allProjects, project.title, project.areaId)) return state;
-            const projects = project && !existingProject ? [...state._allProjects, project] : state._allProjects;
-            if (task.projectId && !projects.some((entry) => entry.id === task.projectId && isSelectableProjectForTaskAssignment(entry))) return state;
-            if (project?.areaId && !state._allAreas.some((entry) => entry.id === project.areaId && !entry.deletedAt)) return state;
-            const container = resolveTaskContainerAssignment({
-                projectId: task.projectId, sectionId: task.sectionId, areaId: task.areaId,
-                allProjects: projects, allSections: state._allSections, allAreas: state._allAreas,
-            });
-            if (!container.ok || container.projectId !== task.projectId || container.sectionId !== task.sectionId || container.areaId !== task.areaId) return state;
-            const tasks = [...state._allTasks, task];
-            const settings = retainTaskTaxonomy(!state.settings.deviceId && deviceIdToInitialize
-                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings, undefined, task);
-            persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
+            const next = applyPreparedCaptureData(state, { task, project, deviceIdToInitialize });
+            if (!next) return state;
             result = actionOk({ id: task.id });
-            return {
-                _allTasks: tasks,
-                _allProjects: projects,
-                settings,
-                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt),
-            };
+            if (!next.changed) return state;
+            const { tasks, projects, settings } = next;
+            persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
+            return { _allTasks: tasks, _allProjects: projects, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
         });
         return result;
     },
@@ -1506,68 +1550,31 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
     commitPreparedCaptureLines: async ({ tasks: preparedTasks, projects: preparedProjects, deviceIdToInitialize }) => {
         let result = actionFail('Prepared lines conflict with current data');
         set((state) => {
-            const currentTasks = new Map(state._allTasks.map((task) => [task.id, task]));
-            const currentProjects = new Map(state._allProjects.map((project) => [project.id, project]));
-            const operationProjects = new Set(preparedProjects.map((project) => project.id));
-            const missingTasks: Task[] = [], missingProjects: Project[] = [];
-            // Inspect every occupied ID before publishing any missing row.
-            for (const task of preparedTasks) {
-                const existing = currentTasks.get(task.id);
-                if (existing) {
-                    if (existing.deletedAt || existing.purgedAt
-                        || JSON.stringify(taskToSqliteRow(existing)) !== JSON.stringify(taskToSqliteRow(task))
-                        || task.projectId && operationProjects.has(task.projectId) && !currentProjects.has(task.projectId)) return state;
-                } else { missingTasks.push(task); }
-            }
-            for (const project of preparedProjects) {
-                const existing = currentProjects.get(project.id);
-                if (existing) {
-                    if (existing.deletedAt || existing.purgedAt
-                        || JSON.stringify(projectToSqliteRow(existing)) !== JSON.stringify(projectToSqliteRow(project))) return state;
-                } else { missingProjects.push(project); }
-            }
-            // Exact landed rows are receipts before current creation/container policy.
-            if (!missingTasks.length && !missingProjects.length) {
-                result = actionOk({ ids: preparedTasks.map((task) => task.id) });
-                return state;
-            }
-            const projects = [...state._allProjects];
-            for (const project of missingProjects) {
-                if (findSelectableProjectByTitleAndArea(projects, project.title, project.areaId)
-                    || project.areaId && !state._allAreas.some((area) => area.id === project.areaId && !area.deletedAt)) return state;
-                projects.push(project);
-            }
-            for (const task of missingTasks) {
-                if (task.projectId && !projects.some((project) => project.id === task.projectId && isSelectableProjectForTaskAssignment(project))) return state;
-                const container = resolveTaskContainerAssignment({ projectId: task.projectId, sectionId: task.sectionId,
-                    areaId: task.areaId, allProjects: projects, allSections: state._allSections, allAreas: state._allAreas });
-                if (!container.ok || container.projectId !== task.projectId || container.sectionId !== task.sectionId || container.areaId !== task.areaId) return state;
-            }
-            const tasks = [...state._allTasks, ...missingTasks];
-            const settings = retainTaxonomyEffects(!state.settings.deviceId && deviceIdToInitialize
-                ? { ...state.settings, deviceId: deviceIdToInitialize } : state.settings,
-                missingTasks.map((after) => ({ after })), missingProjects.map((after) => ({ after })));
-            persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
+            const next = applyPreparedCaptureLinesData(state, { tasks: preparedTasks, projects: preparedProjects, deviceIdToInitialize });
+            if (!next) return state;
             result = actionOk({ ids: preparedTasks.map((task) => task.id) });
+            if (!next.changed) return state;
+            const { tasks, projects, settings } = next;
+            persist(set, debouncedSave, state, { tasks, projects, ...(settings !== state.settings ? { settings } : {}) });
             return { _allTasks: tasks, _allProjects: projects, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
         });
         return result;
     },
 
-    // The contract validates action authority before this guarded one-row commit.
+
     commitPreparedBoardTask: async ({ kind, before, after, move, admitMove, deviceIdBefore, deviceIdToInitialize, respectReadOnly, strictBefore }) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared Board action conflicts with current data' };
         const persisted = (task: Task) => {
-            // Normal loading adds pushCount: 0 without saving it. A raw recovery
-            // row must match that default while retaining every other CAS field.
+
+
             const values = taskToSqliteRow({ ...task, pushCount: task.pushCount ?? 0 });
             return taskFromSqliteRow(Object.fromEntries(TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]])));
         };
         const matches = (left: Task, right: Task) => taskEditValuesEqual(persisted(left), persisted(right));
         set((state) => {
             const target = state._tasksById.get(after.id);
-            // An unchanged durable copy is a receipt even if its source was
-            // subsequently edited, deleted or moved to another container.
+
+
             if (!strictBefore && target && matches(target, after)) {
                 result = { success: true, id: after.id, outcome: 'replayed' };
                 return state;
@@ -1595,8 +1602,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 })) return state;
             }
             if (kind === 'duplicateTask') {
-                // Recheck only the scalar reservations the pure builder read.
-                // Exact target replay above deliberately precedes these guards.
+
+
                 const projectOrder = before.projectId ? createProjectOrderReserver(state._allTasks)(before.projectId) : undefined;
                 const boardOrder = after.status === before.status ? boardOrderForDuplicate(before.boardOrder,
                     state._allTasks.filter((task) => task.status === before.status && !task.deletedAt)) : undefined;
@@ -1635,8 +1642,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 result = { success: false, reason: 'missing', error: 'Task not found' };
                 return state;
             }
-            // The complete stamped row is the receipt. Subsequent task and
-            // container edits have no power to invalidate an already saved result.
+
+
             if (matches(current, after)) {
                 result = { success: true, id: after.id, outcome: 'replayed' };
                 return state;
@@ -1667,8 +1674,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         const sameTask = (left: Task, right: Task) => JSON.stringify(taskToSqliteRow(left)) === JSON.stringify(taskToSqliteRow(right));
         set((state) => {
             const existingTask = state._tasksById.get(task.id);
-            // The full durable task row answers a lost reply before any mutable
-            // project, setting, area, order or Focus input is inspected.
+
+
             if (existingTask) {
                 if (sameTask(existingTask, task)) result = { success: true, id: task.id, outcome: 'replayed' };
                 return state;
@@ -1678,9 +1685,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 if (defaultAreaWitness.before === null ? Boolean(current)
                     : !current || (current.deletedAt ?? null) !== defaultAreaWitness.before.deletedAt) return state;
             }
-            // This command publishes task and optional project together. An
-            // occupied generated project ID with no task is a conflict, never
-            // a partial-commit recovery or an overwrite.
+
+
             if (project && state._projectsById.has(project.id)) return state;
             const usesDefaultArea = !intent.projectToCreate && !intent.props.projectId
                 && !Object.prototype.hasOwnProperty.call(intent.props, 'areaId');
@@ -1740,13 +1746,13 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /** One guarded Process Inbox publication; the native contract proves the effect first. */
+
     commitPreparedInboxEffect: async (input: PreparedInboxEffect) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared Process Inbox change conflicts with current data' };
         set((state) => {
             const receipt = inspectPreparedAffectedRows(state, input);
-            // Every target row is the complete durable receipt. It precedes all
-            // settings, source, membership and order guards that may later change.
+
+
             if (receipt === 'after') {
                 result = { success: true, id: input.sourceBefore.id, outcome: 'replayed' };
                 return state;
@@ -1829,7 +1835,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /** A frozen checklist/editor Save or saved-list Reset, including induced rows. */
+
     commitPreparedChecklistEffect: async (input: PreparedChecklistEffect, options?: PreparedChecklistWriteOptions) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared checklist change conflicts with current data' };
         set((memory) => {
@@ -1865,7 +1871,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 const tasks = durable.tasks.map((task) => {
                     const values = taskToSqliteRow(task);
                     return normalizeTaskForLoad(mapSqliteTaskRow(Object.fromEntries(
-                        TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]]))), at);
+                        TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]]))), at, raw.frozenTemporal);
                 });
                 const projects = durable.projects.map(normalizeProjectLifecycleFields);
                 const sections = durable.sections ?? []; const areas = durable.areas ?? [];
@@ -1876,12 +1882,12 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                     _areasById: new Map(areas.map((row) => [row.id, row])), tasks,
                     settings: durable.settings };
             }
-            // A complete target receipt takes precedence over every mutable
-            // setting, source, membership, and order guard on cold recovery.
+
+
             const receipt = inspectPreparedAffectedRows(state, input);
             if (receipt === 'after') {
-                // A new receipted completion UUID must never claim another request's
-                // already-applied effect. Only its own durable receipt can replay.
+
+
                 if (options?.requireBefore) return memory;
                 result = { success: true, id: input.sourceBefore.id, outcome: 'replayed' };
                 return memory;
@@ -1921,7 +1927,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             }
             if (guards.focusCount !== null) {
                 if (!guards.focusBoundary || guards.focusLimit === null
-                    || countFocusedTasksBeforeBoundary(state.tasks, guards.focusBoundary) !== guards.focusCount
+                    || countFocusedTasksBeforeBoundary(state.tasks, guards.focusBoundary, raw?.frozenTemporal?.dates) !== guards.focusCount
                     || normalizeFocusTaskLimit(state.settings.gtd?.focusTaskLimit) !== guards.focusLimit) return memory;
             }
             if (guards.autoArchiveDays !== null && (state.settings.gtd?.autoArchiveDays ?? null) !== guards.autoArchiveDays) return memory;
@@ -1937,15 +1943,22 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             const settings = retainTaxonomyEffects(input.deviceIdToInitialize
                 ? { ...state.settings, deviceId: input.deviceIdToInitialize } : state.settings, input.tasks, input.projects);
             if (raw && durable) {
-                // The guards inspect the actual normal-load view; the save overlays
-                // only affected rows over the complete original durable snapshot.
+
+
                 const overlay = <T extends { id: string }>(rows: T[], effects: Array<{ before: T | null; after: T }>) =>
                     [...replaceEntitiesInArray(rows, effects.filter((row) => row.before).map((row) => row.after)),
                         ...effects.filter((row) => !row.before).map((row) => row.after)];
                 const savedTasks = overlay(durable.tasks, input.tasks);
                 const savedProjects = overlay(durable.projects, input.projects);
                 const savedSections = overlay(durable.sections ?? [], input.sections);
-                const freshTasks = savedTasks.map((row) => normalizeTaskForLoad(row));
+                const changedIds = new Set(input.tasks.map(row => row.after.id));
+                const at = input.tasks.find(row => row.after.id === input.sourceBefore.id)!.after.updatedAt;
+                const freshTasks = savedTasks.map(row => {
+                    if (!raw.frozenTemporal || !changedIds.has(row.id)) return normalizeTaskForLoad(row);
+                    const values = taskToSqliteRow(row);
+                    return normalizeTaskForLoad(mapSqliteTaskRow(Object.fromEntries(
+                        TASK_SQLITE_COLUMNS.map((column, index) => [column, values[index]]))), at, raw.frozenTemporal);
+                });
                 const freshProjects = savedProjects.map(normalizeProjectLifecycleFields);
                 clearDerivedCache();
                 persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
@@ -1972,48 +1985,63 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
     },
 
     commitPreparedTaskEdit: async ({ before, changes }) => {
-        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Prepared task edit conflicts with current data' };
+        let result: PreparedTaskEditResult = PREPARED_TASK_EDIT_CONFLICT;
         const after = applyPreparedTaskEditChanges({ before, changes });
-        if (['id', 'createdAt', 'rev', 'revBy', 'updatedAt', 'deletedAt', 'purgedAt'].some((field) => Object.prototype.hasOwnProperty.call(changes, field))) {
-            return { success: false, reason: 'invalid', error: 'Prepared task edit changes protected fields' };
-        }
+        if (preparedTaskEditChangesProtected(changes)) return PREPARED_TASK_EDIT_PROTECTED;
         set((state) => {
             const current = state._allTasks.find((entry) => entry.id === before.id);
             if (!current) {
                 result = { success: false, reason: 'missing', error: 'Task not found' };
                 return state;
             }
-            // The complete applied state precedes mutable container checks. A
-            // content match still needs the contract's durable-save barrier.
+
+
             if (matchesPreparedTaskEdit(current, after, changes)) {
                 result = { success: true, id: current.id, outcome: 'replayed' };
                 return state;
             }
-            if (!matchesPreparedTaskEdit(current, before, changes)) return state;
-            if (current.deletedAt || current.purgedAt || current.status === 'reference'
-                || isStatusListTaskReadOnly(current, state._allProjects)) {
-                result = { success: false, reason: 'invalid', error: 'Task is not editable' };
-                return state;
-            }
-            const container = resolveTaskContainerAssignment({
-                projectId: after.projectId, sectionId: after.sectionId, areaId: after.areaId,
-                allProjects: state._allProjects, allSections: state._allSections, allAreas: state._allAreas,
-            });
-            if (!container.ok || !taskEditValuesEqual(container.projectId, after.projectId)
-                || !taskEditValuesEqual(container.sectionId, after.sectionId) || !taskEditValuesEqual(container.areaId, after.areaId)
-                || (after.projectId && !state._allProjects.some((project) => project.id === after.projectId && isSelectableProjectForTaskAssignment(project)))) {
-                result = { success: false, reason: 'invalid', error: 'Prepared task destination is no longer available' };
+            const refusal = preparedTaskEditRefusal(state, current, { before, changes });
+            if (refusal) {
+                result = refusal;
                 return state;
             }
             const device = ensureDeviceId(state.settings);
-            const updated = {
-                ...applyPreparedTaskEditChanges({ before: current, changes }),
-                rev: nextRevision(current.rev), revBy: device.deviceId, updatedAt: new Date().toISOString(),
-            };
+            const updated = preparedTaskEditUpdate(current, changes, device.deviceId, new Date().toISOString());
             const tasks = replaceEntityInArray(state._allTasks, current.id, updated);
             const settings = retainTaskTaxonomy(device.settings, current, updated);
             persist(set, debouncedSave, state, { tasks, settings });
             result = { success: true, id: current.id, outcome: 'applied' };
+            return { _allTasks: tasks, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
+        });
+        return result;
+    },
+
+    commitPreparedTaskEdits: async (edits) => {
+        if (!edits.length || new Set(edits.map((edit) => edit.before.id)).size !== edits.length) return PREPARED_TASK_EDIT_CONFLICT;
+        if (edits.some((edit) => preparedTaskEditChangesProtected(edit.changes))) return PREPARED_TASK_EDIT_PROTECTED;
+        let result: PreparedTaskEditResult = PREPARED_TASK_EDIT_CONFLICT;
+        set((state) => {
+            const device = ensureDeviceId(state.settings);
+            const updatedAt = new Date().toISOString();
+            let tasks = state._allTasks;
+            let settings = device.settings;
+            for (const edit of edits) {
+                const current = state._allTasks.find((entry) => entry.id === edit.before.id);
+                if (!current) {
+                    result = { success: false, reason: 'missing', error: 'Task not found' };
+                    return state;
+                }
+                const refusal = preparedTaskEditRefusal(state, current, edit);
+                if (refusal) {
+                    result = refusal;
+                    return state;
+                }
+                const updated = preparedTaskEditUpdate(current, edit.changes, device.deviceId, updatedAt);
+                tasks = replaceEntityInArray(tasks, current.id, updated);
+                settings = retainTaskTaxonomy(settings, current, updated);
+            }
+            persist(set, debouncedSave, state, { tasks, settings });
+            result = { success: true, ids: edits.map((edit) => edit.before.id), outcome: 'applied' };
             return { _allTasks: tasks, settings, lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt) };
         });
         return result;
@@ -2108,7 +2136,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             const projectAfter = bindRows(durable.projects, input.effect.projects, sameProjectSqliteRow);
             const sectionAfter = bindRows(durable.sections, input.effect.sections, sameSectionSqliteRow);
             if (!taskAfter || !projectAfter || !sectionAfter) return memory;
-            // Only original BEFORE plus this UUID's durable receipt may settle this batch.
+
             const tasks = durable.tasks.map((row) => taskAfter.get(row.id) ?? row);
             const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
             const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
@@ -2157,7 +2185,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             const projectAfter = bindRows(durable.projects, input.effect.projects, sameProjectSqliteRow);
             const sectionAfter = bindRows(durable.sections, input.effect.sections, sameSectionSqliteRow);
             if (!taskAfter || !projectAfter || !sectionAfter) return memory;
-            // Rows, device initialization and cleanup queue publish together against original raw BEFORE.
+
             const tasks = durable.tasks.map((row) => taskAfter.get(row.id) ?? row);
             const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
             const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
@@ -2239,8 +2267,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                         && getBulkMoveStatusOptions('done').includes(input.request.status) ? input.request.status : null;
                 if (!target || !input.request.taskIds.every((id) => taskAfter.get(id)?.status === target)) return memory;
             }
-            // Only exact BEFORE can apply. Equal AFTER without this request's
-            // durable receipt is never evidence that the batch already ran.
+
+
             const tasks = durable.tasks.map((row) => taskAfter.get(row.id) ?? row);
             const projects = durable.projects.map((row) => projectAfter.get(row.id) ?? row);
             const sections = durable.sections.map((row) => sectionAfter.get(row.id) ?? row);
@@ -2267,21 +2295,64 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
 
     commitPreparedInboxTasksMove: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxMove, 'Inbox Move conflicts with saved data'),
+    commitPreparedProjectTasksMove: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectMove, 'Project Move conflicts with saved data'),
 
     commitPreparedInboxTasksAddTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxAddTag, 'Inbox Add tag conflicts with saved data'),
 
+    commitPreparedProjectTasksAddTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectAddTag, 'Project Add tag conflicts with saved data'),
+
     commitPreparedInboxTasksRemoveTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxRemoveTag, 'Inbox Remove tag conflicts with saved data'),
 
+    commitPreparedProjectTasksRemoveTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectRemoveTag, 'Project Remove tag conflicts with saved data'),
+
     commitPreparedInboxTasksOrganize: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.inboxOrganize, 'Inbox Organize conflicts with saved data'),
+
+    commitPreparedProjectTasksOrganize: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
+        commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.projectOrganize, 'Project Organize conflicts with saved data'),
 
     commitPreparedReferenceTasksAddTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.addTag, 'Reference Add tag conflicts with saved data'),
 
     commitPreparedReferenceTasksRemoveTag: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> =>
         commitPreparedRawReferenceBatch(input, authority, referenceBatchModules.removeTag, 'Reference Remove tag conflicts with saved data'),
+
+    commitPreparedTaskChecklistMove: async (input, authority): Promise<PreparedTaskEditResult> => {
+        let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Checklist move conflicts with saved data' };
+        set(memory => {
+            const before = authority.state, shared = referenceBatchModules.shared;
+            if (!shared || memory._allTasks !== before._allTasks || memory._allProjects !== before._allProjects
+                || memory._allAreas !== before._allAreas || memory._allSections !== before._allSections
+                || memory._allPeople !== before._allPeople || memory.settings !== before.settings
+                || memory.lastDataChangeAt !== before.lastDataChangeAt) return memory;
+            const durable = authority.snapshot;
+            if ((durable.settings.deviceId ?? null) !== input.deviceIdBefore
+                || (input.deviceIdBefore === null ? !input.deviceIdToInitialize : input.deviceIdToInitialize !== null)
+                || !input.before.length || input.before.length > 2 || input.before.length !== input.after.length) return memory;
+            const current = new Map(durable.tasks.map(row => [row.id,row])), after = new Map<string,Task>();
+            for (let index=0;index<input.before.length;index++) {
+                const old=input.before[index],next=input.after[index],saved=current.get(old.id);
+                if (!saved || old.id!==next.id || after.has(old.id) || !sameTaskSqliteRow(saved,old) || !sameSectionDeleteJson(saved,old)) return memory;
+                after.set(next.id,next);
+            }
+            const tasks=durable.tasks.map(row=>after.get(row.id)??row),settings=retainTaxonomyEffects(input.deviceIdToInitialize
+                ? {...durable.settings,deviceId:input.deviceIdToInitialize}:durable.settings,input.after.map((row,index)=>({before:input.before[index],after:row})),[]);
+            const freshTasks=tasks.map(row=>after.has(row.id)?shared.historyRowLoadProjection(row,input.updateAt,input.frozenTemporal):normalizeTaskForLoad(row));
+            clearDerivedCache();persist(set,debouncedSave,{...memory,_allTasks:durable.tasks,_allProjects:durable.projects,_allSections:durable.sections,
+                _allAreas:durable.areas,_allPeople:durable.people??[],settings:durable.settings},{...durable,tasks,settings});
+            const lastDataChangeAt=getNextDataChangeAt(memory.lastDataChangeAt);
+            authority.saveBoundary={taskReference:freshTasks,lastDataChangeAt,generation:getSaveGeneration(),failure:memory.persistenceFailure};
+            result={success:true,ids:input.before.map(row=>row.id),outcome:'applied'};
+            return {_allTasks:freshTasks,_allProjects:durable.projects.map(normalizeProjectLifecycleFields),_allSections:durable.sections,
+                _allAreas:durable.areas,_allPeople:durable.people??[],settings,lastDataChangeAt};
+        });
+        return result;
+    },
 
     commitPreparedArchivedTasksMutation: async (input, authority: PreparedAreaAuthority): Promise<PreparedTaskEditResult> => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict', error: 'Archive Trash conflicts with saved data' };
@@ -2304,10 +2375,13 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                     || (input.operation === 'delete' ? Boolean(old.deletedAt) || !next.deletedAt : !old.deletedAt || Boolean(next.deletedAt))) return memory;
                 after.set(old.id, next);
             }
-            // Exact BEFORE is required; equal AFTER alone never acknowledges a UUID.
+
             const tasks = durable.tasks.map((row) => after.get(row.id) ?? row);
             const settings = retainTaxonomyEffects(input.deviceIdToInitialize ? { ...durable.settings, deviceId: input.deviceIdToInitialize } : durable.settings, input.after.map((after, index) => ({ before: input.before[index], after })), []);
-            const freshTasks = tasks.map((row) => normalizeTaskForLoad(row));
+            const loadFrozen = referenceBatchModules.shared?.historyRowLoadProjection;
+            if (input.frozenTemporal && !loadFrozen) return memory;
+            const freshTasks = tasks.map((row) => input.frozenTemporal && after.has(row.id)
+                ? loadFrozen!(row, input.frozenTemporal.at, input.frozenTemporal) : normalizeTaskForLoad(row));
             const freshProjects = durable.projects.map(normalizeProjectLifecycleFields);
             clearDerivedCache();
             persist(set, debouncedSave, { ...memory, _allTasks: durable.tasks, _allProjects: durable.projects,
@@ -2339,7 +2413,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                     || !samePreparedBoardOrderBefore(rows[0], pair.before)) return memory;
                 replacements.set(pair.before.id, pair.after);
             }
-            // Only a typed durable operation receipt can replay; AFTER equality never does.
+
             const tasks = durable.tasks.map(row => replacements.get(row.id) ?? row);
             const freshTasks = tasks.map(row => normalizeTaskForLoad(row));
             const freshProjects = durable.projects.map(normalizeProjectLifecycleFields);
@@ -2373,7 +2447,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             }
             const sameRaw = (left: Task, right: Task) => sameTaskSqliteRow(left, right)
                 && sameSectionDeleteJson(left, right);
-            // Full result receipt wins before mutable parent/order eligibility.
+
             if (sameRaw(current, input.effect.task.after)
                 && (input.deviceIdToInitialize === null
                     || (durable.settings.deviceId ?? null) === input.deviceIdToInitialize)) {
@@ -2408,7 +2482,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             error: 'Prepared task Focus conflicts with current data' };
         set((state) => {
             const current = state._allTasks.find((row) => row.id === input.request.taskId);
-            // A full durable Task receipt wins before mutable eligibility, parent or clock checks.
+
             if (current && sameTaskSqliteRow(current, input.effect.task.after)) {
                 result = { success: true, id: current.id, outcome: 'replayed' };
                 return state;
@@ -2443,7 +2517,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             if (affected.length === 0 || currentById.size !== state._allTasks.length
                 || new Set(input.request.ids).size !== input.request.ids.length
                 || new Set(affected.map(({ before }) => before.id)).size !== affected.length) return state;
-            // A complete durable receipt wins before mutable membership, parent, or clock checks.
+
             if (affected.every(({ after }) => {
                 const current = currentById.get(after.id);
                 return current && sameTaskSqliteRow(current, after) && sameSectionDeleteJson(current, after);
@@ -2478,11 +2552,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /**
-     * Update an existing task.
-     * @param id Task ID
-     * @param updates Properties to update
-     */
+
     updateTask: async (id: string, updates: Partial<Task>) => {
         const updateStartedAt = Date.now();
         const changeAt = Date.now();
@@ -2615,16 +2685,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         logStartOnlyRecurringCompletions(completedRecurrenceRows, createdRecurringTasks);
         const persistenceStartedAt = Date.now();
         const storage = getStorage();
-        // A queued (not yet dispatched) full-state save can hold rows this task
-        // now references — e.g. Process Inbox creates the project through the
-        // debounced path and immediately points the task at it. A focused task
-        // save dispatched now would reach SQLite before the project row and
-        // fail its FOREIGN KEY check (#1024), so fold the task into the queued
-        // snapshot instead. Saves already in flight are safe: both platform
-        // adapters run writes through one FIFO queue.
-        //
-        // A new device identity or retained token lives in the snapshot's settings;
-        // the single-row write cannot carry those changes.
+
+
         if (
             incrementalPersistence.task
             && !incrementalPersistence.hasRecurringFollowUp
@@ -2707,7 +2769,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return actionOk();
     },
 
-    /** Archive one occurrence and durably create the next without a completion. */
+
     skipRecurringTaskOccurrence: async (id: string) => {
         const task = get()._tasksById.get(id);
         if (!task || !canSkipRecurringTaskOccurrence(task)) {
@@ -2723,7 +2785,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             const tasks = planSkippedRecurringOccurrence({ task: currentTask, allTasks: state._allTasks,
                 now, deviceId: deviceState.deviceId,
                 createId: uuidv4 }).tasks;
-            // The same catalogue writes as the native prepared Skip: the archived source and its new follow-up.
+
             const settings = retainTaxonomyEffects(deviceState.settings, tasks.flatMap((after) => {
                 const before = state._tasksById.get(after.id);
                 return before === after ? [] : [{ before, after }];
@@ -2755,7 +2817,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return actionOk();
     },
 
-    /** Archive a task as cancelled without completing or advancing recurrence. */
+
     cancelTask: async (id: string) => {
         const task = get()._tasksById.get(id);
         if (!task || task.deletedAt || task.purgedAt) {
@@ -2772,9 +2834,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             });
             if (!result.success) return result;
         } else if (retryingFailedCancellation) {
-            // A terminal flush dequeues its exhausted snapshot. The in-memory
-            // cancellation still needs a fresh durable retry on the next user
-            // acknowledgement attempt, without changing its revision or time.
+
+
             await get().persistSnapshot();
         }
         try {
@@ -2800,10 +2861,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id });
     },
 
-    /**
-     * Soft-delete a task by setting deletedAt.
-     * @param id Task ID
-     */
+
     deleteTask: async (id: string) => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -2815,11 +2873,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Restore a soft-deleted task. A purged task is the compacted tombstone of
-     * a permanent delete, so it counts as missing: reviving it would resurrect
-     * an emptied row and sync it back to every device.
-     */
+
     restoreTask: async (id: string) => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -2834,12 +2888,10 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Permanently delete a task (removes from storage).
-     */
+
     purgeTask: async (id: string) => {
-        // Only a task still in Trash may be deleted forever: sync can restore it between the
-        // Trash confirmation and the tap, and then this must not purge a live task.
+
+
         const current = get()._tasksById.get(id);
         if (current && (!current.deletedAt || current.purgedAt)) {
             logWarn('Purge refused for a task not in Trash', {
@@ -2849,8 +2901,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
             });
             return actionFail('Task is not in Trash');
         }
-        // The mutation checks again on the state it writes, as purgeTasks does, so a
-        // purge that waited behind a document restore never compacts a live task.
+
+
         const refusal = { purged: null as boolean | null };
         const result = await mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -2882,9 +2934,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return actionFail('Task is not in Trash');
     },
 
-    /**
-     * Restore multiple soft-deleted tasks in a single store update.
-     */
+
     restoreTasks: async (ids: string[]) => {
         const idSet = new Set(ids);
         return mutateTasks({ set, debouncedSave }, {
@@ -2897,10 +2947,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Permanently delete multiple soft-deleted tasks in a single store update.
-     * Only already-trashed tasks are purged, so the visible list is untouched.
-     */
+
     purgeTasks: async (ids: string[]) => {
         const idSet = new Set(ids);
         return mutateTasks({ set, debouncedSave }, {
@@ -2918,9 +2965,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Permanently delete all soft-deleted tasks.
-     */
+
     purgeDeletedTasks: async () => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => state._allTasks.filter((task) => task.deletedAt && !task.purgedAt),
@@ -2937,16 +2982,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Duplicate a task as a fresh, re-doable copy: clones the details (title, dates,
-     * recurrence, tags, project) but resets completion — unchecks the checklist and
-     * clears completedAt.
-     *
-     * The copy keeps the source's status, which done/archived cannot do (a
-     * pre-completed copy is useless). Those land in the Inbox instead of straight
-     * on the actionable list: work finished once is not automatically still worth
-     * doing, so it gets clarified again like any other capture (#950).
-     */
+
     duplicateTask: async (id: string, asNextAction?: boolean, copyId?: string) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
@@ -2992,16 +3028,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return missingTask ? actionFail('Task not found') : refusedCopyId ? actionFail('Duplicate id does not match source') : actionOk({ id: duplicatedTaskId });
     },
 
-    /**
-     * Turn a task into a section of the project it already lives in: the title
-     * becomes the section, its checklist items become tasks inside it (completed
-     * ones stay done), and the original task is soft-deleted so its notes and
-     * attachments remain recoverable from Trash (#1106).
-     *
-     * Every entity is validated and built before one store mutation publishes
-     * the complete task/section snapshot. No partial conversion is observable or
-     * persistable, and retry sees the source tombstone instead of duplicating it.
-     */
+
     convertTaskToSection: async (id: string) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
@@ -3046,7 +3073,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id: convertedSectionId });
     },
 
-    /** Atomic native Convert to section: the frozen plan lands only on the rows and orders it was made from. */
+
     commitPreparedTaskToSection: async (input: PreparedTaskToSection) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict',
             error: 'Prepared Convert to section conflicts with current data' };
@@ -3080,9 +3107,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /**
-     * Create or reuse a project from a task while keeping the task as the first action.
-     */
+
     promoteTaskToProject: async (id: string, options?: { title?: string; color?: string; areaId?: string }) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
@@ -3128,7 +3153,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return actionOk({ id: promotedProjectId, reused: reusedExistingProject });
     },
 
-    /** Atomic saved-task move and optional project creation for the native journal. */
+
     commitPreparedTaskPromotion: async (input: PreparedTaskPromotion & { request: { requestId: string;
         taskId: string; taskRevision: string; title: string }; result: { id: string; reused: boolean } }) => {
         let result: PreparedTaskEditResult = { success: false, reason: 'conflict',
@@ -3154,9 +3179,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 const current = state._areasById.get(input.selectedArea.id);
                 if (!current || !taskEditValuesEqual(current, input.selectedArea) || current.deletedAt) return state;
             } else {
-                // A missing/deleted inherited Area is a decision too. If it
-                // becomes live before the write, the shared planner would now
-                // assign the project to it instead of creating an unassigned one.
+
+
                 const inheritedAreaId = input.sourceBefore.areaId ?? input.sourceProject?.areaId;
                 const current = inheritedAreaId ? state._areasById.get(inheritedAreaId) : undefined;
                 if (current && !current.deletedAt) return state;
@@ -3186,9 +3210,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         return result;
     },
 
-    /**
-     * Reset checklist items to unchecked (useful for reusable lists).
-     */
+
     resetTaskChecklist: async (id: string) => {
         return mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
@@ -3203,7 +3225,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
     moveTaskToChecklist: async (sourceId: string, targetId: string) => {
         const itemId = checklistItemIdForMovedTask(sourceId);
         let alreadyMoved = false;
-        // Target and source change in one snapshot: no save holds the trashed source without its checklist item.
+
         const result = await mutateTasks({ set, debouncedSave }, {
             selectTasks: (state) => {
                 const source = state._tasksById.get(sourceId);
@@ -3211,7 +3233,7 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 if (!source || !target || !isChecklistMoveTarget(target, sourceId)) return [];
                 const hasItem = Boolean(target.checklist?.some((item) => item.id === itemId));
                 if (hasItem && source.deletedAt) {
-                    alreadyMoved = true; // a retry of a move that already landed
+                    alreadyMoved = true;
                     return [];
                 }
                 if (!canMoveTaskToChecklist(source, resolveQuickCaptureDefaultAreaId(state.settings, state.areas))) return [];
@@ -3246,19 +3268,13 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
         });
     },
 
-    /**
-     * Move a task to a different status.
-     * @param id Task ID
-     * @param newStatus New status
-     */
+
     moveTask: async (id: string, newStatus: TaskStatus) => {
-        // Delegate to updateTask to ensure recurrence/metadata logic is applied
+
         return get().updateTask(id, { status: newStatus });
     },
 
-    /**
-     * Batch update tasks in a single save cycle.
-     */
+
     batchUpdateTasks: async (updatesList: Array<{ id: string; updates: Partial<Task> }>) => {
         if (updatesList.length === 0) return actionOk();
         const prepared = prepareTaskBatchUpdatesForStore({ updatesList, state: get() });
@@ -3408,9 +3424,8 @@ export function createTaskActions({ set, get, getStorage, debouncedSave, flushPe
                 : statusFilter && statusFilter !== 'all'
                     ? derived.activeTasksByStatus.get(statusFilter) ?? []
                     : state.tasks;
-            // indexedTasks are already visible (deleted/archived excluded by whichever
-            // derived index produced them), so taskMatchesQuery's own visibility check
-            // here is redundant but harmless - cheaper than a second matcher variant.
+
+
             return indexedTasks.filter((task) => taskMatchesQuery(task, options));
         }
         return get()._allTasks.filter((task) => taskMatchesQuery(task, options));

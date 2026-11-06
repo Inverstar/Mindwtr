@@ -20,6 +20,7 @@ const validateField = (field: TaskDraftField, value: unknown): boolean => {
     if (['timeSpentMinutes', 'relativeStartOffset'].includes(field)) return value === undefined
         || field === 'timeSpentMinutes' && typeof value === 'number' && Number.isFinite(value) && value >= 0
         || field === 'relativeStartOffset' && typeof value === 'object' && value !== null;
+    if (field === 'dueReminderLeadMinutes' || field === 'startReminderLeadMinutes') return value === undefined || Number.isInteger(value);
     if ((field === 'showFutureRecurrence' || field === 'preserveChecklistOnRepeat')) return typeof value === 'boolean';
     return typeof value === 'string';
 };
@@ -68,11 +69,16 @@ function changePayload(input: NativeTaskEditorSaveCheckpointInput, mutate: (payl
 }
 
 describe('real native ordinary Save checkpoint correspondence (pure, unbound)', () => {
+    it('accepts reminder policy and advance reminder edits, including a cleared lead', () => {
+        ready(fixture({ reminderPolicy: 'skip', dueReminderLeadMinutes: 60, startReminderLeadMinutes: 15 }).input);
+        ready(fixture({ dueReminderLeadMinutes: undefined }, initial({ dueReminderLeadMinutes: 30 })).input);
+        refused(changePayload(fixture({ reminderPolicy: 'skip' }).input, (payload) => { payload.edited.reminderPolicy = 'send'; }));
+    });
     it('matches the full producer envelope with only an added file without granting ownership or performing IO', () => {
         const { input } = fixture(); const original = JSON.stringify(input);
         ready(input); expect(JSON.stringify(input)).toBe(original);
         changePayload(input, (payload) => { payload.tab = 'view'; }); ready(input);
-        // Correspondence is deliberately not a URI/library/workspace ownership check.
+
         changePayload(input, (payload) => { payload.attachments[0].uri = 'file:///elsewhere/file.pdf'; });
         (input.saveRequest as { attachments: { value: Attachment[] } }).attachments.value[0].uri = 'file:///elsewhere/file.pdf'; ready(input);
     });

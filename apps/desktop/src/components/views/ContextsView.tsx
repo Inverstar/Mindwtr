@@ -37,7 +37,7 @@ import {
     type ContextOrTagMatchMode,
     type ContextsChipLabel,
 } from '@mindwtr/core';
-import { AtSign, CheckSquare, ChevronDown, ChevronRight, Filter, Hash, List, Tag, type LucideIcon } from 'lucide-react';
+import { AtSign, CheckSquare, ChevronDown, ChevronRight, Filter, Hash, List, PanelLeftClose, PanelLeftOpen, Tag, type LucideIcon } from 'lucide-react';
 import { TokenPickerModal } from '../TokenPickerModal';
 import { PromptModal } from '../PromptModal';
 import { AgendaFiltersPanel } from './agenda/AgendaFiltersPanel';
@@ -85,13 +85,34 @@ type BulkTokenPickerState = {
 
 const hasContext = (task: Task) => (task.contexts?.length || 0) > 0 || (task.tags?.length || 0) > 0;
 
-// Its own key, not a field on the contexts view state: persistContextsViewSelection
-// rewrites that key from a fixed three-field shape, so any fold stored there would be
-// dropped the next time another view navigated to a token.
+
 const CONTEXTS_GROUP_COLLAPSE_STORAGE_KEY = 'mindwtr:view:contexts:groups:v1';
 const CLEAR_SELECTION_OPTION = '__clear__';
 
 export function ContextsView() {
+    const [sidebarCollapsed, setSidebarCollapsed] = usePersistedViewState(
+        'mindwtr:view:contexts:sidebar-collapsed:v1', false,
+        (value) => value === true,
+    );
+    const contextsLayoutRef = useRef<HTMLDivElement | null>(null);
+    const [availableWidth, setAvailableWidth] = useState<number | null>(null);
+    const isCompactLayout = availableWidth === null ? window.innerWidth < 1024 : availableWidth < 760;
+    useEffect(() => {
+        const layout = contextsLayoutRef.current;
+        if (!layout) return;
+        const measure = () => {
+            const width = layout.clientWidth;
+            if (width > 0) setAvailableWidth(width);
+        };
+        measure();
+        window.addEventListener('resize', measure);
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+        observer?.observe(layout);
+        return () => {
+            window.removeEventListener('resize', measure);
+            observer?.disconnect();
+        };
+    }, []);
     const perf = usePerformanceMonitor('ContextsView');
     const { tasksById, projects, areas, settings, theme, undoNotificationsEnabled, updateSettings } = useTaskStore(
         (state) => ({
@@ -162,7 +183,7 @@ export function ContextsView() {
             return { ...current, selectedContexts: next, matchMode: next.length === 0 ? 'all' : current.matchMode };
         });
     }, [setPersistedViewState]);
-    // A plain click switches to the token; Ctrl/Cmd-click (or Ctrl/Cmd+Enter) adds it (#1427).
+
     const pressContextToken = useCallback((value: string, additive: boolean) => {
         if (additive) {
             toggleSelectedContext(value);
@@ -195,8 +216,8 @@ export function ContextsView() {
         setSelectedContext(nextSelectedContext);
         setSearchQuery('');
     }), [setSelectedContext]);
-    // Deleted, parked-project and out-of-area tasks are all gone from
-    // `activeTasks` — one core predicate, shared with every other list.
+
+
     const { projectById: projectMap, visibleTasks: activeTasks } = useVisibleTaskContext();
     const [filtersOpen, setFiltersOpen] = useState(false);
     const [saveFilterOpen, setSaveFilterOpen] = useState(false);
@@ -244,9 +265,7 @@ export function ContextsView() {
         return () => window.clearTimeout(timer);
     }, [perf.enabled]);
 
-    // One memoized chain from here to sortedTasks: every step feeds a downstream
-    // useMemo, the virtualizer's count and getItemKey, and the array handed to
-    // useTaskSelection, so a fresh array anywhere invalidates all of them (#856).
+
     const scopedTasks = useMemo(() => {
         return selectContextsFilterTasks(activeTasks, contextCriteria, projects);
     }, [activeTasks, contextCriteria, projects]);
@@ -289,9 +308,8 @@ export function ContextsView() {
         getSectionDomId,
         toggleGroup,
         virtualRows: groupedVirtualRows,
-        // Grouping reorders the rows, so the keyboard walk and "Select all" walk
-        // the grouped order. A collapsed group renders no rows, so it contributes
-        // no tasks either.
+
+
         visibleTasks,
     } = useTaskGroupCollapse({
         axis: groupBy,
@@ -329,8 +347,8 @@ export function ContextsView() {
         tasksById,
         undoNotificationsEnabled,
     });
-    // One engine for both shapes, as in ListView and ArchiveView: grouped rows
-    // carry headers, flat rows are the sorted tasks.
+
+
     const virtualRowCount = groupedVirtualRows?.length ?? sortedTasks.length;
     const shouldVirtualize = virtualRowCount > LIST_VIRTUALIZATION_THRESHOLD;
     const rowVirtualizer = useVirtualizer({
@@ -471,7 +489,7 @@ export function ContextsView() {
     const acceptsContextDrop = (event: DragEvent<HTMLButtonElement>, context: string) => {
         if (!Array.from(event.dataTransfer.types).includes(CALENDAR_TASK_DRAG_MIME)) return false;
         const id = getCalendarTaskDragTaskId(event.dataTransfer);
-        // Native dragover protects the payload until drop; the MIME still identifies our task drag.
+
         if (!id) return true;
         const task = useTaskStore.getState()._tasksById.get(id);
         return !!task && !task.deletedAt && !pendingContextDrops.current.has(id)
@@ -487,7 +505,7 @@ export function ContextsView() {
         if (!task || task.deletedAt) return;
         pendingContextDrops.current.add(id);
         try {
-            // Add and remove the context on the latest row, so a context a sync save added meanwhile is kept.
+
             const hasContext = (contexts: string[]) => contexts.some((token) => normalizeBulkTaskTokenInput(token, 'contexts') === context);
             const result = await updateTaskFromLatest(id, (latest) => (
                 hasContext(latest.contexts) ? null : { contexts: [...latest.contexts, context] }
@@ -623,18 +641,16 @@ export function ContextsView() {
         );
     };
 
-    return (
-        <>
-            <PromptModal isOpen={saveFilterOpen} title={t('savedFilters.saveTitle')} placeholder={t('savedFilters.namePlaceholder')}
-                defaultValue={selectedContexts.join(' + ')} confirmLabel={t('common.save')} cancelLabel={t('common.cancel')}
-                onConfirm={saveContextFilter} onCancel={() => setSaveFilterOpen(false)} />
-            <div className="h-full px-4 pt-3">
-                <div className="mx-auto flex h-full w-full max-w-[84rem] min-w-0 gap-0 lg:gap-5 xl:gap-6 2xl:max-w-[88rem]">
-                    {/* Sidebar List of Contexts */}
-                    <div className="hidden min-w-[13.5rem] w-[clamp(13.5rem,16vw,15.5rem)] flex-shrink-0 flex-col gap-4 border-r border-border pr-5 lg:flex xl:pr-6">
+    const contextNavigation = (
+        <div data-context-navigation-root id="contexts-sidebar-panel" hidden={sidebarCollapsed || isCompactLayout} className={cn("min-h-0 min-w-[13.5rem] w-[clamp(13.5rem,16vw,15.5rem)] flex-shrink-0 flex-col gap-4 border-r border-border pr-5 xl:pr-6", sidebarCollapsed || isCompactLayout ? "hidden" : "flex")}>
                         <div className="flex items-center justify-between">
                             <h2 className="text-xl font-bold tracking-tight">{t('contexts.title')}</h2>
-                            <Filter className="w-5 h-5 text-muted-foreground" />
+                            <button type="button" onClick={() => setSidebarCollapsed(true)}
+                                aria-label={t('contexts.collapseSidebar')} title={t('contexts.collapseSidebar')}
+                                aria-expanded="true" aria-controls="contexts-sidebar-panel"
+                                className="rounded-md p-1.5 text-muted-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/40">
+                                <PanelLeftClose className="h-4 w-4" />
+                            </button>
                         </div>
 
                         <div className="space-y-1 overflow-y-auto flex-1">
@@ -697,10 +713,26 @@ export function ContextsView() {
                             <div data-list-end className={LIST_END_GAP} aria-hidden="true" />
                         </div>
                     </div>
+    );
 
-                    {/* Context Tasks */}
+    return (
+        <>
+            <PromptModal isOpen={saveFilterOpen} title={t('savedFilters.saveTitle')} placeholder={t('savedFilters.namePlaceholder')}
+                defaultValue={selectedContexts.join(' + ')} confirmLabel={t('common.save')} cancelLabel={t('common.cancel')}
+                onConfirm={saveContextFilter} onCancel={() => setSaveFilterOpen(false)} />
+            <div className="h-full px-4 pt-3">
+                <div ref={contextsLayoutRef} className={cn("mx-auto flex h-full w-full max-w-[84rem] min-w-0 2xl:max-w-[88rem]", !isCompactLayout && "gap-5 xl:gap-6")}>
+                    {contextNavigation}
+
+                    {                   }
                     <div className="min-w-0 flex-1 flex flex-col h-full overflow-hidden">
                         <header className="mb-6 flex flex-wrap items-center gap-3">
+                            {sidebarCollapsed && !isCompactLayout && <button type="button" onClick={() => setSidebarCollapsed(false)}
+                                aria-label={t('contexts.expandSidebar')} title={t('contexts.expandSidebar')}
+                                aria-expanded="false" aria-controls="contexts-sidebar-panel"
+                                className="inline-flex rounded-md p-1.5 text-muted-foreground hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/40">
+                                <PanelLeftOpen className="h-4 w-4" />
+                            </button>}
                             <div className="p-2 bg-primary/10 rounded-lg">
                                 <Tag className="w-6 h-6 text-primary" />
                             </div>
@@ -712,7 +744,7 @@ export function ContextsView() {
                                     {filteredTasks.length} {t('common.tasks')}
                                 </p>
                             </div>
-                            <div className="order-3 w-full lg:hidden">
+                            <div hidden={!isCompactLayout} className={cn("order-3 w-full", !isCompactLayout && "hidden")}>
                                 <label htmlFor="contexts-token-select" className="sr-only">{allTokensLabel}</label>
                                 <select
                                     id="contexts-token-select"

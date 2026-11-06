@@ -2,7 +2,7 @@ import { useEffect, useRef, type KeyboardEvent } from 'react';
 import { ArrowRight, CheckCircle, ClipboardList, Trash2, User, X } from 'lucide-react';
 import { INCUBATE_ICON as IncubateIcon, START_LATER_ICON as StartLaterIcon, TASK_STATUS_ICONS } from '../lib/task-status-icons';
 
-// One status, one glyph: these come from the shared map, never picked here (#1256).
+
 const SomedayIcon = TASK_STATUS_ICONS.someday;
 const ReferenceIcon = TASK_STATUS_ICONS.reference;
 const NextIcon = TASK_STATUS_ICONS.next;
@@ -11,6 +11,7 @@ import { DEFAULT_PROJECT_COLOR, filterProjectsBySelectedArea, formatTimeEstimate
 } from '@mindwtr/core';
 
 import { cn } from '../lib/utils';
+import { isImeComposing } from '../lib/ime';
 import { useNativeDateInputLocale } from '../hooks/use-native-date-input-locale';
 import { InboxNextActionDrafts } from './InboxNextActionDrafts';
 import {
@@ -35,6 +36,7 @@ import { SomedaySectionSelector } from './ui/SomedaySectionSelector';
 import { InboxProcessingSectionField } from './InboxProcessingSectionField';
 import { PriorityFlag } from './Task/PriorityFlag';
 import { InboxSimilarTasks } from './InboxSimilarTasks';
+import { InboxProcessingLinks, type InboxProcessingLinksProps } from './InboxProcessingLinks';
 
 type QuickActionabilityChoice = 'actionable' | 'later' | 'trash' | 'someday' | 'reference' | 'incubate';
 type QuickTwoMinuteChoice = 'yes' | 'no';
@@ -44,17 +46,19 @@ export type InboxProcessingQuickPanelProps = {
     t: (key: string) => string;
     processingTask: Task;
     remainingCount: number;
-    /** The task fields being clarified, and the one write path into them. */
+
     draft: TaskDraft;
     setField: TaskDraftSetter;
     similarTasks: readonly Task[];
+    linkAttachments: InboxProcessingLinksProps['attachments'];
+    onAddLinks: InboxProcessingLinksProps['onAddLinks'];
     visibility: InboxProcessingVisibility;
     options: InboxProcessingOptionLists;
     settings?: AppData['settings'];
     processingMode: 'guided' | 'quick';
     onModeChange: (mode: 'guided' | 'quick') => void;
     onSkip: () => void;
-    /** This item reached the pass from Someday, not the Inbox (#1089). */
+
     isReturningItem: boolean;
     onClose: () => void;
     actionabilityChoice: QuickActionabilityChoice;
@@ -72,7 +76,7 @@ export type InboxProcessingQuickPanelProps = {
     onSendDelegateRequest: () => void;
     onCreatePerson: (name: string) => void | Promise<void>;
     onCreateSomedaySection: (title: string) => Promise<string | null>;
-    /** Adds a section to the chosen project (#1461). */
+
     onCreateSection: (title: string) => Promise<string | null>;
     toggleContext: (ctx: string) => void;
     toggleTag: (tag: string) => void;
@@ -123,6 +127,8 @@ export function InboxProcessingQuickPanel({
     draft,
     setField,
     similarTasks,
+    linkAttachments,
+    onAddLinks,
     visibility,
     options,
     settings,
@@ -182,8 +188,8 @@ export function InboxProcessingQuickPanel({
         showTagsField,
         showTimeEstimateField,
     } = visibility;
-    // The body keeps its own names for the draft fields: one alias block beats
-    // rewriting every reference (and re-growing the prop list to do it).
+
+
     const processingTitle = draft.title;
     const titleInputRef = useProcessingTitleFocus(processingTask?.id);
     const processingDescription = draft.description;
@@ -385,7 +391,7 @@ export function InboxProcessingQuickPanel({
     useEffect(() => {
         const handleDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
             if (event.defaultPrevented) return;
-            if (event.key === 'Process' || event.isComposing) return;
+            if (isImeComposing(event)) return;
             if (!isQuickProcessingSubmitShortcut(event)) return;
             if (!shouldCommitQuickProcessingFromShortcut(event.target)) return;
 
@@ -398,8 +404,7 @@ export function InboxProcessingQuickPanel({
         return () => document.removeEventListener('keydown', handleDocumentKeyDown);
     }, [onSubmit]);
 
-    // After a long form is submitted the view is left scrolled to the bottom;
-    // bring the panel top (title of the next task) back into view on advance.
+
     const panelRef = useRef<HTMLDivElement | null>(null);
     useEffect(() => {
         panelRef.current?.scrollIntoView?.({ block: 'start' });
@@ -407,7 +412,7 @@ export function InboxProcessingQuickPanel({
 
     const handlePanelKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
         if (event.defaultPrevented) return;
-        if (event.key === 'Process' || event.nativeEvent.isComposing) return;
+        if (isImeComposing(event)) return;
         if (isQuickProcessingSubmitShortcut(event)) return;
         if (event.key !== 'Enter' || event.shiftKey || event.altKey) return;
         if (!shouldCommitQuickProcessingFromEnter(event.target)) return;
@@ -470,6 +475,7 @@ export function InboxProcessingQuickPanel({
                     <button
                         type="button"
                         onClick={onClose}
+                        aria-label={t('common.close')}
                         className="text-muted-foreground hover:text-foreground"
                     >
                         <X className="w-4 h-4" />
@@ -524,6 +530,7 @@ export function InboxProcessingQuickPanel({
                             rows={3}
                         />
                     </div>
+                    <InboxProcessingLinks t={t} attachments={linkAttachments} onAddLinks={onAddLinks} />
                 </div>
 
                 <div className="space-y-3">

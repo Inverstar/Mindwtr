@@ -1,7 +1,6 @@
 import Foundation
 
-/// Plain records only. URLSession delegates never enter JSC or the database.
-/// Two retained slots bound uploads, buffered downloads and undelivered replies.
+
 final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let maximumBytes = 8 * 1024 * 1024
     private static let methods: Set<String> = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "PROPFIND", "MKCOL", "MOVE", "COPY"]
@@ -20,6 +19,7 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private var invalidated = false
     private var wake: (() -> Void)?
     private var byteLimit = NativeHTTPJobs.maximumBytes
+    private var responseLimit = NativeHTTPJobs.maximumBytes
     private var localHTTPLogged = false
     #if DEBUG
     var beforeCompletion: (() -> Void)?
@@ -60,10 +60,13 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
                   limit: (1...Self.maximumBytes).contains(limit) ? limit : Self.maximumBytes, timeout: faults?.httpTimeout ?? 300)
     }
     #endif
-    private init(registry: NativeAttachmentLocalRequests, configuration: URLSessionConfiguration, limit: Int, timeout: TimeInterval) {
+    convenience init(voiceRegistry registry: NativeAttachmentLocalRequests, configuration: URLSessionConfiguration = .ephemeral) {
+        self.init(registry: registry, configuration: configuration, limit: Self.maximumBytes, timeout: 30, responseLimit: 2 * 1024 * 1024)
+    }
+    private init(registry: NativeAttachmentLocalRequests, configuration: URLSessionConfiguration, limit: Int, timeout: TimeInterval, responseLimit: Int? = nil) {
         self.registry = registry
         super.init()
-        byteLimit = limit
+        byteLimit = limit; self.responseLimit = responseLimit ?? limit
         configuration.urlCache = nil; configuration.httpCookieStorage = nil; configuration.urlCredentialStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -79,8 +82,8 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
 
     private func failure(_ message: String = "HTTP request is invalid") -> HostFailure { HostFailure(message) }
     private func allowedURL(_ url: URL) -> Bool { Self.allowedURL(url) }
-    /// HTTPS, or plain HTTP to the hosts core's `isAllowedInsecureUrl` admits with
-    /// `SYNC_LOCAL_INSECURE_URL_OPTIONS`; Info.plist `NSAllowsLocalNetworking` matches RN.
+
+
     static func allowedURL(_ url: URL) -> Bool {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let raw = parts.host, !raw.isEmpty, parts.user == nil, parts.password == nil else { return false }
@@ -96,9 +99,8 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
         func decimal(_ label: Substring) -> Bool { !label.isEmpty && label.utf8.allSatisfy { (48...57).contains($0) } }
         let last = labels.last(where: { !$0.isEmpty }) ?? ""
-        // A WHATWG URL (core) parses a host ending in a numeric or 0x label as IPv4 and renormalizes
-        // spellings like 010.0.0.2, 0x7f.1 or 167772162. Foundation does not, so admit only the canonical
-        // dotted quad and refuse every other numeric form: narrower than core, never wider.
+
+
         if decimal(last) || (last.hasPrefix("0x") && last.dropFirst(2).allSatisfy(\.isHexDigit)) {
             guard labels.count == 4, labels.allSatisfy({ decimal($0) && ($0.count == 1 || $0.first != "0") }) else { return false }
             let octets = labels.compactMap { Int($0) }
@@ -178,7 +180,7 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         job?.task.cancel()
     }
 
-    /// Metadata and body stay paired until body() consumes the one retained slot.
+
     func next() throws -> (json: String, body: Bool)? {
         condition.lock(); defer { condition.unlock() }
         guard taken == nil else { throw failure("HTTP response body is unavailable") }
@@ -187,7 +189,7 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         if let error = job.error {
             input = ["id": job.id, "error": error]
             if job.responseTooLarge {
-                input["errorCode"] = "response-too-large"; input["limitBytes"] = byteLimit
+                input["errorCode"] = "response-too-large"; input["limitBytes"] = responseLimit
             }
             jobs.removeValue(forKey: job.id)
         } else if let response = job.response, let url = response.url {
@@ -220,12 +222,11 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         condition.lock()
         var next: URLRequest?
         if let job = job(task), !job.cancelled {
-            if job.redirect == "manual" { /* Return the original complete 3xx response. */ }
+            if job.redirect == "manual" {                                                  }
             else if job.redirect == "error" { job.error = "fetch failed: unexpected redirect" }
             else if job.hops < 5, let url = request.url, allowedURL(url), sameOrigin(url, job.origin) {
-                // URLSession can strip explicit Authorization even on a 307
-                // within the same origin. Restore only the immutable admitted
-                // value, after every origin/URL/hop guard has passed.
+
+
                 var followed = request
                 if let authorization = job.authorization { followed.setValue(authorization, forHTTPHeaderField: "Authorization") }
                 job.hops += 1; next = followed
@@ -250,8 +251,8 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
             }
             let encoding = value("content-encoding", in: response)?.trimmingCharacters(in: .whitespaces).lowercased()
             job.unsupportedEncoding = encoding != nil && encoding != "identity"
-            if !job.bodyless, let length = job.expectedLength, length > Int64(byteLimit) {
-                job.error = "Response exceeds the \(byteLimit) byte download limit"; job.responseTooLarge = true
+            if !job.bodyless, let length = job.expectedLength, length > Int64(responseLimit) {
+                job.error = "Response exceeds the \(responseLimit) byte download limit"; job.responseTooLarge = true
             }
             if job.error == nil { disposition = .allow }
         }
@@ -263,8 +264,8 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         var cancel = false
         if let job = job(dataTask), !job.finished, !job.cancelled, job.error == nil, !job.bodyless {
             if job.unsupportedEncoding { job.error = "HTTP response encoding is unsupported"; cancel = true }
-            else if data.count > byteLimit - job.data.count {
-                job.error = "Response exceeds the \(byteLimit) byte download limit"; job.responseTooLarge = true; cancel = true
+            else if data.count > responseLimit - job.data.count {
+                job.error = "Response exceeds the \(responseLimit) byte download limit"; job.responseTooLarge = true; cancel = true
             }
             else { job.data.append(data) }
         }
@@ -304,8 +305,8 @@ final class NativeHTTPJobs: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         condition.lock(); accepting = false; wake = nil; condition.unlock()
         session.invalidateAndCancel()
         condition.lock()
-        // Invalidation can precede delivery of a registered task's terminal
-        // callback. Neither signal alone grants library-lock release.
+
+
         while !invalidated || jobs.values.contains(where: { !$0.finished }) { condition.wait() }
         condition.unlock()
         delegateQueue.waitUntilAllOperationsAreFinished()

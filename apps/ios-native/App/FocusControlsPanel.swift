@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// Focus has its own core DTO: no row search or archived-project toggle.
+
 struct FocusControlsPanel: View {
     @ObservedObject var model: CoreModel
     let palette: AppPalette
@@ -239,7 +239,7 @@ struct FocusControlsPanel: View {
         let selected = token ? item.text("state") == "included" : item.flag("selected")
         let excluded = token ? item.text("state") == "excluded" : item.flag("excluded")
         let label = item.text(token ? "value" : "title")
-        // RN keeps the picker search keyboard open while selecting options.
+
         return Button { model.editFocusControl(item.object("edit")) } label: {
             HStack(spacing: 12) {
                 Text(label).rnFont(14).strikethrough(excluded).frame(maxWidth: .infinity, alignment: .leading)
@@ -358,7 +358,7 @@ struct FocusControlsPanel: View {
     }
 }
 
-/// RN's save-name overlay and destructive confirmations share exact-retry state.
+
 struct FocusSavedFilterDialog: View {
     @ObservedObject var model: CoreModel
     let palette: AppPalette
@@ -531,12 +531,28 @@ struct PomodoroTimerPanel: View {
             .sheet(isPresented: Binding(get: { model.pomodoroPickerPresented }, set: { if !$0 { model.closePomodoroPicker() } })) {
                 NavigationStack {
                     List {
-                        Button(text.text("timerOnly")) { Task { await model.choosePomodoroTask(nil) } }
-                            .accessibilityIdentifier("pomodoro-task-none")
+                        let selectedTaskID = panel.object("selectedTask").text("id")
+                        Button { Task { await model.choosePomodoroTask(nil) } } label: {
+                            HStack {
+                                Text(text.text("timerOnly")).frame(maxWidth: .infinity, alignment: .leading)
+                                if selectedTaskID.isEmpty { Image(systemName: "checkmark").foregroundStyle(palette.tint).accessibilityHidden(true) }
+                            }
+                            .frame(minHeight: 44).contentShape(Rectangle())
+                        }
+                        .accessibilityAddTraits(selectedTaskID.isEmpty ? .isSelected : [])
+                        .accessibilityIdentifier("pomodoro-task-none")
                         ForEach(model.pomodoroTasks.indices, id: \.self) { index in
                             let task = model.pomodoroTasks[index]
-                            Button(task.text("title")) { Task { await model.choosePomodoroTask(task.text("id")) } }
-                                .accessibilityIdentifier("pomodoro-choice-" + task.text("id"))
+                            let selected = selectedTaskID == task.text("id")
+                            Button { Task { await model.choosePomodoroTask(task.text("id")) } } label: {
+                                HStack {
+                                    Text(task.text("title")).frame(maxWidth: .infinity, alignment: .leading)
+                                    if selected { Image(systemName: "checkmark").foregroundStyle(palette.tint).accessibilityHidden(true) }
+                                }
+                                .frame(minHeight: 44).contentShape(Rectangle())
+                            }
+                            .accessibilityAddTraits(selected ? .isSelected : [])
+                            .accessibilityIdentifier("pomodoro-choice-" + task.text("id"))
                         }
                         if model.pomodoroTasks.count < model.pomodoroTaskCount {
                             Button(text.text("more")) { Task { await model.loadMorePomodoroTasks() } }

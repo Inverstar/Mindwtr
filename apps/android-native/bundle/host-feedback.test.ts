@@ -39,7 +39,7 @@ const fixture = () => {
     class Controller extends AbortController {
         constructor() { super(); if (cancelNext) { cancelNext = false; this.abort(); } }
     }
-    // The real bundled module runs against SQLite and a closed synthetic native port.
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const state: Record<string, any> = {
         AbortController: Controller, URL, TextEncoder, TextDecoder, setTimeout, clearTimeout,
@@ -212,5 +212,32 @@ describe('actual native feedback bridge', () => {
         expect(f.text()).toBe(''); expect(f.requests).toHaveLength(1);
         f.wire(async () => new Response(null, { status: 204 })); expect((await f.send()).ok).toBe(true);
         expect(f.requests).toHaveLength(2); expect(f.writes).toEqual([]);
+    });
+});
+
+
+describe('actual native note app handoff diagnostics', () => {
+    it.each([
+        ['legacy two arguments', ['opened', 'attachment'], 'upnote', 'info'],
+        ['Obsidian accepted', ['opened', 'markdown', 'obsidian'], 'obsidian', 'info'],
+        ['Obsidian failed', ['failed', 'markdown', 'obsidian'], 'obsidian', 'warn'],
+    ])('records the bounded scheme for %s', async (_label, args, scheme, level) => {
+        const f = fixture(); await f.boot();
+        expect(await f.poll(f.state.MindwtrHost.logLinkHandoff(...args))).toEqual({ ok: true, value: {} });
+        const lines = f.text().trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        const link = lines.find((line) => line.scope === 'links');
+        expect(link).toMatchObject({ level, context: { outcome: args[0], surface: args[1], scheme,
+            ...(scheme === 'obsidian' ? { releaseCheck: 'v1.3.9/ios-native-obsidian-link' } : {}) } });
+        expect(Object.keys(link.context).sort()).toEqual(scheme === 'obsidian'
+            ? ['outcome', 'releaseCheck', 'scheme', 'surface'] : ['outcome', 'scheme', 'surface']);
+        expect(f.requests).toEqual([]); expect(f.writes).toEqual([]);
+    });
+    it.each([
+        ['opened', 'markdown', 'custom'], ['opened', 'markdown', 'obsidian://open?private=note'],
+        ['opened', 'markdown', null], ['opened', 'unknown', 'obsidian'], ['unknown', 'markdown', 'obsidian'],
+    ])('ignores invalid bounded handoff fields %#', async (...args) => {
+        const f = fixture(); await f.boot();
+        expect(await f.poll(f.state.MindwtrHost.logLinkHandoff(...args))).toEqual({ ok: true, value: {} });
+        expect(f.text()).toBe(''); expect(f.requests).toEqual([]); expect(f.writes).toEqual([]);
     });
 });

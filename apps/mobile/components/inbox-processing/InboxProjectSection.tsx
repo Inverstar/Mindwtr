@@ -7,6 +7,7 @@ import { getProcessInboxConversionRows, replaceProcessInboxExtraAction } from '@
 import { styles } from '../inbox-processing-modal.styles';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
 import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
+import { useEinkSafeColor } from '@/hooks/use-eink-safe-color';
 
 type Area = { id: string; name: string; color?: string };
 type Project = { id: string; title: string; status?: CoreProject['status']; areaId?: string; color?: string; colorOverride?: string | null };
@@ -36,7 +37,7 @@ type Props = {
   handleCreateProjectEarly: () => void;
   handleConvertToProject: () => void;
   selectProjectEarly: (id: string | null) => void;
-  /** The chosen project's sections; the picker shows only when there are some (#1461). */
+
   projectSections?: Section[];
   selectedSectionId?: string | null;
   selectSection?: (id: string | null) => void;
@@ -71,6 +72,7 @@ export function InboxProjectSection({
   selectSection,
 }: Props) {
   const filledButton = useFilledButtonColors();
+  const einkSafe = useEinkSafeColor();
   const areas = useTaskStore((state) => state.areas);
   if (!show) return null;
 
@@ -99,7 +101,7 @@ export function InboxProjectSection({
             onPress={() => setSelectedAreaId(currentArea.id)}
             accessibilityState={{ selected: selectedAreaId === currentArea.id }}
           >
-            <View style={[styles.projectDot, { backgroundColor: currentArea.color || tc.secondaryText }]} />
+            <View style={[styles.projectDot, { backgroundColor: einkSafe(currentArea.color || tc.secondaryText) }]} />
             <Text style={[styles.projectChipText, { color: tc.text }]}>✓ {currentArea.name}</Text>
           </TouchableOpacity>
         )}
@@ -136,7 +138,7 @@ export function InboxProjectSection({
                 onPress={() => setSelectedAreaId(area.id)}
                 accessibilityState={{ selected: isSelected }}
               >
-                <View style={[styles.projectDot, { backgroundColor: area.color || tc.secondaryText }]} />
+                <View style={[styles.projectDot, { backgroundColor: einkSafe(area.color || tc.secondaryText) }]} />
                 <Text style={[styles.projectChipText, { color: tc.text }]}>{area.name}</Text>
               </TouchableOpacity>
             );
@@ -181,7 +183,7 @@ export function InboxProjectSection({
     );
   };
 
-  // Active projects first, then Someday / Waiting after a heading (#1467).
+
   const projectGroups = groupProjectsForPicker(filteredProjects, areas);
   const renderProjectChip = (project: Project) => {
     const projectColor = getProjectAccentColor(project, areaById);
@@ -200,7 +202,7 @@ export function InboxProjectSection({
         onPress={() => selectProjectEarly(project.id)}
         accessibilityState={{ selected: isSelected }}
       >
-        <View style={[styles.projectDot, { backgroundColor: projectColor || tc.secondaryText }]} />
+        <View style={[styles.projectDot, { backgroundColor: einkSafe(projectColor || tc.secondaryText) }]} />
         <Text style={[styles.projectChipText, { color: tc.text }]}>{project.title}</Text>
       </TouchableOpacity>
     );
@@ -294,10 +296,10 @@ export function InboxProjectSection({
             <Text style={[styles.projectFieldLabel, { color: tc.secondaryText }]}>
               {t('process.nextAction')}
             </Text>
-            {/* Enter chains into a fresh action row (desktop parity) and keeps
-                the keyboard up — blurring here collapses the Android keyboard
-                inset and makes the sheet visibly jump (#827 rc.3 feedback).
-                The Create project button is the only way to finish the step. */}
+            {
+
+
+                                                                                }
             <TextInput
               value={nextActionDraft}
               onChangeText={setNextActionDraft}
@@ -363,8 +365,8 @@ export function InboxProjectSection({
       <View style={styles.stepQuestionRow}>
         <Folder size={20} color={tc.text} accessible={false} />
         <Text style={[styles.stepQuestion, styles.stepQuestionInline, { color: tc.text }]}>
-          {/* The "more than one step?" question is its own step now; this
-              section is the answer's field, whichever way it went. */}
+          {
+                                                                      }
           {showProjectField && convertToProject ? t('projects.title') : t('inbox.assignProjectQuestion')}
         </Text>
       </View>

@@ -81,7 +81,7 @@ struct TrashScreen: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .accessibilityIdentifier("trash-scroll")
-                .refreshable { await model.refresh() }
+                .refreshable { await model.pullToRefresh() }
             }
             #if DEBUG && targetEnvironment(simulator)
             if model.trashBulkFixtureEnabled {
@@ -279,8 +279,8 @@ struct TrashScreen: View {
     private func inlineMarkdown(_ source: String) -> AttributedString {
         var preview = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(source)
-        // RN's Trash rows are static outside selection. Preserve inline styling
-        // without turning Markdown in a deleted item into an interactive link.
+
+
         preview.link = nil
         return preview
     }

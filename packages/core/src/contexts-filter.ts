@@ -12,16 +12,13 @@ import { isTaskFinished } from './task-status';
 import { taskMatchesFilterSearchQuery } from './task-filter-selections';
 import type { AppSettings, FilterCriteria, Project, Task, TaskStatus } from './types';
 
-/** New status choices stay in the active GTD workflow; stored historical choices still read normally. */
 export const CONTEXTS_FILTER_STATUSES = ['inbox', 'next', 'waiting', 'someday'] as const satisfies readonly TaskStatus[];
 
-/** Contexts has a wider source than Focus. Apply status criteria before building the token index. */
 export function selectContextsFilterTasks(tasks: Task[], criteria: FilterCriteria, projects: Project[]): Task[] {
     const pool = criteria.statuses?.length ? tasks : tasks.filter((task) => !isTaskFinished(task));
     return applyFilter(pool, criteria, { projects, tokenMatchMode: 'all' });
 }
 
-/** Null for the Contexts union/no-context choices the saved criteria language cannot express. */
 export function getContextsSaveCriteria(criteria: FilterCriteria, tokens: string[], matchMode: ContextOrTagMatchMode, searchQueries: readonly string[] = []): FilterCriteria | null {
     if (searchQueries.some((query) => query.trim())) return null;
     if (!criteria.statuses?.length || criteria.statuses.some((status) => !CONTEXTS_FILTER_STATUSES.some((value) => value === status))) return null;
@@ -40,7 +37,7 @@ export function getContextsSaveCriteria(criteria: FilterCriteria, tokens: string
 export function buildContextsFilterModel(input: {
     tasks: Task[]; projects: Project[]; settings: AppSettings | undefined;
     filters: ListFilterState; edit?: ListFilterEdit; savedFilterId?: string | null;
-    preservedCriteria?: FilterCriteria;
+    preservedCriteria?: FilterCriteria; filterSheetOpen?: boolean;
     t: (key: string) => string;
 }) {
     const savedFilters = normalizeSavedFilters(input.settings?.savedFilters).filter((filter) =>
@@ -76,6 +73,9 @@ export function buildContextsFilterModel(input: {
         }
         if (input.edit.type !== 'clear') preservedCriteria = preserved;
     }
+    if (input.filterSheetOpen && (!activeSavedFilter || input.edit) && state.statuses === undefined) {
+        state = { ...state, statuses: [...CONTEXTS_FILTER_STATUSES] };
+    }
     const features = resolveFeatureFlags(input.settings);
     const visibility = getTaskMetadataFilterVisibility(input.tasks, { prioritiesEnabled: features.priorities,
         timeEstimatesEnabled: features.timeEstimates });
@@ -86,6 +86,8 @@ export function buildContextsFilterModel(input: {
         getProjectLabel: (id) => getFocusProjectFilterLabel(id, projectById, input.t),
     };
     const resolved = resolveListFilterState(state, { visibility, getProjectLabel: options.getProjectLabel, t: input.t });
+    resolved.chips = resolved.chips.map(chip => chip.id.startsWith('project:') && chip.edit.type === 'toggleProject'
+        ? { ...chip, edit: { type: 'removeProject' as const, value: chip.edit.value } } : chip);
     const criteria = activeSavedFilter && !input.edit ? activeSavedFilter.criteria : { ...resolved.criteria, ...preservedCriteria };
     return { resolved, criteria, options, savedFilters, preservedCriteria, activeSavedFilter: input.edit ? null : activeSavedFilter,
         tasks: selectContextsFilterTasks(input.tasks, criteria, input.projects).filter((task) => taskMatchesFilterSearchQuery(task, resolved.searchQuery)) };

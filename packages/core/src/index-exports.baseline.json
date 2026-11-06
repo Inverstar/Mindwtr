@@ -1415,6 +1415,7 @@
     "normalizeSavedFilters",
     "normalizeSectionForSyncMerge",
     "normalizeSpeechLanguage",
+    "normalizeStartReminderLeadMinutes",
     "normalizeStrongWebdavEtag",
     "normalizeSyncBackend",
     "normalizeSyncFileLockError",

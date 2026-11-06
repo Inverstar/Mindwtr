@@ -1,6 +1,6 @@
 import type { NativeHostResult } from './native-host-contract';
 import { validateNativeTaskEditorOpeningFields } from './native-host-contract-task-editor-resume';
-import { ASSOCIATIONS, LIFECYCLE, RECURRENCE, SCHEDULE, readNativeTaskDraftSaveRequest, validRawTask,
+import { ASSOCIATIONS, LIFECYCLE, NATIVE_NULLABLE_DRAFT_FIELDS, RECURRENCE, SCHEDULE, readNativeTaskDraftSaveRequest, validRawTask,
     type NativeTaskRecurrenceBase, type NativeTaskScheduleBase } from './native-host-contract-task-save';
 import { readNativeAttachments } from './native-host-contract-attachments';
 import { isNativeJsonWithinBytes, readChecklist } from './native-host-contract-task-view';
@@ -15,7 +15,8 @@ const PAYLOAD_BYTES = 1_000_000;
 const REQUEST_BYTES = 8 * 1024 * 1024;
 const TASK_BYTES = 16 * 1024 * 1024;
 const FIELDS = ['title', 'description', 'location', 'assignedTo', 'priority', 'energyLevel', 'timeEstimate',
-    'projectId', 'areaId', 'sectionId', 'contexts', 'tags', ...SCHEDULE, ...RECURRENCE, 'timeSpentMinutes'];
+    'projectId', 'areaId', 'sectionId', 'contexts', 'tags', ...SCHEDULE, ...RECURRENCE, 'timeSpentMinutes',
+    'reminderPolicy', 'dueReminderLeadMinutes', 'startReminderLeadMinutes'];
 const TOKEN_FIELDS = ['contexts', 'tags', 'assignedTo'] as const;
 const RAW_FIELDS = ['title', 'note', 'location', 'estimate', 'estimateResolved', 'timeSpent', 'timeSpentResolved',
     'tokens', 'tokenCanonical', 'tokenResolved', 'tokenEdited', 'checklistInputs', 'checklistAppend',
@@ -39,9 +40,7 @@ const utf8 = (text: string): number => {
     return size;
 };
 
-// Pure API boundary: JSON wire frames have no object aliases. Reject both
-// aliases and cycles, and bound work/bytes during descriptor-only traversal.
-// Never call an input object's getter, toJSON, iterator or serialization hook.
+
 const capture = (input: unknown, maximum: number): unknown => {
     const seen = new WeakSet<object>();
     let nodes = 0, bytes = 0;
@@ -94,7 +93,7 @@ const numberDisplay = (text: unknown, value: unknown): boolean => {
 };
 const safeIntegerDisplay = (number: number): string | null => Number.isSafeInteger(number) && number >= 0 ? String(number) : null;
 
-/** Correspondence only: grants no file, lineage, workspace, editability or Save authority. */
+
 export function validateNativeTaskEditorSaveCheckpoint(
     input: NativeTaskEditorSaveCheckpointInput,
     validateField: (field: TaskDraftField, value: unknown) => boolean,
@@ -102,7 +101,7 @@ export function validateNativeTaskEditorSaveCheckpoint(
     return validateEditorSaveCheckpoint(input, validateField, false);
 }
 
-/** Internal complete-owned selection; ordinary checkpoint grammar stays sealed. */
+
 export function validateNativeOwnedCompleteTaskEditorSaveCheckpoint(
     input: NativeTaskEditorSaveCheckpointInput,
     validateField: (field: TaskDraftField, value: unknown) => boolean,
@@ -149,7 +148,7 @@ function validateEditorSaveCheckpoint(input: NativeTaskEditorSaveCheckpointInput
             ...(recurrenceOwned ? { recurrenceBase: payload.recurrenceBase } : {}) }, validateField, true, true);
         if (!editedGrammar) return invalid();
         const current = { ...opening.value.freshDraft, ...Object.fromEntries(Object.entries(edited)
-            .map(([key, value]) => [key, value === null && ['relativeStartOffset', 'timeSpentMinutes'].includes(key) ? undefined : value])) } as TaskDraft;
+            .map(([key, value]) => [key, value === null && NATIVE_NULLABLE_DRAFT_FIELDS.includes(key) ? undefined : value])) } as TaskDraft;
         const attachmentBase = readNativeAttachments(payload.attachmentsBase), attachments = readNativeAttachments(payload.attachments);
         if (!attachmentBase || !attachments || !record(captured.saveRequest)) return invalid();
         const request = captured.saveRequest;
@@ -168,8 +167,8 @@ function validateEditorSaveCheckpoint(input: NativeTaskEditorSaveCheckpointInput
             if (!checklistBase || !checklistValue || !taskEditValuesEqual(checklistBase, checklistOwned ? payload.checklistBase : opening.value.freshChecklistBase)
                 || !taskEditValuesEqual(checklistValue, checklistOwned ? payload.checklistValue : opening.value.freshChecklistBase)) return invalid();
         }
-        // Surrogate is solely the sealed parser's field-grammar admission. The real
-        // attachment half is matched above; no synthetic record escapes this call.
+
+
         const surrogate = { base: [], value: [{ id: '00000000-0000-4000-8000-000000000000', kind: 'link', title: 'Grammar',
             uri: 'https://example.invalid/', createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z' }] };
         const { requestId: _requestId, checklist: _checklist, intent: _intent, attachments: _attachments, ...completeFields } = request;

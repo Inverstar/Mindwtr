@@ -1,12 +1,16 @@
 import Foundation
 
-/// A trusted launch choice only. Preparing or admitting the selected filesystem remains the caller's work.
+
 public enum NativeLaunchSelection: Sendable {
+    public static let productionNamespace = "tech.dongdongbh.mindwtr"
+
+    case production(containerURL: URL)
     case standard(databaseURL: URL, containerURL: URL, namespace: String)
     case isolated(databaseURL: URL, containerURL: URL, namespace: String, identifier: UUID)
     case rehearsal(containerURL: URL, databaseURL: URL, bundleIdentifier: String)
 
     public enum BuildMode: Sendable {
+        case production
         case simulatorDebug
         case simulatorRelease
         case deviceTest
@@ -17,10 +21,14 @@ public enum NativeLaunchSelection: Sendable {
         var errorDescription: String? { "Native iOS launch selection is unavailable." }
     }
 
-    /// Inputs come from the process and system container, never a notification payload or stored preference.
+
     public static func resolve(arguments: [String], bundleIdentifier: String?, supportURL: URL, homeURL: URL,
                                mode: BuildMode) throws -> NativeLaunchSelection {
         switch mode {
+        case .production:
+            guard bundleIdentifier == productionNamespace, homeURL.isFileURL, supportURL.isFileURL,
+                  !arguments.contains(where: { $0.hasPrefix("--native-") }) else { throw SelectionFailure() }
+            return .production(containerURL: homeURL)
         case .unavailable:
             throw SelectionFailure()
         case .deviceTest:
@@ -49,8 +57,11 @@ public enum NativeLaunchSelection: Sendable {
             if arguments.contains("--native-rn-rehearsal") {
                 guard let bundleIdentifier, !bundleIdentifier.isEmpty else { throw SelectionFailure() }
                 let container = supportURL.appendingPathComponent("NativeRNRehearsal", isDirectory: true)
+                #if DEBUG
+                NSLog("Native iOS RN rehearsal source selected releaseCheck=v1.3.9/ios-rn-rehearsal-source outcome=production-copy")
+                #endif
                 return .rehearsal(containerURL: container,
-                    databaseURL: container.appendingPathComponent("Documents/SQLite/mindwtr.db"), bundleIdentifier: bundleIdentifier)
+                    databaseURL: container.appendingPathComponent("Documents/SQLite/mindwtr.db"), bundleIdentifier: "tech.dongdongbh.mindwtr")
             }
         }
         guard homeURL.isFileURL, let bundleIdentifier, NativeReminderRequest.validNamespace(bundleIdentifier) else {

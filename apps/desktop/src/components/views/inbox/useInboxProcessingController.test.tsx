@@ -162,13 +162,14 @@ describe('useInboxProcessingController not-actionable destinations', () => {
     const renderController = (
         updateTask: UpdateTask,
         controllerSettings: Parameters<typeof useInboxProcessingController>[0]['settings'] = settings,
+        controllerTasks: Task[] = tasks,
     ) => renderHook(() => {
-        // The session closes itself once the queue drains, so isProcessing has
-        // to be real state or the reconciliation effect never settles.
+
+
         const [isProcessing, setIsProcessing] = useState(true);
         return useInboxProcessingController({
             t: (key) => key,
-            tasks,
+            tasks: controllerTasks,
             projects,
             areas,
             settings: controllerSettings,
@@ -183,6 +184,33 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         });
     });
 
+    it('preserves concurrent file updates, link edits, and tombstones when saving an added link', async () => {
+        const attachment = (id: string) => ({ id, kind: 'link' as const, title: id, uri: `https://${id}.example`, createdAt: tasks[0].createdAt, updatedAt: tasks[0].updatedAt });
+        const file = { ...attachment('file'), kind: 'file' as const, uri: '/data/attachments/file.pdf', size: 4 };
+        const opened = { ...tasks[0], attachments: [file, attachment('edited'), attachment('deleted')] };
+        useTaskStore.setState({ _allTasks: [opened] });
+        const { result } = renderController((id, updates) => useTaskStore.getState().updateTask(id, updates), settings, [opened]);
+        await waitFor(() => expect(result.current.wizardProps.processingTask?.id).toBe('one'));
+        act(() => {
+            expect(result.current.wizardProps.onAddLinks('not a URL')).toBe(false);
+            expect(result.current.wizardProps.onAddLinks('Draft | https://draft.example')).toBe(true);
+        });
+        const remoteAttachments = [
+            { ...file, size: 8, cloudKey: 'attachments/file.pdf' },
+            { ...attachment('edited'), title: 'Changed remotely', uri: 'https://changed.example' },
+            { ...attachment('deleted'), deletedAt: new Date().toISOString() },
+            attachment('new'),
+        ];
+        const finish = holdSyncSave(() => useTaskStore.setState({ _allTasks: [{ ...opened, rev: 5, attachments: remoteAttachments }] }));
+        let committed!: Promise<unknown>;
+        act(() => { committed = Promise.resolve(result.current.wizardProps.handleConfirmReference()); });
+        await finish();
+        await act(async () => { await committed; });
+        const saved = useTaskStore.getState()._tasksById.get('one');
+        expect(saved?.status).toBe('reference');
+        expect(saved?.attachments).toEqual([...remoteAttachments, expect.objectContaining({ title: 'Draft', uri: 'https://draft.example' })]);
+    });
+
     it('appends a title link to the attachments a sync save published while the write waited', async () => {
         useTaskStore.setState({ _allTasks: tasks });
         const updateTask: UpdateTask = (id, updates) => useTaskStore.getState().updateTask(id, updates);
@@ -192,10 +220,11 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         });
         act(() => {
             result.current.wizardProps.setField('title', 'Call Alice /link:https://notes.example');
+            expect(result.current.wizardProps.onAddLinks('Draft | https://draft.example')).toBe(true);
         });
         const remote = { id: 'att-remote', kind: 'link' as const, title: 'Remote', uri: 'https://remote.example',
             createdAt: '2026-07-15T00:00:00.000Z', updatedAt: '2026-07-15T00:00:00.000Z' };
-        // Another device's attachment, published by a sync save that holds the gate while the decision is written.
+
         const finish = holdSyncSave(() => useTaskStore.setState({
             _allTasks: useTaskStore.getState()._allTasks.map((task) => (task.id === 'one' ? { ...task, rev: 5, attachments: [remote] } : task)),
         }));
@@ -207,7 +236,7 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         await act(async () => { await committed; });
 
         expect(useTaskStore.getState()._tasksById.get('one')?.attachments?.map((attachment) => attachment.uri))
-            .toEqual(['https://remote.example', 'https://notes.example']);
+            .toEqual(['https://remote.example', 'https://notes.example', 'https://draft.example']);
     });
 
     it('merges the picked tags onto the tags a sync save published, and still appends a title link', async () => {
@@ -223,7 +252,7 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         });
         const remote = { id: 'att-remote', kind: 'link' as const, title: 'Remote', uri: 'https://remote.example',
             createdAt: '2026-07-15T00:00:00.000Z', updatedAt: '2026-07-15T00:00:00.000Z' };
-        // Another device's tag and attachment, published by a sync save that holds the gate while the decision is written.
+
         const finish = holdSyncSave(() => useTaskStore.setState({
             _allTasks: useTaskStore.getState()._allTasks.map((task) => (task.id === 'one'
                 ? { ...task, rev: 5, tags: ['#remote'], attachments: [remote] }
@@ -241,8 +270,7 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         expect(stored?.attachments?.map((attachment) => attachment.uri)).toEqual(['https://remote.example', 'https://notes.example']);
     });
 
-    // #958: picking a project and then sending the item to Reference/Someday
-    // used to write only the status, silently dropping the project.
+
     it.each([
         ['reference', (wizard: ReturnType<typeof renderController>['result']['current']['wizardProps']) => wizard.handleConfirmReference()],
         ['someday', (wizard: ReturnType<typeof renderController>['result']['current']['wizardProps']) => wizard.handleConfirmSomeday()],
@@ -282,8 +310,7 @@ describe('useInboxProcessingController not-actionable destinations', () => {
         expect(updateTask).not.toHaveBeenCalled();
     });
 
-    // #1155: Reference has to reach its organization step on the project/area
-    // pickers alone, or hiding the context step makes them unreachable.
+
     it('routes guided Reference through organization controls when only containers are shown', async () => {
         const updateTask = vi.fn(async () => ({ success: true }));
         const { result } = renderController(updateTask, {
@@ -491,8 +518,7 @@ describe('useInboxProcessingController not-actionable destinations', () => {
     });
 });
 
-// An incubated item comes back when its review date arrives. Filing it to
-// Someday again must drop that overdue date, or it returns on every run.
+
 describe('useInboxProcessingController overdue review date on Someday', () => {
     const returning = { ...makeTask('back', 'someday'), reviewAt: '2026-01-05' } as Task;
 
@@ -585,8 +611,7 @@ describe('useInboxProcessingController draft writes', () => {
         const draft = result.current.wizardProps.draft;
         expect(draft.title).toBe('Clarified');
 
-        // The reducer hands back the same draft when the value is unchanged; a
-        // hand-rolled spread would allocate a new one on every keystroke.
+
         act(() => {
             result.current.wizardProps.setField('title', 'Clarified');
         });
@@ -807,8 +832,7 @@ describe('useInboxProcessingController project conversion persistence', () => {
     });
 });
 
-// #1088: the clarify title used to run a date-only parser, so it was the one
-// editable task title in the app with a smaller grammar than quick add.
+
 describe('useInboxProcessingController title grammar', () => {
     const tasks = [makeTask('one')];
     const projects = [{ id: 'p1', title: 'Vacation', status: 'active' } as Project];
@@ -860,7 +884,7 @@ describe('useInboxProcessingController title grammar', () => {
         expect(updateTask).toHaveBeenCalledWith('one', expect.objectContaining({
             status: 'next',
             title: estimate ? 'Call Alice' : `Call Alice ${token}`,
-            // The typed context joins the chip the user toggled; it never wins alone.
+
             contexts: ['@office', '@phone'],
             tags: ['#urgent'],
             areaId: 'a1',
@@ -871,7 +895,7 @@ describe('useInboxProcessingController title grammar', () => {
         }));
     });
 
-    // The priority, energy, and person controls are hidden by default.
+
     it('saves typed priority, energy, and person while their controls are hidden', async () => {
         const updateTask = vi.fn<UpdateTask>(async () => ({ success: true }));
         const { result } = renderController(updateTask);
@@ -897,9 +921,7 @@ describe('useInboxProcessingController title grammar', () => {
     });
 });
 
-// The inline person create awaited `addPerson` and threw the `Person | null`
-// result away, so a refused write left the Waiting step with no person and no
-// message — the step's other writes all toast.
+
 describe('useInboxProcessingController inline person create', () => {
     it('reports a refused person create', async () => {
         useUiStore.setState({ toasts: [] });
@@ -929,8 +951,7 @@ describe('useInboxProcessingController inline person create', () => {
     });
 });
 
-// #1461: the processing draft carries a project section, drops it when the
-// project changes, and the decision writes it with its project.
+
 describe('useInboxProcessingController project section', () => {
     afterEach(() => {
         useTaskStore.setState({ sections: [], _allSections: [] } as never);

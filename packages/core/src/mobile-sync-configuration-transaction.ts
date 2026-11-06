@@ -1,8 +1,6 @@
-// Commits a sync configuration that an activation probe already proved, on the mobile apps'
-// device store: the backend key is the activation flag, and transport settings and credentials
-// change only while it is durably off. It moved here from React Native's
-// `apps/mobile/lib/sync-configuration-transaction.ts` so the native apps commit exactly as
-// React Native does; each host passes its key-value store, secret store and Dropbox tokens.
+
+
+
 import {
     commitProvenSyncConfiguration,
     type PersistedSyncConfiguration,
@@ -34,6 +32,8 @@ type StorageEntry = readonly [string, string];
 type StorageSnapshotEntry = readonly [string, string | null];
 
 export type MobileSyncConfigurationTransactionDependencies = {
+    beforeActivation?: () => Promise<void>;
+    beforeDropboxPromotion?: () => Promise<void>;
     clearConfigCache: () => void;
     clearDropboxTokens: () => Promise<void>;
     deleteSecret: (key: string) => Promise<void>;
@@ -58,10 +58,7 @@ export class MobileSyncConfigurationTransactionError extends Error {
     }
 }
 
-/** Dropbox tokens arrive inside the candidate rather than behind a native staging
- *  handle, so the adapter synthesizes one. Unlike desktop there is no durable
- *  promotion journal: a process kill between promote and activation loses the
- *  previous refresh token, which is why `recover` and `finalize` are no-ops. */
+
 const STAGED_DROPBOX_HANDLE = 'mobile-staged-dropbox-credentials';
 
 const CONFIGURATION_KEYS = [
@@ -94,9 +91,7 @@ const createPort = (
     let previousTokens: DropboxAuthTokens | null = null;
     let capturedPreviousTokens = false;
 
-    // An unreadable secret is authoritative-but-opaque, exactly as on a desktop
-    // without a keyring: the value is never treated as absent, so rollback can
-    // refuse to overwrite it. A readable null genuinely means "not set".
+
     const readSecret = async (
         key: string,
     ): Promise<{ value: string | null; authority: SecretAuthority }> => {
@@ -116,13 +111,10 @@ const createPort = (
     };
 
     return {
+        ...(dependencies.beforeActivation ? { beforeActivation: dependencies.beforeActivation } : {}),
         recoverDropboxCredentialsBeforeConfiguration: async () => undefined,
 
-        // Deliberately reads the whole configuration and BOTH secrets every time,
-        // even for a candidate that touches neither. Whole-configuration equality
-        // is what proves nothing else moved, and narrowing these reads to the
-        // candidate's own fields would reintroduce the #1043 dead end where an
-        // unreadable unrelated secret reads back as absent.
+
         readConfiguration: async (requirements = {}): Promise<PersistedSyncConfiguration> => {
             const stored = new Map(await dependencies.multiGet(CONFIGURATION_KEYS));
             const value = (key: string): string | null => stored.get(key) ?? null;
@@ -155,8 +147,8 @@ const createPort = (
                     token: cloudSecret.value,
                     tokenAuthority: cloudSecret.authority,
                     allowInsecureHttp: parseBool(value(CLOUD_ALLOW_INSECURE_HTTP_KEY)),
-                    // Mobile always persists the token it was given; there is no
-                    // session-only mode to distinguish.
+
+
                     rememberToken: true,
                 },
             };
@@ -168,8 +160,8 @@ const createPort = (
         },
 
         writeSyncPath: async (path, bookmark) => {
-            // The path and its bookmark land in one batch: a half-written pair
-            // leaves a folder reference the app cannot reopen.
+
+
             const entries: StorageEntry[] = [[SYNC_PATH_KEY, path]];
             if (bookmark) entries.push([SYNC_PATH_BOOKMARK_KEY, bookmark]);
             await dependencies.multiSet(entries);
@@ -205,8 +197,8 @@ const createPort = (
         },
 
         writeCloudProvider: async (provider) => {
-            // Mobile stores 'cloudkit' in this slot even though it is not a
-            // CloudProvider — settings restore keys off that literal on load.
+
+
             await dependencies.setItem(
                 CLOUD_PROVIDER_KEY,
                 candidate.backend === 'cloudkit' ? 'cloudkit' : provider,
@@ -215,6 +207,7 @@ const createPort = (
         },
 
         promoteDropboxCredentials: async () => {
+            await dependencies.beforeDropboxPromotion?.();
             if (!capturedPreviousTokens) {
                 previousTokens = await dependencies.getDropboxTokens();
                 capturedPreviousTokens = true;
@@ -223,7 +216,7 @@ const createPort = (
             dependencies.clearConfigCache();
         },
 
-        // Nothing durable is staged before promotion, so there is nothing to drop.
+
         discardDropboxCredentials: async () => undefined,
 
         rollbackDropboxCredentials: async () => {
@@ -236,7 +229,7 @@ const createPort = (
             dependencies.clearConfigCache();
         },
 
-        // Rollback material is this closure, discarded when the commit returns.
+
         finalizeDropboxCredentials: async () => undefined,
     };
 };
@@ -246,8 +239,8 @@ const toCandidate = (candidate: MobileSyncConfigOverride): SyncConfigurationCand
     syncPath: candidate.syncPath,
     syncPathBookmark: candidate.syncPathBookmark ?? null,
     webdav: candidate.webdav,
-    // CloudKit needs a stale `dropbox` provider cleared, or attachment resolution
-    // keeps reaching for Dropbox after the backend has moved on.
+
+
     cloudProvider: candidate.backend === 'cloudkit'
         ? 'selfhosted'
         : candidate.cloudProvider,
@@ -255,11 +248,7 @@ const toCandidate = (candidate: MobileSyncConfigOverride): SyncConfigurationCand
     dropboxCredentialHandle: candidate.dropbox?.tokens ? STAGED_DROPBOX_HANDLE : undefined,
 });
 
-/**
- * Persist a configuration already proven by an activation probe. The backend key
- * is the activation flag: transport settings and credentials change only while
- * that flag is durably off, then are verified before one final write.
- */
+
 export async function commitProvenMobileSyncConfiguration(
     candidate: MobileSyncConfigOverride,
     dependencies: MobileSyncConfigurationTransactionDependencies,

@@ -11,12 +11,13 @@ let package = Package(
       name: "SyncFileLockEngine",
       path: ".",
       exclude: ["SyncFileLock.podspec", "Tests"],
-      sources: ["SyncFileLockModule.swift"]
+      sources: ["SyncFileLockModule.swift", "NativeFileSyncReadOwner.swift", "NativeFileSyncSession.swift"]
     ),
     .testTarget(
       name: "SyncFileLockEngineTests",
       dependencies: ["SyncFileLockEngine"],
-      path: "Tests"
+      path: "Tests",
+      linkerSettings: [.linkedFramework("JavaScriptCore", .when(platforms: [.macOS, .iOS]))]
     ),
   ]
 )

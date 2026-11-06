@@ -36,7 +36,7 @@ export type GtdWorkflowEdit = Extract<GtdSettingsEdit,
         | 'taskEditorPreset' | 'taskEditorFieldVisible' | 'taskEditorFieldSection' | 'taskEditorReset' }>
     | { type: 'taskEditorOrder'; field: TaskEditorFieldId; value: TaskEditorFieldId[] }
     | { type: 'focusIncludeStartDates'; value: boolean }
-    | { type: GtdWorkflowReviewType | GtdWorkflowInboxType | GtdWorkflowCaptureParseType; value: boolean }
+    | { type: GtdWorkflowReviewType | GtdWorkflowInboxType | GtdWorkflowCaptureParseType | 'saveAudioAttachments'; value: boolean }
     | { type: GtdWorkflowPomodoroBooleanType; value: boolean }
     | { type: 'pomodoroDurations'; value: PomodoroDurations };
 export type NativeGtdWorkflowRequest = { requestId: string; edit: GtdWorkflowEdit;
@@ -71,6 +71,8 @@ export type NativeGtdInboxOptions = { inbox: GtdSettingsModel['inbox'];
 export type NativeGtdCaptureParseOptions = { capture: Pick<GtdSettingsModel['capture'],
     'title' | 'description' | 'quickAddAutoClean' | 'naturalLanguageDates'>;
     expected: Record<GtdWorkflowCaptureParseType, GtdWorkflowCaptureParseWitness> };
+export type NativeGtdCaptureAudioOptions = { capture: Pick<GtdSettingsModel['capture'], 'title' | 'description' | 'saveAudio'>;
+    expected: { saveAudioAttachments: GtdWorkflowCaptureParseWitness } };
 export type NativeGtdTaskEditorOpenOptions = { taskEditor: { title: string; description: string;
     groups: { id: GtdWorkflowTaskEditorSection; title: string;
         defaultOpen: NonNullable<GtdSettingsModel['taskEditor']['groups'][number]['defaultOpen']> }[] };
@@ -113,6 +115,8 @@ const isNested = (type: GtdWorkflowType): type is GtdWorkflowReviewType | GtdWor
     isReview(type) || isInbox(type);
 const isCaptureParse = (type: GtdWorkflowType): type is GtdWorkflowCaptureParseType =>
     type === 'quickAddAutoClean' || type === 'naturalLanguageDates';
+const isCaptureScalar = (type: GtdWorkflowType): type is GtdWorkflowCaptureParseType | 'saveAudioAttachments' =>
+    isCaptureParse(type) || type === 'saveAudioAttachments';
 const isTaskEditor = (type: GtdWorkflowType): type is 'taskEditorSectionOpen' => type === 'taskEditorSectionOpen';
 const isPreset = (type: GtdWorkflowType): type is 'taskEditorPreset' => type === 'taskEditorPreset';
 const isField = (type: GtdWorkflowType): type is 'taskEditorFieldVisible' => type === 'taskEditorFieldVisible';
@@ -186,6 +190,7 @@ const validEdit = (value: unknown): value is GtdWorkflowEdit => {
         case 'inboxSchedule':
         case 'quickAddAutoClean':
         case 'naturalLanguageDates':
+        case 'saveAudioAttachments':
             return typeof value.value === 'boolean';
         default: return false;
     }
@@ -209,7 +214,7 @@ const validWitness = (value: unknown, type: GtdWorkflowType): value is GtdWorkfl
         && (value.sectionOpenPresent || !value.present))
     && (!isNested(type) || typeof value.parentPresent === 'boolean'
         && (value.parentPresent || !value.present))
-    && (value.present ? isNested(type) || isCaptureParse(type) || isTaskEditor(type) || type === 'focusIncludeStartDates'
+    && (value.present ? isNested(type) || isCaptureScalar(type) || isTaskEditor(type) || type === 'focusIncludeStartDates'
         ? typeof value.value === 'boolean' : type === 'autoArchiveDays'
         ? typeof value.value === 'number' && Number.isFinite(value.value)
         : type === 'focusTaskLimit'
@@ -339,11 +344,12 @@ const nestedOfferedByWitness = (edit: GtdWorkflowEdit, witness: GtdWorkflowWitne
                 : edit.type === 'inboxContextStep' ? model.inbox.contextStep.edit : model.inbox.schedule.edit;
     return same(offered, edit);
 };
-const captureParseOfferedByWitness = (edit: GtdWorkflowEdit, witness: GtdWorkflowWitness): boolean => {
-    if (!isCaptureParse(edit.type)) return true;
-    const model = buildGtdSettingsModel({ settings: settingsByWitness(edit, witness), areas: [],
+const captureScalarOfferedByWitness = (edit: GtdWorkflowEdit, witness: GtdWorkflowWitness): boolean => {
+    if (!isCaptureScalar(edit.type)) return true;
+    const settings = settingsByWitness(edit, witness);
+    const model = buildGtdSettingsModel({ settings: { ...settings, gtd: { ...settings.gtd, defaultCaptureMethod: 'audio' } }, areas: [],
         taskOpenMode: 'automatic', t: (key) => key });
-    return same(model.capture[edit.type].edit, edit);
+    return same((edit.type === 'saveAudioAttachments' ? model.capture.saveAudio : model.capture[edit.type])?.edit, edit);
 };
 const focusStartDatesOfferedByWitness = (edit: GtdWorkflowEdit, witness: GtdWorkflowWitness): boolean => {
     if (edit.type !== 'focusIncludeStartDates') return true;
@@ -427,7 +433,7 @@ const validArchiveEffects = (request: NativeGtdWorkflowRequest, prepared: Record
     return true;
 };
 
-/** Pure validation of the frozen edit and its scalar/group receipt before storage opens. */
+
 const readPrepared = (input: unknown): NativePreparedGtdWorkflow | null => {
     if (!isNativeJsonWithinBytes(input, 2_000_000)) return null;
     const envelope = detach<Record<string, unknown>>(input);
@@ -471,7 +477,7 @@ const readPrepared = (input: unknown): NativePreparedGtdWorkflow | null => {
         || storedByWitness(request.edit, request.expected)
         || !pomodoroOfferedByWitness(request.edit, request.expected)
         || !nestedOfferedByWitness(request.edit, request.expected)
-        || !captureParseOfferedByWitness(request.edit, request.expected)
+        || !captureScalarOfferedByWitness(request.edit, request.expected)
         || !focusStartDatesOfferedByWitness(request.edit, request.expected)
         || !taskEditorOfferedByWitness(request.edit, request.expected)
         || !presetOfferedByWitness(request.edit, request.expected)
@@ -501,9 +507,8 @@ export function createGtdWorkflowMethods(deps: { readiness: () => NativeHostResu
                     ? { type: edit.type, field: edit.field, value: edit.value, changed }
             : { type: edit.type, value: edit.value, changed };
     const hubFor = (data: AppData): GtdSettingsModel['hub'] => {
-        // The full shared model also builds six unavailable subpages. Keep their
-        // malformed legacy siblings out of this hub-only display projection;
-        // the raw saved Settings object remains the write authority.
+
+
         const gtd = data.settings.gtd;
         const display = { ...data.settings, gtd: { defaultScheduleTime: gtd?.defaultScheduleTime,
             focusTaskLimit: gtd?.focusTaskLimit, focusIncludeStartDates: gtd?.focusIncludeStartDates,
@@ -514,8 +519,8 @@ export function createGtdWorkflowMethods(deps: { readiness: () => NativeHostResu
     const pomodoroFor = (data: AppData): GtdSettingsModel['pomodoro'] => {
         const raw = data.settings.gtd?.pomodoro;
         const features = data.settings.features;
-        // Display only selected inputs; unsupported raw cells stay untouched and
-        // their null witnesses disable edits rather than silently repairing them.
+
+
         const display = { features: { pomodoro: features?.pomodoro === true }, gtd: { pomodoro: {
             linkTask: raw?.linkTask === true, autoStartBreaks: raw?.autoStartBreaks === true,
             autoStartFocus: raw?.autoStartFocus === true, completionAlert: raw?.completionAlert !== false,
@@ -529,8 +534,8 @@ export function createGtdWorkflowMethods(deps: { readiness: () => NativeHostResu
             taskOpenMode: 'automatic', t: deps.t() }).archive;
     };
     const reviewFor = (data: AppData): GtdSettingsModel['review'] => {
-        // Only the two Review fields are display inputs; other legacy GTD
-        // subpages stay out of this read while raw Settings remains authority.
+
+
         const gtd = data.settings.gtd;
         const display = { ...data.settings, gtd: {
             dailyReview: { includeFocusStep: gtd?.dailyReview?.includeFocusStep },
@@ -557,6 +562,12 @@ export function createGtdWorkflowMethods(deps: { readiness: () => NativeHostResu
         return { title: capture.title, description: capture.description,
             quickAddAutoClean: capture.quickAddAutoClean,
             naturalLanguageDates: capture.naturalLanguageDates };
+    };
+    const captureAudioFor = (data: AppData): NativeGtdCaptureAudioOptions['capture'] => {
+        const capture = buildGtdSettingsModel({ settings: { gtd: { defaultCaptureMethod: 'audio',
+            saveAudioAttachments: data.settings.gtd?.saveAudioAttachments } }, areas: [],
+            taskOpenMode: 'automatic', t: deps.t() }).capture;
+        return { title: capture.title, description: capture.description, saveAudio: capture.saveAudio };
     };
     const taskEditorOpenFor = (expected: NativeGtdTaskEditorOpenOptions['expected']): NativeGtdTaskEditorOpenOptions['taskEditor'] => {
         const sectionOpen = Object.fromEntries(TASK_EDITOR_SECTIONS.flatMap((section) =>
@@ -668,6 +679,18 @@ export function createGtdWorkflowMethods(deps: { readiness: () => NativeHostResu
             const value = { capture: captureParseFor(snapshot), expected };
             return isNativeJsonWithinBytes(value, 65_536) ? { ok: true, value }
                 : fail('INVALID_INPUT', 'GTD Capture parse options exceed the bounded response');
+        },
+        async getGtdCaptureAudioOptions(input: unknown): Promise<NativeHostResult<NativeGtdCaptureAudioOptions>> {
+            const ready = deps.readiness(); if (!ready.ok) return ready;
+            if (!record(input) || !exact(input, []) || !isNativeJsonWithinBytes(input, 8192))
+                return fail('INVALID_INPUT', 'GTD Capture audio options take an empty object');
+            const read = await readAreaDurableData(); if (!read.ok) return read;
+            const snapshot = read.value.authority.snapshot;
+            const witness = gtdWorkflowWitness(snapshot.settings, 'saveAudioAttachments');
+            if (!witness) return fail('INVALID_INPUT', 'Saved GTD Capture audio preference has an unsupported value');
+            const value = { capture: captureAudioFor(snapshot), expected: { saveAudioAttachments: witness } };
+            return isNativeJsonWithinBytes(value, 65_536) ? { ok: true, value }
+                : fail('INVALID_INPUT', 'GTD Capture audio options exceed the bounded response');
         },
         async getGtdCaptureAreaOptions(input: unknown): Promise<NativeHostResult<NativeGtdCaptureAreaOptions>> {
             const ready = deps.readiness(); if (!ready.ok) return ready;
@@ -844,6 +867,9 @@ export function createGtdWorkflowMethods(deps: { readiness: () => NativeHostResu
                 const capture = captureParseFor(read.value.authority.snapshot);
                 if (!same(capture[request.edit.type].edit, request.edit))
                     return fail('INVALID_INPUT', 'GTD Capture parse choice is unavailable');
+            } else if (request.edit.type === 'saveAudioAttachments') {
+                if (!captureScalarOfferedByWitness(request.edit, current))
+                    return fail('INVALID_INPUT', 'GTD Capture audio choice is unavailable');
             } else if (isTaskEditorEdit(request.edit)) {
                 if (!taskEditorOfferedByWitness(request.edit, current))
                     return fail('INVALID_INPUT', 'GTD Task Editor choice is unavailable');

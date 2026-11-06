@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as core from '@mindwtr/core';
 import {
@@ -15,14 +16,15 @@ import {
     resetForTests,
     setSha256HexProvider,
     setLogger,
+    consoleLogger,
     type AppData,
 } from '@mindwtr/core';
-import { createDeadlineFetch, createNativeSync } from './host-sync';
+import { createDeadlineFetch, createIosDirectoryFileSync, createNativeSync } from './host-sync';
 import { serveWebdav, webdavDocument } from '../scripts/webdav-harness.mjs';
 import type { NativeAttachmentBindings } from './host-attachments';
 import { createMemoryFileSystem, CACHE, DOCUMENTS, MANAGED } from '../../../packages/core/src/__fixtures__/mobile-attachment-fakes';
 
-// The native app's background sync binding (S4a): core's runner and schedule decision on the host's ports.
+
 const globals = globalThis as unknown as Record<string, unknown>;
 const realFetch = globalThis.fetch;
 const nativeGlobals = ['__mindwtrHostPlatform', '__mindwtrNative', '__mindwtrFileCall', '__mindwtrInstallerCall'];
@@ -53,7 +55,7 @@ const host = (stored: Record<string, string> = {}, refuseSchedule = false, getDa
             getData: getData ?? (async () => { throw new Error('no local data in this test'); }),
             saveData: async () => undefined,
             readTokenOf: () => undefined,
-            prepareSaveRows: function* () { /* no rows to prepare */ },
+            prepareSaveRows: function* () {                          },
         }),
         networkState: () => { calls.push('networkState'); return { isConnected: true, isInternetReachable: true }; },
         appendLog: async (entry) => { calls.push('appendLog'); lines.push(entry.message); entries.push(entry); return null; },
@@ -74,6 +76,7 @@ const host = (stored: Record<string, string> = {}, refuseSchedule = false, getDa
 
 it.each(['android', 'ios'] as const)('forwards the shared WebDAV setup failure receipt through the %s log binding', async (platform) => {
     resetForTests();
+    core.useTaskStore.setState({ _allTasks: [], _allProjects: [], _allSections: [], _allAreas: [], _allPeople: [], settings: {} } as never);
     if (platform === 'ios') iosFiles();
     globals.__mindwtrHostPlatform = platform;
     const data: AppData = { tasks: [], projects: [], sections: [], areas: [], settings: {} };
@@ -123,7 +126,7 @@ it('records bounded iOS unlock only after the shared service confirms completion
         const provide = sync.settingsHost.encryption.transitions!.provide;
         sync.settingsHost.encryption.unlockOnly = true;
         for (outcome of ['wrong-passphrase', 'no-encrypted-remote', new Error('synthetic failure')] as const) {
-            try { await provide('synthetic secret'); } catch { /* Shared failure stays a failure. */ }
+            try { await provide('synthetic secret'); } catch {                                       }
             expect(entries.filter((entry) => entry.message === 'Native iOS encrypted unlock service completed')).toHaveLength(0);
         }
         outcome = 'ok';
@@ -232,7 +235,7 @@ it('binds the iOS encrypted-output capacity and preserves refusal if diagnostics
     }
     expect(capacities).toEqual([8 * 1024 * 1024, undefined]);
 });
-/** A server that refuses the password: a failure core does not retry, so a cycle fails at once. */
+
 const failingFetch = (async (input: RequestInfo | URL) => {
     fetches.push(String(input));
     return new Response('', { status: 401, statusText: 'Unauthorized' });
@@ -243,7 +246,7 @@ afterEach(() => {
     globalThis.fetch = realFetch;
     fetches.length = 0;
     delete globals.__mindwtrCryptoCall;
-    setLogger(null);
+    setLogger(consoleLogger);
     setSha256HexProvider(null);
     for (const name of nativeGlobals) {
         const original = originalGlobals.get(name);
@@ -252,7 +255,7 @@ afterEach(() => {
     }
 });
 
-/** The same file-call wire read by nativeFileChannels, over existing memory files. */
+
 const iosFiles = () => {
     setLogger(() => undefined);
     const memory = createMemoryFileSystem();
@@ -262,11 +265,12 @@ const iosFiles = () => {
         fileDirectories: () => JSON.stringify({ document: DOCUMENTS, cache: CACHE }),
         fileDeleteNow: () => { calls.push('deleteNow'); throw new Error('Unexpected raw delete'); },
     };
-    globals.__mindwtrFileCall = async (request: Record<string, unknown>) => {
+    globals.__mindwtrFileCall = async (request: Record<string, unknown>, bytes?: Uint8Array) => {
         const op = String(request.op);
         const uri = String(request.uri ?? '');
         calls.push(op);
         switch (op) {
+            case 'sha256': if (!bytes) throw new Error('Missing hash body'); return createHash('sha256').update(bytes).digest('hex');
             case 'getInfo': return memory.fs.getInfo(uri);
             case 'makeDirectory': return memory.fs.makeDirectory(uri);
             case 'readDirectory': return memory.fs.readDirectory(uri);
@@ -409,7 +413,7 @@ describe('iOS self-hosted foreground admission', () => {
     const data = (): AppData => ({ tasks: [], projects: [], sections: [], areas: [], settings: {} });
     const configured = async (extra: Record<string, string> = {}, local = data()) => {
         resetForTests(); iosFiles();
-        // An earlier test's sync publishes its merged document to the shared store; start from an empty one.
+
         core.useTaskStore.setState({ _allTasks: [], _allProjects: [], _allSections: [], _allAreas: [], _allPeople: [], settings: {} } as never);
         const fixture = host({ [SYNC_BACKEND_KEY]: 'cloud', [CLOUD_URL_KEY]: endpoint, ...extra }, false,
             async () => structuredClone(local), async () => false);
@@ -628,6 +632,19 @@ describe('event-owned iOS stored/resume pacing', () => {
         })) as typeof fetch;
     };
     afterEach(() => resetForTests());
+
+    it('runs an explicit stored pull despite automatic resume pacing and preserves configuration', async () => {
+        resetForTests(); serve();
+        spyOn(Date, 'now').mockReturnValue(100_000);
+        const fixture = configured();
+        await fixture.sync.performStoredAutomaticSync('startup');
+        const before = [fixture.kv.get(SYNC_BACKEND_KEY), fixture.kv.get(WEBDAV_URL_KEY)];
+        expect(await fixture.sync.performStoredAutomaticSync('resume')).toEqual({ success: true, skipped: true });
+        expect(await fixture.sync.performStoredManualSync()).toMatchObject({ success: true });
+        expect(fixture.sync.state().cycles).toBe(2);
+        expect([fixture.kv.get(SYNC_BACKEND_KEY), fixture.kv.get(WEBDAV_URL_KEY)]).toEqual(before);
+        expect(fixture.schedules).toEqual([]);
+    });
 
     it('seeds resume pacing from cold completion and uses the strict shared 30-second boundary', async () => {
         resetForTests(); serve();
@@ -866,7 +883,7 @@ describe('invocation-owned iOS service settlement', () => {
     }
 });
 
-// 5bb0ea8f: a list's pull down to sync runs RN's useManualPullSync rules (core's runManualPullSync) through the manual cycle.
+
 describe('pull down to sync', () => {
     it('asks for setup while sync is off, runs no cycle, and logs the outcome', async () => {
         const fixture = host();
@@ -953,8 +970,8 @@ describe('native background sync binding', () => {
                 }
                 return value;
             };
-            // Successful verification's finally refresh uses this same path; an Off
-            // cycle admits it here without a second synthetic remote-write fixture.
+
+
             expect(await fixture.sync.settingsHost.performSync(undefined, { manual: true, configOverride: { backend: 'off' } })).toMatchObject({ success: true });
             const reconcile = fixture.sync.settingsHost.reconcileBackgroundSync().catch((error: unknown) => error);
             await entered;
@@ -1017,8 +1034,7 @@ describe('native background sync binding', () => {
         expect(file.schedules).toEqual([false]);
     });
 
-    // Review S4a 4: the schedule is reported only once WorkManager stored it; a refusal reaches the caller (and is retried at the
-    // next start, resume or leave, which reconcile again).
+
     it('reports the job scheduled only once the host stored it; a refusal fails the reconcile', async () => {
         const { sync, traces } = host({ [SYNC_BACKEND_KEY]: 'webdav', [WEBDAV_URL_KEY]: 'http://127.0.0.1:1/dav' }, true);
         await expect(sync.settingsHost.reconcileBackgroundSync()).rejects.toThrow('WorkManager did not store the work');
@@ -1064,8 +1080,7 @@ describe('native background sync binding', () => {
         expect(fetches).toEqual(['http://a/1', 'http://a/3']);
     });
 
-    // About 35 s: the aborted cycle's WebDAV read retries (core's backoff) before it ends; none of them is sent (the signal is
-    // aborted, so the host's fetch refuses each before it starts).
+
     it('a run abandoned at its deadline ends its cycle with no follow-up: the job, not a timer, retries it (review S4a 1)', async () => {
         const sent: string[] = [];
         globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_, reject) => {
@@ -1088,8 +1103,32 @@ describe('native background sync binding', () => {
     }, 60_000);
 });
 
-// D9b change 5 (design §2, §6): only the Android host slices its sync cycles. iOS keeps unsliced cycles, its recovery save
-// and its in-gate publish; a sliced cycle there would also need the token ports, which the binding passes on both platforms.
+it.each(['android', 'ios'] as const)('binds a complete CloudKit port only to an explicit iOS invocation on %s', async (platform) => {
+    if (platform === 'ios') iosFiles();
+    globals.__mindwtrHostPlatform = platform;
+    const fixture = host({}, false, undefined, async () => false);
+    const port = {
+        isAvailable: () => true,
+        getAccountStatus: async () => 'available' as const,
+        ensureReady: async () => {}, read: async () => null, write: async () => {},
+        assets: { saveAttachmentAsset: async () => {}, fetchAttachmentAsset: async () => { throw new Error('no asset'); },
+            deleteAttachmentAssets: async () => {}, isAttachmentNotFoundError: () => false },
+    };
+    const create = core.createMobileSyncService;
+    let serviceHost: Parameters<typeof core.createMobileSyncService>[0] | undefined;
+    spyOn(core, 'createMobileSyncService').mockImplementation((options) => {
+        serviceHost = options; return create(options);
+    });
+    const sync = createNativeSync({ ...fixture.bindings, cloudKit: port });
+    if (platform === 'ios') {
+        expect(serviceHost!.cloudKit?.read).toBe(port.read);
+        expect(typeof serviceHost!.cloudKit?.syncAttachments).toBe('function');
+    } else expect(serviceHost!.cloudKit).toBeUndefined();
+    expect(sync.settingsHost.platform.cloudKitAvailable).toBe(platform === 'ios');
+    expect(await sync.settingsHost.cloudKit?.getAccountStatus()).toBe(platform === 'ios' ? 'available' : undefined);
+    expect(fixture.sync.settingsHost.platform.cloudKitAvailable).toBe(false);
+});
+
 it.each(['android', 'ios'] as const)('binds sliceYield on %s only when the host is Android, with the token ports', async (platform) => {
     if (platform === 'ios') iosFiles();
     globals.__mindwtrHostPlatform = platform;
@@ -1105,7 +1144,7 @@ it.each(['android', 'ios'] as const)('binds sliceYield on %s only when the host 
     expect(typeof serviceHost!.localData.readTokenOf).toBe('function');
     expect(typeof serviceHost!.localData.prepareSave).toBe('function');
     if (platform === 'android') {
-        // A zero-delay timer: the slice gives the engine back and resumes in a later turn.
+
         let resumed = false;
         const slice = serviceHost!.sliceYield!().then(() => { resumed = true; });
         await Promise.resolve();
@@ -1115,9 +1154,7 @@ it.each(['android', 'ios'] as const)('binds sliceYield on %s only when the host 
     }
 });
 
-// Audit 10-25 gap 10: leaving the app during a sync (core's lifecycle and remote-fence race), on the real native binding and a
-// local WebDAV folder. Leaving aborts the running cycle mid-write; core then syncs once on the way out (its app-left sync). That
-// sync must publish the whole library, and no remote-mutation fence may be left behind, or every device would wait on it.
+
 describe('leaving the app during a sync', () => {
     const waitFor = async (what: string, holds: () => boolean, ms = 20_000) => {
         for (const deadline = Date.now() + ms; !holds(); await new Promise((done) => setTimeout(done, 50))) {
@@ -1127,7 +1164,7 @@ describe('leaving the app during a sync', () => {
 
     it('aborts a write in flight, then publishes the library and leaves no fence', async () => {
         resetForTests();
-        // An earlier test's afterEach leaves the core logger unset; the cycle logs through it.
+
         setLogger(() => undefined);
         globals.__mindwtrHostPlatform = 'android';
         globalThis.fetch = realFetch;
@@ -1141,12 +1178,12 @@ describe('leaving the app during a sync', () => {
         const fixture = host({ [SYNC_BACKEND_KEY]: 'webdav', [WEBDAV_URL_KEY]: url, '@mindwtr_webdav_username': 'alice' }, false,
             async () => structuredClone(data));
         fixture.bindings.secrets.getSecret = async (key) => (key.includes('webdav_password') ? 'secret' : null);
-        // A sliced Android cycle saves with the read token of the snapshot it merged (D9b); this store's token never moves.
+
         fixture.bindings.localData = () => ({
             getData: async () => structuredClone(data),
             saveData: async (next: AppData) => { data = structuredClone(next); },
             readTokenOf: () => ({ epoch: 0, generation: 0 }),
-            prepareSaveRows: function* () { /* nothing to prepare */ },
+            prepareSaveRows: function* () {                          },
         }) as unknown as ReturnType<typeof fixture.bindings.localData>;
         let release!: () => void;
         dav.state.holdWrites = new Promise<void>((done) => { release = done; });
@@ -1163,7 +1200,7 @@ describe('leaving the app during a sync', () => {
             await waitFor('the fence released', () => fences().length === 0, 20_000);
 
             const document = webdavDocument(dav, folder);
-            // Earlier tests of this file leave rows in the shared store: the leave's library is what matters here.
+
             expect(document.tasks.map((row: { id: string }) => row.id)).toContain('t-leave');
             expect(data.tasks.map((row) => row.id)).toContain('t-leave');
             fixture.sync.appState('active');
@@ -1176,9 +1213,7 @@ describe('leaving the app during a sync', () => {
     }, 90_000);
 });
 
-// Audit 10-25 gap 10: a keystore error, then a restart. The secret read throws (Android's keystore can fail on a locked or
-// busy device); the sync must fail without deleting the secret, the stored backend or anything else, and the restarted app
-// (a new binding on the same storage) must sync with the same secret.
+
 describe('a keystore error, then a restart', () => {
     it('fails the sync without deleting anything, and the restarted app syncs with the same secret', async () => {
         resetForTests();
@@ -1200,7 +1235,7 @@ describe('a keystore error, then a restart', () => {
                 getData: async () => structuredClone(data),
                 saveData: async (next: AppData) => { data = structuredClone(next); },
                 readTokenOf: () => ({ epoch: 0, generation: 0 }),
-                prepareSaveRows: function* () { /* nothing to prepare */ },
+                prepareSaveRows: function* () {                          },
             }) as unknown as ReturnType<typeof fixture.bindings.localData>;
             fixture.bindings.secrets = {
                 getSecret: async (key) => {
@@ -1222,11 +1257,11 @@ describe('a keystore error, then a restart', () => {
             expect(Object.fromEntries([...failing.kv].filter(([key]) => key in stored))).toEqual(stored);
             expect(webdavDocument(dav, folder)).toBeNull();
 
-            // The restart: a new binding over the same key-value store and keystore, which answers again.
+
             const restarted = boot(false);
             for (const [key, value] of failing.kv) restarted.kv.set(key, value);
             expect(await restarted.sync.settingsHost.performSync(undefined, { manual: true })).toMatchObject({ success: true });
-            // The folder takes only the stored user's password: a document there proves the same secret signed in.
+
             expect(webdavDocument(dav, folder)).not.toBeNull();
             expect(deleted).toEqual([]);
         } finally {
@@ -1236,9 +1271,7 @@ describe('a keystore error, then a restart', () => {
     }, 60_000);
 });
 
-// Kotlin reads every list again after a finished cycle only when the cycle replaced anything in the store (contentRevision):
-// a cycle that wrote nothing (no backend) leaves the screens as drawn; a merge, a settings-only write (a sync status or error),
-// and an attachment's local state change each read them again. The sync badge rides every event either way.
+
 describe('the store content a finished cycle reports', () => {
     const AT = '2026-01-01T00:00:00.000Z';
     const task = { id: 't1', title: 'Task', status: 'inbox', tags: [], contexts: [], createdAt: AT, updatedAt: AT, rev: 1 };
@@ -1248,7 +1281,7 @@ describe('the store content a finished cycle reports', () => {
         core.useTaskStore.setState({ _allTasks: [task], _allProjects: [], _allSections: [], _allAreas: [], _allPeople: [], settings: {} } as never);
         return host({ [SYNC_BACKEND_KEY]: 'off' }, false, undefined, async () => false).sync;
     };
-    // A cycle with [write] landing while it runs: whether it moved contentRevision.
+
     const moved = async (sync: ReturnType<typeof start>, write?: () => void) => {
         const before = sync.state();
         const running = sync.settingsHost.performSync(undefined, { manual: true });
@@ -1273,4 +1306,120 @@ describe('the store content a finished cycle reports', () => {
         expect(await moved(start(), () => core.useTaskStore.setState((state) => ({ _allTasks: state._allTasks.map((row) => ({ ...row,
             attachments: [{ id: 'a', kind: 'file', title: 'a.pdf', uri: 'file:///a.pdf', localStatus: 'available', createdAt: AT, updatedAt: AT }] })) }) as never))).toBe(true);
     });
+});
+
+
+it('requires an exact injected File path while default and saved File admission stay closed', async () => {
+    resetForTests(); iosFiles();
+    const data: AppData = { tasks: [], projects: [], sections: [], areas: [], settings: {} };
+    core.setStorageAdapter({ getData: async () => structuredClone(data), saveData: async () => undefined });
+    const fixture = host({ [SYNC_BACKEND_KEY]: 'file' }, false, async () => structuredClone(data), async () => false);
+    const path = 'file:///app/Sync%20%E8%B3%87%E6%96%99/data.json';
+    let admitted = 0;
+    const port: core.MobileSyncFileSyncPort<import('./host-file-sync').NativeFileSyncLease> = {
+        acquireLease: async () => { admitted += 1; throw new Error('Reached actual service lease seam'); },
+        revalidateLease: async () => {}, releaseLease: async () => {},
+        readVersioned: async () => { throw new Error('No owner'); }, write: async () => { throw new Error('No owner'); },
+        resolveUri: async () => { throw new Error('No owner'); }, isBookmarksAvailable: () => false, resolveBookmark: async () => null,
+    };
+    await expect(fixture.sync.settingsHost.performSync(undefined, { manual: true })).rejects.toThrow('not available');
+    const explicit = createNativeSync({ ...fixture.bindings, fileSync: { canonicalPath: path, port } });
+    await expect(explicit.settingsHost.performSync(undefined, { manual: true, configOverride: { backend: 'file', syncPath: path + '.other' } })).rejects.toThrow('not available');
+    expect(admitted).toBe(0);
+    const result = await explicit.settingsHost.performSync(undefined, { manual: true, configOverride: { backend: 'file', syncPath: path } });
+    expect(result.success).toBe(false); expect(admitted).toBe(1);
+    expect(fixture.kv.get(SYNC_BACKEND_KEY)).toBe('file'); expect(fixture.kv.has('@mindwtr_sync_path')).toBe(false);
+});
+
+
+it('runs picked activation through two fresh real shared File cycles, then one saved manual cycle', async () => {
+    resetForTests(); iosFiles();
+    const data: AppData = { tasks: [], projects: [], sections: [], areas: [], settings: {} };
+    core.setStorageAdapter({ getData: async () => structuredClone(data), saveData: async () => undefined });
+    const fixture = host({ [SYNC_BACKEND_KEY]: 'off' }, false, async () => structuredClone(data), async () => false);
+    const root = 'file:///app/selected/', path = root + 'data.json', bookmark = 'b3JpZ2luYWw=';
+    core.useTaskStore.setState({ _allTasks: [], _allProjects: [], _allSections: [], _allAreas: [], _allPeople: [], settings: {}, error: null, persistenceFailure: null, isLoading: false, editLockCount: 0, lastDataChangeAt: 0 } as never);
+    await core.useTaskStore.getState().fetchData({ throwOnError: true });
+    await core.flushPendingSave();
+    const files = new Map<string, Uint8Array>(), phases: string[] = [], requests: string[] = [];
+    let turn = 0, active: string | null = null, opens = 0;
+    const control = (text: string) => {
+        const request = JSON.parse(text);
+        if (request.phase === 'begin') {
+            expect(active).toBeNull(); active = 'directory-' + (++turn);
+            phases.push('begin:' + turn + ':' + fixture.kv.get(SYNC_BACKEND_KEY));
+            return JSON.stringify({ turn: active, bookmark, expectedPath: request.picked ? null : fixture.kv.get('@mindwtr_sync_path') });
+        }
+        expect(request.turn).toBe(active);
+        phases.push('finish:' + turn + ':' + fixture.kv.get(SYNC_BACKEND_KEY) + ':' + request.admit);
+        active = null;
+        return JSON.stringify({ closed: true });
+    };
+    const call: import('./host-file-sync').NativeFileSyncCall = async (request) => {
+        expect(request.turn).toBe(active); requests.push(String(request.op));
+        const uri = String(request.uri), bytes = files.get(uri);
+        const reply = (value: unknown) => ({ id: 'reply', value });
+        switch (request.op) {
+        case 'prepare': return reply({ rootURI: root, canonicalPath: path });
+        case 'open': opens += 1; return reply(null);
+        case 'revalidate': case 'close': return reply(null);
+        case 'list': return reply([...files.keys()].map((name) => name.slice(root.length)));
+        case 'info': return reply(uri === root ? { exists: true, size: 0 } : bytes ? { exists: true, size: bytes.length } : { exists: false });
+        case 'read': return bytes ? { id: 'reply', value: 'bytes', body: true, base64: core.bytesToBase64(bytes) } : reply('absent');
+        case 'create': if (files.has(uri)) return reply('exists'); files.set(uri, new Uint8Array()); return reply('created');
+        case 'writeCreated': files.set(uri, core.base64ToBytes(String(request.base64))); return reply(null);
+        case 'renameObserved': {
+            expect(bytes).toEqual(core.base64ToBytes(String(request.base64)));
+            const target = root + encodeURIComponent(String(request.name)); expect(files.has(target)).toBe(false);
+            files.set(target, bytes!); files.delete(uri); return reply(target);
+        }
+        case 'deleteOwned': expect(bytes).toEqual(core.base64ToBytes(String(request.base64))); files.delete(uri); return reply(null);
+        default: throw new Error('Unexpected native operation');
+        }
+    };
+    const directory = createIosDirectoryFileSync(fixture.bindings, call, control);
+    const sync = createNativeSync({ ...fixture.bindings, ...directory });
+    const contract = core.createNativeHostContract({ syncSettings: sync.settingsHost });
+    const activation = await contract.activate({ writeSafetyReady: true });
+    expect(activation).toEqual({ ok: true, value: null });
+    expect((await contract.openSyncSettings({})).ok).toBe(true);
+    expect((await contract.selectSyncBackend({ requestId: crypto.randomUUID(), option: 'file' })).ok).toBe(true);
+    expect(turn).toBe(0); expect(fixture.kv.get(SYNC_BACKEND_KEY)).toBe('off');
+    const read = contract.getSyncSettings(); if (!read.ok) throw new Error('No Settings view');
+    const picked = await contract.pickSyncFolder({ requestId: crypto.randomUUID(), revision: read.value.configRevision });
+    expect(picked).toMatchObject({ ok: true, value: { toasts: expect.not.arrayContaining([expect.objectContaining({ tone: 'error' })]) } });
+    expect(phases).toEqual(['begin:1:off', 'finish:1:off:true', 'begin:2:file', 'finish:2:file:true']);
+    expect(turn).toBe(2); expect(opens).toBe(2);
+    expect(fixture.kv.get('@mindwtr_sync_path')).toBe(path);
+    expect(fixture.kv.get('@mindwtr_sync_path_bookmark')).toBe(bookmark);
+    const first = core.bytesToBase64(files.get(path)!);
+    const fresh = contract.getSyncSettings(); if (!fresh.ok) throw new Error('No Settings view');
+    expect((await contract.syncNow({ requestId: crypto.randomUUID(), revision: fresh.value.configRevision })).ok).toBe(true);
+    expect(turn).toBe(3); expect(opens).toBe(3); expect(core.bytesToBase64(files.get(path)!)).toBe(first);
+    expect(requests.filter((op) => op === 'prepare')).toHaveLength(3);
+    await contract.closeSyncSettings({});
+    expect(await sync.performStoredManualSync()).toEqual({ success: true, skipped: false });
+    expect(turn).toBe(4); expect(opens).toBe(4); expect(active).toBeNull();
+    expect(core.bytesToBase64(files.get(path)!)).toBe(first);
+    expect(fixture.kv.get('@mindwtr_sync_path_bookmark')).toBe(bookmark);
+    await contract.openSyncSettings({});
+    expect((await contract.selectSyncBackend({ requestId: crypto.randomUUID(), option: 'off' })).ok).toBe(true);
+    expect(turn).toBe(4); expect(fixture.kv.get(SYNC_BACKEND_KEY)).toBe('off');
+    directory.close(); resetForTests();
+});
+
+it('native directory projection failure closes before core can activate a picked target', async () => {
+    resetForTests(); iosFiles();
+    const fixture = host({ [SYNC_BACKEND_KEY]: 'off' }, false, undefined, async () => false);
+    const phases: string[] = [];
+    const directory = createIosDirectoryFileSync(fixture.bindings,
+        async () => ({ id: 'reply', value: { rootURI: 'file:///app/folder/', canonicalPath: 'file:///app/other/data.json' } }),
+        (text) => {
+            const request = JSON.parse(text); phases.push(request.phase);
+            return JSON.stringify(request.phase === 'begin' ? { turn: 'one', bookmark: 'b3JpZ2luYWw=', expectedPath: null } : { closed: true });
+        });
+    await expect(directory.pickSyncFolder()).rejects.toThrow();
+    expect(phases).toEqual(['begin', 'finish']);
+    expect(fixture.kv.get(SYNC_BACKEND_KEY)).toBe('off');
+    directory.close(); resetForTests();
 });

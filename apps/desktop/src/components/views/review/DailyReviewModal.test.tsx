@@ -94,6 +94,16 @@ describe('DailyReviewGuideModal', () => {
         vi.useRealTimers();
     });
 
+    it('does not close the review for IME Escape', () => {
+        const onClose = vi.fn();
+        render(<DailyReviewGuideModal onClose={onClose} />);
+        fireEvent.keyDown(window, { key: 'Escape', isComposing: true });
+        fireEvent.keyDown(window, { key: 'Escape', keyCode: 229 });
+        expect(onClose).not.toHaveBeenCalled();
+        fireEvent.keyDown(window, { key: 'Escape' });
+        expect(onClose).toHaveBeenCalledOnce();
+    });
+
     it('opens the next step at its top (#1471)', () => {
         useTaskStore.setState({
             _allTasks: [
@@ -358,9 +368,8 @@ describe('DailyReviewGuideModal', () => {
 
         expect(screen.getByTestId('task-tomorrow-1')).toBeInTheDocument();
     });
-    // The star swallowed the blocked reason (`if (!action.canToggle) return;`)
-    // and the cap-only render gate left it enabled, so a task that can never be
-    // focused offered an Add to Focus button that did nothing when pressed.
+
+
     it('disables the focus star for a task that must be clarified first and says why', () => {
         const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
         useTaskStore.setState({

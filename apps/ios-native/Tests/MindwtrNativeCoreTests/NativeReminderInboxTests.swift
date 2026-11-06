@@ -4,8 +4,20 @@ import XCTest
 @testable import MindwtrNativeCore
 
 final class NativeReminderInboxTests: XCTestCase {
+    private final class SealDiagnostics: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [NativeReminderInbox.SealDiagnostic] = []
+        func receive(_ value: NativeReminderInbox.SealDiagnostic) { lock.lock(); defer { lock.unlock() }; values.append(value) }
+        var events: [NativeReminderInbox.SealDiagnostic] { lock.lock(); defer { lock.unlock() }; return values }
+    }
+    private struct SealFixture {
+        let home: URL
+        let route: NativePersonalIntakeRoute
+        let file: URL
+    }
     private var container: URL!
     private var stores: [NativeReminderInbox] = []
+    private var intakeStores: [NativePersonalIntake] = []
     private var additionalRoots: [URL] = []
     private let namespace = "tech.dongdongbh.mindwtr.response-tests"
     private enum Injected: Error { case failure }
@@ -26,6 +38,8 @@ final class NativeReminderInboxTests: XCTestCase {
         try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
     }
     override func tearDown() async throws {
+        for intake in intakeStores { await intake.close() }
+        intakeStores.removeAll()
         for store in stores { await store.close() }
         stores.removeAll()
         for root in [container].compactMap({ $0 }) + additionalRoots where FileManager.default.fileExists(atPath: root.path) {
@@ -38,7 +52,8 @@ final class NativeReminderInboxTests: XCTestCase {
     }
     private func response(id: String = UUID().uuidString.lowercased(), delivered: Double = 100,
                           requested: Int64 = 1_700_000_000_123, task: String = "task", title: String = "\u{FEFF}été 🧠", json: String? = nil,
-                          action: NativeReminderResponse.Action = .complete) throws -> NativeReminderResponse {
+                          action: NativeReminderResponse.Action = .complete, namespace selectedNamespace: String? = nil) throws -> NativeReminderResponse {
+        let namespace = selectedNamespace ?? self.namespace
         let payload: String
         if let json { payload = json }
         else {
@@ -83,6 +98,39 @@ final class NativeReminderInboxTests: XCTestCase {
         let foreign = url.deletingLastPathComponent().appendingPathComponent("foreign-\(UUID().uuidString)")
         try bytes.write(to: foreign)
         guard rename(foreign.path, url.path) == 0 else { throw Injected.failure }
+    }
+
+    private func sealFixture(isolated: Bool = false) throws -> SealFixture {
+        let parent = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".mindwtr-native-tests/personal-intake/\(UUID().uuidString.lowercased())", isDirectory: true)
+        let home = parent.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        additionalRoots.append(parent)
+        let owned = home.resolvingSymlinksInPath()
+        let route = try NativePersonalIntakeRoute.fixture(home: owned,
+            arguments: isolated ? ["--native-ui-test-library", UUID().uuidString.lowercased()] : [], bundleIdentifier: namespace)
+        let database: URL
+        switch route.selection {
+        case .production: throw Injected.failure
+        case let .standard(value, _, _): database = value
+        case let .isolated(value, container, _, _):
+            try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+            database = value
+        case .rehearsal: throw Injected.failure
+        }
+        return .init(home: owned, route: route,
+            file: database.deletingLastPathComponent().appendingPathComponent("NotificationResponses/inbox.json"))
+    }
+    private func open(_ fixture: SealFixture) throws -> NativeReminderInbox {
+        let store = try NativeReminderInbox(selection: fixture.route.selection); stores.append(store); return store
+    }
+    private func seedSeal(_ fixture: SealFixture, active: [[String: Any]] = [], tombstones: [[String: Any]] = [],
+                          next: Int64 = 1, floor: String? = nil) throws {
+        try FileManager.default.createDirectory(at: fixture.file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var state: [String: Any] = ["version": 1, "namespace": fixture.route.namespace, "nextSequence": next,
+                                  "active": active, "tombstones": tombstones]
+        if let floor { state["retiredThrough"] = floor }
+        try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]).write(to: fixture.file)
     }
 
     func testCaptureRestartKeepsExactPayloadTimeAndInsertionOrder() async throws {
@@ -489,4 +537,293 @@ final class NativeReminderInboxTests: XCTestCase {
         let surviving = try await reopened.pending()
         XCTAssertEqual(surviving.count, 1)
     }
+
+    func testSealExportsOriginalSequencesClocksPhasesTerminalsAndFloorWithoutRewrite() async throws {
+        let fixture = try sealFixture(), diagnostics = SealDiagnostics()
+        let first = try response(delivered: 90, task: "\u{FEFF}e\u{301} 🧠"), second = try response(delivered: 200, action: .snooze)
+        let terminalID = UUID().uuidString.lowercased(), floor = String(format: "%016llx", Double(100).bitPattern)
+        let terminalBits = String(format: "%016llx", Double(150).bitPattern)
+        try seedSeal(fixture, active: [record(second, sequence: 4, stage: "admitting"), record(first, sequence: 2)],
+                     tombstones: [["requestID": terminalID, "deliveredAtBits": terminalBits]], next: 10, floor: floor)
+        let original = try Data(contentsOf: fixture.file), store = try open(fixture)
+        let token = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) }
+        let repeated = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) }
+        XCTAssertEqual(token, repeated)
+        let exported = try await store.exportSealed(token, route: fixture.route)
+        XCTAssertEqual(exported.namespace, fixture.route.namespace); XCTAssertEqual(exported.nextSequence, 10)
+        XCTAssertEqual(exported.active.map(\.sequence), [2, 4])
+        XCTAssertEqual(exported.active.map(\.item.response), [first, second])
+        XCTAssertEqual(exported.active.map(\.item.stage), [.captured, .admitting])
+        XCTAssertEqual(Data(try XCTUnwrap(exported.active.first).item.response.payloadJSON.utf8), Data(first.payloadJSON.utf8))
+        XCTAssertEqual(exported.terminal.map(\.requestID), [terminalID])
+        XCTAssertEqual(exported.terminal.map(\.deliveredAtBits), [terminalBits])
+        XCTAssertEqual(exported.retiredThrough, floor); XCTAssertEqual(exported.sourceGeneration.count, 32)
+        let again = try await store.exportSealed(token, route: fixture.route)
+        XCTAssertEqual(again.sourceGeneration, exported.sourceGeneration)
+        XCTAssertEqual(try Data(contentsOf: fixture.file), original)
+        XCTAssertEqual(diagnostics.events.count, 1)
+        let event = try XCTUnwrap(diagnostics.events.first)
+        XCTAssertEqual(event.message, "Native iOS legacy reminder owner sealed")
+        XCTAssertEqual(event.releaseCheck, "v1.3.9/ios-personal-intake-seal")
+        XCTAssertEqual(event.operation, "seal"); XCTAssertEqual(event.outcome, "confirmed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.home.appendingPathComponent("Library/Application Support/NativePersonalIntake").path))
+    }
+
+    func testSealRefusesAllOriginalMutationReferencesWithoutChangingLegacyBytes() async throws {
+        let fixture = try sealFixture(), store = try open(fixture)
+        let first = try response(), second = try response(delivered: 101)
+        _ = try await store.capture(first); _ = try await store.capture(second)
+        let admitting = try await store.markAdmitting(second.requestID)
+        let original = try Data(contentsOf: fixture.file), oldReference = store
+        _ = try await store.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in })
+        await fails { _ = try await oldReference.capture(response(delivered: 300)) }
+        await fails { _ = try await oldReference.markAdmitting(first.requestID) }
+        await fails { try await oldReference.finish(admitting) }
+        await fails { try await oldReference.retry() }
+        XCTAssertEqual(try Data(contentsOf: fixture.file), original)
+        let retained = try await store.pending()
+        XCTAssertEqual(retained.map(\.response), [first, second])
+    }
+
+    func testSealMissingSnapshotAndOrdinaryCloseNeverManufactureAuthority() async throws {
+        let fixture = try sealFixture(), diagnostics = SealDiagnostics(), store = try open(fixture)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path))
+        await fails { _ = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) } }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path)); XCTAssertTrue(diagnostics.events.isEmpty)
+        _ = try await store.capture(response())
+        await store.close()
+        await fails { _ = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) } }
+        XCTAssertTrue(diagnostics.events.isEmpty)
+        let reopened = try open(fixture)
+        let token = try await reopened.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) }
+        await reopened.close()
+        await fails { _ = try await reopened.exportSealed(token, route: fixture.route) }
+        await fails { _ = try await reopened.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) } }
+        XCTAssertEqual(diagnostics.events.count, 1)
+    }
+
+    func testExplicitFreshEmptyPreparationSealsImportsAndCapturesLateCallback() async throws {
+        for isolated in [false, true] {
+            let fixture = try sealFixture(isolated: isolated), original = try open(fixture)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path))
+            try await original.prepareEmptySourceForPersonalIntake(route: fixture.route)
+            let bytes = try Data(contentsOf: fixture.file)
+            let expected: [String: Any] = ["version": 1, "namespace": fixture.route.namespace,
+                "nextSequence": 1, "active": [], "tombstones": []]
+            XCTAssertEqual(bytes, try JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys, .withoutEscapingSlashes]))
+            var initial = stat(); XCTAssertEqual(lstat(fixture.file.path, &initial), 0)
+            try await original.prepareEmptySourceForPersonalIntake(route: fixture.route)
+            let seal = try await original.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in })
+            try await original.prepareEmptySourceForPersonalIntake(route: fixture.route)
+            let exported = try await original.exportSealed(seal, route: fixture.route)
+            XCTAssertEqual(exported.nextSequence, 1); XCTAssertTrue(exported.active.isEmpty)
+            XCTAssertTrue(exported.terminal.isEmpty); XCTAssertNil(exported.retiredThrough)
+            var repeated = stat(); XCTAssertEqual(lstat(fixture.file.path, &repeated), 0)
+            XCTAssertEqual(initial.st_ino, repeated.st_ino); XCTAssertEqual(try Data(contentsOf: fixture.file), bytes)
+            let intake = try NativePersonalIntake(route: fixture.route, diagnostic: { _ in }); intakeStores.append(intake)
+            try await original.handoverCaptures(into: intake, route: fixture.route)
+            let imported = try await intake.importedLegacy()
+            let progress = try XCTUnwrap(imported)
+            XCTAssertEqual(progress.activeCount, 0); XCTAssertEqual(progress.importedCount, 0)
+            let initialPage = try await intake.pendingPage(); XCTAssertTrue(initialPage.items.isEmpty)
+            let late = try response(namespace: fixture.route.namespace)
+            await fails { _ = try await original.capture(late) }
+            guard case let .captured(item) = try await intake.captureReminder(late) else { return XCTFail("Late callback belongs to held intake") }
+            let admitted = try await original.admitHeldReminder(item, in: intake, route: fixture.route)
+            let dispatch = try await original.heldReminderDispatchItem(admitted, in: intake, route: fixture.route)
+            XCTAssertEqual(dispatch.response, late)
+            _ = try await original.finishHeldReminder(admitted, outcome: .ignored, in: intake, route: fixture.route)
+            XCTAssertEqual(try Data(contentsOf: fixture.file), bytes, "Late callbacks never reopen the sealed legacy writer")
+            await intake.close(); await original.close()
+            let coldOriginal = try NativeReminderInbox.openExistingForHandover(selection: fixture.route.selection); stores.append(coldOriginal)
+            let coldIntake = try XCTUnwrap(NativePersonalIntake.openExisting(route: fixture.route, diagnostic: { _ in })); intakeStores.append(coldIntake)
+            try await coldOriginal.handoverCaptures(into: coldIntake, route: fixture.route)
+            let coldPage = try await coldIntake.pendingPage(); XCTAssertTrue(coldPage.items.isEmpty)
+            XCTAssertEqual(try Data(contentsOf: fixture.file), bytes)
+        }
+    }
+
+    func testEmptyPreparationWrongRouteAndClosedOwnerNeverCreateSource() async throws {
+        let fixture = try sealFixture(), other = try sealFixture(isolated: true), original = try open(fixture)
+        do { try await original.prepareEmptySourceForPersonalIntake(route: other.route); XCTFail("Wrong route must refuse before publication") }
+        catch { XCTAssertEqual(error as? NativeReminderInbox.CaptureHandoverFailure, .refused) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path))
+        await original.close()
+        do { try await original.prepareEmptySourceForPersonalIntake(route: fixture.route); XCTFail("Closed owner has no initialization authority") }
+        catch { XCTAssertEqual(error as? NativeReminderInbox.CaptureHandoverFailure, .unavailable) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path))
+    }
+
+    func testEmptyPreparationRefusesSourceAppearingAtPublicationBoundary() async throws {
+        let fixture = try sealFixture(), original = try open(fixture)
+        let foreign: [String: Any] = ["version": 1, "namespace": fixture.route.namespace,
+            "nextSequence": 2, "active": [try record(response(namespace: fixture.route.namespace), sequence: 1)], "tombstones": []]
+        let bytes = try JSONSerialization.data(withJSONObject: foreign, options: [.sortedKeys, .withoutEscapingSlashes])
+        await original.setIOFaults(beforePublication: { try bytes.write(to: fixture.file) })
+        do { try await original.prepareEmptySourceForPersonalIntake(route: fixture.route); XCTFail("A newly appeared source cannot be replaced by empty") }
+        catch { XCTAssertEqual(error as? NativeReminderInbox.CaptureHandoverFailure, .unavailable) }
+        XCTAssertEqual(try Data(contentsOf: fixture.file), bytes)
+        await original.setIOFaults()
+        do { try await original.prepareEmptySourceForPersonalIntake(route: fixture.route); XCTFail("Known source drift stays unavailable") }
+        catch { XCTAssertEqual(error as? NativeReminderInbox.CaptureHandoverFailure, .unavailable) }
+        await fails { try await original.retry() }
+        XCTAssertEqual(try Data(contentsOf: fixture.file), bytes)
+    }
+
+    func testEmptyPreparationPublicationDebtRequiresExactOriginalRetry() async throws {
+        for afterPublication in [false, true] {
+            let fixture = try sealFixture(), original = try open(fixture)
+            if afterPublication { await original.setIOFaults(afterPublication: { throw Injected.failure }) }
+            else { await original.setIOFaults(beforePublication: { throw Injected.failure }) }
+            do { try await original.prepareEmptySourceForPersonalIntake(route: fixture.route); XCTFail("An uncertain empty publication cannot be acknowledged") }
+            catch { XCTAssertEqual(error as? NativeReminderInbox.CaptureHandoverFailure, .unavailable) }
+            let uncertain = try? Data(contentsOf: fixture.file)
+            do { try await original.prepareEmptySourceForPersonalIntake(route: fixture.route); XCTFail("Preparation cannot settle a prior publication") }
+            catch { XCTAssertEqual(error as? NativeReminderInbox.CaptureHandoverFailure, .unavailable) }
+            await fails { _ = try await original.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in }) }
+            XCTAssertEqual(try? Data(contentsOf: fixture.file), uncertain)
+            await original.setIOFaults(); try await original.retry()
+            let settled = try Data(contentsOf: fixture.file)
+            var before = stat(); XCTAssertEqual(lstat(fixture.file.path, &before), 0)
+            try await original.prepareEmptySourceForPersonalIntake(route: fixture.route)
+            _ = try await original.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in })
+            var after = stat(); XCTAssertEqual(lstat(fixture.file.path, &after), 0)
+            XCTAssertEqual(before.st_ino, after.st_ino); XCTAssertEqual(try Data(contentsOf: fixture.file), settled)
+        }
+    }
+
+    func testEmptyPreparationNeverRewritesExistingHistoryOrRecreatesDisappearedSource() async throws {
+        let fixture = try sealFixture(), active = try response(namespace: fixture.route.namespace)
+        let tombstone = ["requestID": UUID().uuidString.lowercased(), "deliveredAtBits": String(format: "%016llx", Double(102).bitPattern)]
+        try seedSeal(fixture, active: [record(active, sequence: 7)], tombstones: [tombstone], next: 8,
+            floor: String(format: "%016llx", Double(101).bitPattern))
+        let original = try open(fixture), bytes = try Data(contentsOf: fixture.file)
+        var before = stat(); XCTAssertEqual(lstat(fixture.file.path, &before), 0)
+        try await original.prepareEmptySourceForPersonalIntake(route: fixture.route)
+        var after = stat(); XCTAssertEqual(lstat(fixture.file.path, &after), 0)
+        XCTAssertEqual(before.st_ino, after.st_ino); XCTAssertEqual(try Data(contentsOf: fixture.file), bytes)
+        try FileManager.default.removeItem(at: fixture.file)
+        do { try await original.prepareEmptySourceForPersonalIntake(route: fixture.route); XCTFail("A known generation's disappearance cannot become empty") }
+        catch { XCTAssertEqual(error as? NativeReminderInbox.CaptureHandoverFailure, .unavailable) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path))
+    }
+
+    func testSealRefusesActualPublicationUncertaintyUntilExactOriginalRetry() async throws {
+        for afterPublication in [false, true] {
+            let fixture = try sealFixture(), store = try open(fixture), diagnostics = SealDiagnostics(), item = try response()
+            if afterPublication { await store.setIOFaults(afterPublication: { throw Injected.failure }) }
+            else { await store.setIOFaults(beforePublication: { throw Injected.failure }) }
+            await fails { _ = try await store.capture(item) }
+            let uncertain = try? Data(contentsOf: fixture.file)
+            await fails { _ = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) } }
+            XCTAssertEqual(try? Data(contentsOf: fixture.file), uncertain); XCTAssertTrue(diagnostics.events.isEmpty)
+            await store.setIOFaults(); try await store.retry()
+            let settled = try Data(contentsOf: fixture.file)
+            let token = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) }
+            let exported = try await store.exportSealed(token, route: fixture.route)
+            XCTAssertEqual(exported.active.map(\.item.response), [item]); XCTAssertEqual(exported.nextSequence, 2)
+            XCTAssertEqual(try Data(contentsOf: fixture.file), settled); XCTAssertEqual(diagnostics.events.count, 1)
+        }
+    }
+
+    func testSealCannotAdoptForeignSameByteLostAcknowledgmentGeneration() async throws {
+        let fixture = try sealFixture(), store = try open(fixture), diagnostics = SealDiagnostics()
+        await store.setIOFaults(afterPublication: { throw Injected.failure })
+        await fails { _ = try await store.capture(response()) }
+        let original = try Data(contentsOf: fixture.file)
+        try sameByteReplacement(fixture.file)
+        await store.setIOFaults()
+        await fails { try await store.retry() }
+        await fails { _ = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) } }
+        await store.close()
+        await fails { _ = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) } }
+        XCTAssertEqual(try Data(contentsOf: fixture.file), original); XCTAssertTrue(diagnostics.events.isEmpty)
+    }
+
+    func testSealedExportChecksActualLiveFileLockAndRootGenerationEveryTime() async throws {
+        for replacement in ["file", "lock", "root"] {
+            let fixture = try sealFixture(), store = try open(fixture), diagnostics = SealDiagnostics()
+            _ = try await store.capture(response())
+            let token = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) }
+            let original = try Data(contentsOf: fixture.file)
+            if replacement == "root" {
+                let moved = fixture.home.deletingLastPathComponent().appendingPathComponent("retained-home")
+                try FileManager.default.moveItem(at: fixture.home, to: moved)
+                try FileManager.default.copyItem(at: moved, to: fixture.home)
+            } else {
+                let target = replacement == "file" ? fixture.file : fixture.file.deletingLastPathComponent().appendingPathComponent(".lock")
+                let permissions = try FileManager.default.attributesOfItem(atPath: target.path)[.posixPermissions]
+                try sameByteReplacement(target)
+                if let permissions { try FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: target.path) }
+            }
+            await fails { _ = try await store.exportSealed(token, route: fixture.route) }
+            await fails { _ = try await store.sealForPersonalIntake(route: fixture.route) { diagnostics.receive($0) } }
+            XCTAssertEqual(try Data(contentsOf: fixture.file), original); XCTAssertEqual(diagnostics.events.count, 1)
+        }
+    }
+
+    func testSealsCannotCrossValidRoutesOwnersOrColdMutatedSource() async throws {
+        let fixture = try sealFixture(), other = try sealFixture(isolated: true)
+        let store = try open(fixture), foreign = try open(other), first = try response()
+        _ = try await store.capture(first)
+        _ = try await foreign.capture(response(namespace: other.route.namespace))
+        await fails { _ = try await store.sealForPersonalIntake(route: other.route, diagnostic: { _ in }) }
+        let token = try await store.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in })
+        let original = try await store.exportSealed(token, route: fixture.route)
+        let foreignToken = try await foreign.sealForPersonalIntake(route: other.route, diagnostic: { _ in })
+        await fails { _ = try await foreign.exportSealed(token, route: other.route) }
+        await fails { _ = try await store.exportSealed(foreignToken, route: fixture.route) }
+        await fails { _ = try await store.exportSealed(token, route: other.route) }
+        await store.close()
+        let cold = try open(fixture)
+        await fails { _ = try await cold.exportSealed(token, route: fixture.route) }
+        let coldToken = try await cold.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in })
+        XCTAssertNotEqual(coldToken, token)
+        let unchanged = try await cold.exportSealed(coldToken, route: fixture.route)
+        XCTAssertEqual(unchanged.sourceGeneration, original.sourceGeneration)
+        await cold.close()
+        let changed = try response(id: first.requestID, requested: first.requestedAtMs + 1)
+        try seedSeal(fixture, active: [record(changed, sequence: 1)], next: 2)
+        let mutatedBytes = try Data(contentsOf: fixture.file), mutated = try open(fixture)
+        await fails { _ = try await mutated.exportSealed(coldToken, route: fixture.route) }
+        let newToken = try await mutated.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in })
+        await fails { _ = try await mutated.exportSealed(token, route: fixture.route) }
+        let current = try await mutated.exportSealed(newToken, route: fixture.route)
+        XCTAssertNotEqual(current.sourceGeneration, original.sourceGeneration)
+        XCTAssertEqual(current.active.first?.item.response.requestedAtMs, changed.requestedAtMs)
+        XCTAssertEqual(try Data(contentsOf: fixture.file), mutatedBytes)
+    }
+
+    func testSealExportsFullExistingBoundedLegacyStateWithoutCompactionOrSerialization() async throws {
+        let fixture = try sealFixture(), floor = String(format: "%016llx", Double(1).bitPattern)
+        var active: [[String: Any]] = [], terminal: [[String: Any]] = []
+        for index in 0..<128 { active.append(try record(response(delivered: Double(index + 10)), sequence: Int64(index + 1))) }
+        for index in 0..<16_384 {
+            terminal.append(["requestID": UUID().uuidString.lowercased(), "deliveredAtBits": String(format: "%016llx", Double(index + 2).bitPattern)])
+        }
+        try seedSeal(fixture, active: active, tombstones: terminal, next: 129, floor: floor)
+        let bytes = try Data(contentsOf: fixture.file), store = try open(fixture)
+        let token = try await store.sealForPersonalIntake(route: fixture.route, diagnostic: { _ in })
+        let exported = try await store.exportSealed(token, route: fixture.route)
+        XCTAssertEqual(exported.active.count, 128); XCTAssertEqual(exported.terminal.count, 16_384)
+        XCTAssertEqual(exported.retiredThrough, floor); XCTAssertEqual(exported.nextSequence, 129)
+        XCTAssertEqual(exported.terminal.map(\.requestID), terminal.compactMap { $0["requestID"] as? String })
+        XCTAssertEqual(try Data(contentsOf: fixture.file), bytes)
+    }
+    func testProductionInboxUsesRNParentAndColdExactNamespace() async throws {
+        let selected = NativeLaunchSelection.production(containerURL: container)
+        let original = try response(namespace: NativeLaunchSelection.productionNamespace)
+        let store = try NativeReminderInbox(selection: selected); stores.append(store)
+        _ = try await store.capture(original)
+        let rnFile = container.appendingPathComponent("Documents/SQLite/NotificationResponses/inbox.json")
+        let bytes = try Data(contentsOf: rnFile)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        await store.close()
+        let cold = try NativeReminderInbox(selection: selected); stores.append(cold)
+        let pending = try await cold.pending()
+        XCTAssertEqual(pending.map(\.response), [original])
+        do { _ = try await cold.capture(response()); XCTFail("Foreign native namespace must refuse") } catch {}
+        XCTAssertEqual(try Data(contentsOf: rnFile), bytes)
+    }
+
 }

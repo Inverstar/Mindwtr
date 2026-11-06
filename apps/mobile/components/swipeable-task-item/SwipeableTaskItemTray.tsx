@@ -2,6 +2,7 @@ import React from 'react';
 import { View } from 'react-native';
 import { ArrowRight, CalendarDays, Circle, FolderOpen, RotateCcw, Star, Trash2, type LucideIcon } from 'lucide-react-native';
 import { formatI18nTemplate, tFallback, type TaskRowSwipeAction, type TaskRowSwipeActionId } from '@mindwtr/core';
+import { useEinkSafeColor } from '../../hooks/use-eink-safe-color';
 
 import { AppPressable } from '../app-pressable';
 import { CompactText } from '../compact-text';
@@ -21,32 +22,33 @@ const ICONS: Record<TaskRowSwipeActionId, LucideIcon> = {
 
 const DELETE_COLOR = '#EF4444';
 
-const colorFor = (id: TaskRowSwipeActionId, statusColors: StatusPalette): string => {
+const colorFor = (id: TaskRowSwipeActionId, statusColors: StatusPalette, safeColors: (color: string) => string): string => {
     switch (id) {
         case 'done': return statusColors.done.text;
-        case 'focus': return FOCUS_STAR_COLOR;
+        case 'focus': return safeColors(FOCUS_STAR_COLOR);
         case 'organize': return statusColors.next.text;
         case 'dates': return statusColors.someday.text;
         case 'restore': return statusColors.inbox.text;
         case 'next': return statusColors.next.text;
-        default: return DELETE_COLOR;
+        default: return safeColors(DELETE_COLOR);
     }
 };
 
 type Props = {
     actions: TaskRowSwipeAction[];
     side: 'left' | 'right';
-    /** False at a large text scale: icons only, labels kept for screen readers. */
+
     showLabels: boolean;
     statusColors: StatusPalette;
     t: (key: string) => string;
     onAction: (action: TaskRowSwipeAction) => void;
-    /** Long-press on Done: complete with a picked time. Omitted where that is not offered. */
+
     onLongPressDone?: () => void;
 };
 
-/** The buttons one swipe reveals (#1464). Each is at least 48dp on both axes. */
+
 export function SwipeableTaskItemTray({ actions, side, showLabels, statusColors, t, onAction, onLongPressDone }: Props) {
+    const einkSafe = useEinkSafeColor();
     return (
         <View style={side === 'left' ? styles.swipeTrayLeft : styles.swipeTrayRight}>
             {actions.map((action) => {
@@ -55,7 +57,7 @@ export function SwipeableTaskItemTray({ actions, side, showLabels, statusColors,
                 return (
                     <AppPressable
                         key={action.id}
-                        style={[styles.swipeTrayButton, { backgroundColor: colorFor(action.id, statusColors) }]}
+                        style={[styles.swipeTrayButton, { backgroundColor: colorFor(action.id, statusColors, einkSafe) }]}
                         pressedColor="rgba(0, 0, 0, 0.18)"
                         onPress={() => onAction(action)}
                         onLongPress={onLongPress}

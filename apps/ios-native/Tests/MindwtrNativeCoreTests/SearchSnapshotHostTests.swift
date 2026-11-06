@@ -100,7 +100,7 @@ final class SearchSnapshotHostTests: XCTestCase {
         for id in ["synthetic-done", "synthetic-reference", "synthetic-archived", "synthetic-task-deleted", "synthetic-task-archived-project"] {
             XCTAssertFalse(ids.contains(Data(id.utf8)), "Expected excluded synthetic identity: \(id)")
         }
-        // Canonical hydration detaches live tasks from deleted projects before this readonly projection.
+
         let stored = try XCTUnwrap(NativeJSON.jsonObject(with: Data(try XCTUnwrap(before["tasks"]).utf8)) as? [[String: Any]])
         let detachedRow = try XCTUnwrap(stored.first { $0["id"] as? String == "synthetic-task-deleted-project" })
         XCTAssertTrue(detachedRow["projectId"] is NSNull); XCTAssertEqual(detachedRow["status"] as? String, "next")
@@ -145,7 +145,9 @@ final class SearchSnapshotHostTests: XCTestCase {
         catch let error as HostFailure { XCTAssertTrue(error.message.hasPrefix("INVALID_INPUT:")) }
         _ = try await core.searchSnapshot()
         XCTAssertEqual(try rows(), started); XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
-        await core.close(); await refused { try await core.searchSnapshot() }
+        await core.close()
+        do { _ = try await core.searchSnapshot(); XCTFail("Expected closed-host refusal") }
+        catch { XCTAssertEqual(error as? CoreHostRetirementError, .unavailable) }
     }
 
     func testMalformedProjectionIsReadonlyAndNextRequestRecovers() async throws {

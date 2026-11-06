@@ -3,7 +3,7 @@ import Foundation
 import Darwin
 @testable import MindwtrNativeCore
 
-/// Production JSC/SQLite Board commands in the existing physical XCTest target.
+
 final class NativeBoardMoveTests: XCTestCase {
     private var directory: URL!, bundle: URL!, service: String!, namespace: String!
     private var database: URL { directory.appendingPathComponent("core.sqlite") }
@@ -60,6 +60,40 @@ final class NativeBoardMoveTests: XCTestCase {
         return try object(XCTUnwrap(rows.first?["data"] as? String))
     }
 
+    private func assertBoardFixtureSettings(_ before: [String: Any], actual: [String: Any],
+        taskAfter: [String: Any], operationStartedAt: Date, operationEndedAt: Date, retainsTokens: Bool,
+        file: StaticString = #filePath, line: UInt = #line) throws -> [String: Any] {
+        let device = try XCTUnwrap(before["deviceId"] as? String, file: file, line: line)
+        XCTAssertFalse(device.isEmpty, file: file, line: line)
+        XCTAssertEqual(taskAfter["revBy"] as? String, device, file: file, line: line)
+        let at = try XCTUnwrap(taskAfter["updatedAt"] as? String, file: file, line: line)
+        XCTAssertNotNil(at.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"#, options: .regularExpression), file: file, line: line)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = try XCTUnwrap(formatter.date(from: at), file: file, line: line)
+        XCTAssertEqual(formatter.string(from: date), at, file: file, line: line)
+        let earliest = Date(timeIntervalSince1970: floor(operationStartedAt.timeIntervalSince1970 * 1000) / 1000)
+        XCTAssertLessThanOrEqual(operationStartedAt, operationEndedAt, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(date, earliest, file: file, line: line)
+        XCTAssertLessThanOrEqual(date, operationEndedAt, file: file, line: line)
+        var expected = before
+        var taxonomy = before["taxonomy"] == nil ? [:] : try XCTUnwrap(before["taxonomy"] as? [String: Any], file: file, line: line)
+        for (field, token) in [("contexts", "@desk"), ("tags", "#keep")] {
+            let encoded = try XCTUnwrap(taskAfter[field] as? String, file: file, line: line)
+            let assigned = try JSONSerialization.jsonObject(with: Data(encoded.utf8))
+            XCTAssertEqual(try json(assigned), try json([token]), file: file, line: line)
+            guard retainsTokens else { continue }
+            var rows = taxonomy[field] == nil ? [] : try XCTUnwrap(taxonomy[field] as? [[String: Any]], file: file, line: line)
+            if !rows.contains(where: { ($0["token"] as? String)?.lowercased() == token }) {
+                rows.append(["token": token, "rev": 1, "revBy": device, "updatedAt": at])
+            }
+            taxonomy[field] = rows
+        }
+        if retainsTokens { expected["taxonomy"] = taxonomy }
+        XCTAssertEqual(try json(actual), try json(expected), file: file, line: line)
+        return expected
+    }
+
     private func expectFailure(_ contains: String? = nil, _ work: () async throws -> Void) async {
         do { try await work(); XCTFail("Expected failure") }
         catch { if let contains { XCTAssertTrue(error.localizedDescription.contains(contains), error.localizedDescription) } }
@@ -95,7 +129,7 @@ final class NativeBoardMoveTests: XCTestCase {
         _ = try sqlite.execute("INSERT INTO tasks (id, title, status, projectId, tags, contexts, isFocusedToday, showFutureRecurrence, suppressMindwtrReminders, pushCount, createdAt, updatedAt, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             parametersJSON: json([id + "-protected", "Protected destination", "reference", "destination-project-archived", "[]", "[]", 0, 0, 0, 0, at, at, 1]))
         sqlite.close()
-        // Reuse actual core serialization before comparing protected raw cells.
+
         let canonicalizer = host()
         _ = try await canonicalizer.start()
         _ = try await canonicalizer.call("captureSubmit", argumentsJSON: capture(canonicalizer,
@@ -125,6 +159,7 @@ final class NativeBoardMoveTests: XCTestCase {
         await core.close()
         let writer = host(faults)
         _ = try await writer.start()
+        var expectedSettings = settings
         var writes = 0, diagnostics = 0
         faults.beforeSQL = { sql in
             if sql.range(of: #"(?i)^\s*(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM)\s+tasks\b"#, options: .regularExpression) != nil { writes += 1 }
@@ -132,11 +167,14 @@ final class NativeBoardMoveTests: XCTestCase {
         faults.commandDiagnostic = { if $0 == "boardMove" { diagnostics += 1 } }
         for status in ["waiting", "someday", "inbox", "next"] {
             let request = try await boardMovePayload(writer, taskID: id, status: status)
+            let operationStartedAt = Date()
             let result = try object(await writer.call("boardAction", argumentsJSON: request))
+            let operationEndedAt = Date()
             XCTAssertEqual(try json(result), try json(["changed": true, "open": NSNull()]))
             XCTAssertEqual(try storedTask(id)["status"] as? String, status)
             XCTAssertEqual(try json(storedTask(id + "-protected")), try json(protected))
-            XCTAssertEqual(try json(calendarPreferenceSettings()), try json(settings))
+            expectedSettings = try assertBoardFixtureSettings(expectedSettings, actual: calendarPreferenceSettings(),
+                taskAfter: storedTask(id), operationStartedAt: operationStartedAt, operationEndedAt: operationEndedAt, retainsTokens: false)
             let attachments = try XCTUnwrap(NativeJSON.jsonObject(with:
                 Data(try XCTUnwrap(storedTask(id)["attachments"] as? String).utf8)) as? [[String: Any]])
             XCTAssertEqual(try json(attachments), try json(initialAttachments))
@@ -148,11 +186,13 @@ final class NativeBoardMoveTests: XCTestCase {
         let unchanged = try object(await writer.call("boardAction", argumentsJSON: noop))
         XCTAssertEqual(try json(unchanged), try json(["changed": false, "open": NSNull()]))
         XCTAssertEqual(writes, 4); XCTAssertEqual(diagnostics, 1)
+        XCTAssertEqual(try json(calendarPreferenceSettings()), try json(expectedSettings))
         let final = try storedTask(id)
         await writer.close()
         let reopened = host()
         _ = try await reopened.start()
         XCTAssertEqual(try json(storedTask(id)), try json(final))
+        XCTAssertEqual(try json(calendarPreferenceSettings()), try json(expectedSettings))
     }
 
     func testPreparedBoardMoveFailedCommitExactRetryAndLaterEditRefusal() async throws {
@@ -178,7 +218,7 @@ final class NativeBoardMoveTests: XCTestCase {
         XCTAssertEqual(try json(object(XCTUnwrap(reply))), try json(XCTUnwrap(prepared["result"])))
         XCTAssertEqual(try storedTask(id)["status"] as? String, "waiting"); XCTAssertEqual(diagnostics, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
-        // A displayed pre-move revision is not authority for a later request.
+
         let submitted = try XCTUnwrap(NativeJSON.jsonObject(with: Data(request.utf8)) as? [String])
         var stale = try object(XCTUnwrap(submitted.first))
         stale["requestId"] = UUID().uuidString.lowercased()
@@ -257,7 +297,6 @@ final class NativeBoardMoveTests: XCTestCase {
     }
 
 
-    // Completion fixtures reuse the wired runner/private bundle/service boundaries above.
     private func seedBoardCompletionFixture() async throws -> String {
         let id = try await seedBoardActionFixture(), sqlite = try SQLiteBridge(url: database)
         defer { sqlite.close() }
@@ -293,6 +332,7 @@ final class NativeBoardMoveTests: XCTestCase {
         let id = try await seedBoardCompletionFixture(), faults = HostIOFaults(), core = host(faults)
         _ = try await core.start()
         let protected = try storedTask(id + "-protected"), settings = try calendarPreferenceSettings()
+        var expectedSettings = settings
         var completed = 0, undone = 0, legacy = 0
         faults.commandDiagnostic = {
             if $0 == "boardCompletion:completed" { completed += 1 }
@@ -300,9 +340,17 @@ final class NativeBoardMoveTests: XCTestCase {
             if $0.hasPrefix("taskCompletion:") { legacy += 1 }
         }
         for status in ["waiting", "someday", "inbox", "next"] {
+            let operationStartedAt = Date()
             _ = try await core.call("boardAction", argumentsJSON: boardMovePayload(core, taskID: id, status: status))
+            let operationEndedAt = Date()
+            expectedSettings = try assertBoardFixtureSettings(expectedSettings, actual: calendarPreferenceSettings(),
+                taskAfter: storedTask(id), operationStartedAt: operationStartedAt, operationEndedAt: operationEndedAt, retainsTokens: false)
             let before = try storedTask(id), request = try await boardCompletionRequest(core, taskID: id)
+            let completionStartedAt = Date()
             let reply = try object(await core.call("taskCompletion", argumentsJSON: json([json(request)])))
+            let completionEndedAt = Date()
+            expectedSettings = try assertBoardFixtureSettings(expectedSettings, actual: calendarPreferenceSettings(),
+                taskAfter: storedTask(id), operationStartedAt: completionStartedAt, operationEndedAt: completionEndedAt, retainsTokens: true)
             XCTAssertEqual(Set(reply.keys), Set(["id", "completion"]))
             XCTAssertEqual(reply["id"] as? String, id)
             let notice = try XCTUnwrap(reply["completion"] as? [String: Any])
@@ -318,7 +366,7 @@ final class NativeBoardMoveTests: XCTestCase {
             XCTAssertEqual(try json(attachments), try json(beforeAttachments))
             XCTAssertEqual(try storedTask(id)["checklist"] as? String, before["checklist"] as? String)
             XCTAssertEqual(try json(storedTask(id + "-protected")), try json(protected))
-            XCTAssertEqual(try json(calendarPreferenceSettings()), try json(settings))
+            XCTAssertEqual(try json(calendarPreferenceSettings()), try json(expectedSettings))
             XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
         }
         XCTAssertEqual(completed, 4); XCTAssertEqual(undone, 4); XCTAssertEqual(legacy, 0)
@@ -538,8 +586,8 @@ final class NativeBoardMoveTests: XCTestCase {
         command["terminal"] = ["success": ["_0": try json(XCTUnwrap(prepared["result"]))]]
         let bytes = try JSONSerialization.data(withJSONObject: command, options: [.sortedKeys])
         try bytes.write(to: journal)
-        // Cold boot repeats this idempotent schema insert before receipt probing.
-        // Prove its row already exists so the only admitted DML attempt is a no-op.
+
+
         do {
             let sqlite = try SQLiteBridge(url: database); defer { sqlite.close() }
             let rows = try XCTUnwrap(NativeJSON.jsonObject(with: Data(sqlite.execute(
@@ -588,7 +636,6 @@ final class NativeBoardMoveTests: XCTestCase {
     }
 
 
-
     private func seedBoardReactivationFixture() async throws -> String {
         let id = try await seedBoardActionFixture(), sqlite = try SQLiteBridge(url: database)
         defer { sqlite.close() }
@@ -608,7 +655,9 @@ final class NativeBoardMoveTests: XCTestCase {
             var markers = 0
             faults.commandDiagnostic = { if $0 == "boardReactivate" { markers += 1 } }
             let request = try await boardMovePayload(core, taskID: id, status: status)
+            let operationStartedAt = Date()
             let result = try object(await core.call("boardAction", argumentsJSON: request))
+            let operationEndedAt = Date()
             XCTAssertEqual(try json(result), try json(["changed": true, "open": NSNull()]))
             let after = try storedTask(id)
             XCTAssertEqual(after["status"] as? String, status)
@@ -623,11 +672,13 @@ final class NativeBoardMoveTests: XCTestCase {
                 Data(try XCTUnwrap(before["attachments"] as? String).utf8)) as? [[String: Any]])
             XCTAssertEqual(try json(attachments), try json(beforeAttachments))
             XCTAssertEqual(try json(storedTask(id + "-protected")), try json(protected))
-            XCTAssertEqual(try json(calendarPreferenceSettings()), try json(settings))
+            let expectedSettings = try assertBoardFixtureSettings(settings, actual: calendarPreferenceSettings(),
+                taskAfter: after, operationStartedAt: operationStartedAt, operationEndedAt: operationEndedAt, retainsTokens: false)
             XCTAssertEqual(markers, 1); XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
             await core.close()
             let cold = host(); _ = try await cold.start()
             XCTAssertEqual(try json(storedTask(id)), try json(after))
+            XCTAssertEqual(try json(calendarPreferenceSettings()), try json(expectedSettings))
             await cold.close()
         }
     }
@@ -875,7 +926,7 @@ final class NativeBoardMoveTests: XCTestCase {
         XCTAssertEqual(recovery["method"] as? String, "boardCommit")
         XCTAssertEqual(writes, 0); XCTAssertEqual(markers, 1); XCTAssertEqual(try boardOrderRows(ids), landed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path)); await replay.close()
-        // A saved receipt alone cannot retire an old terminal after any affected row was edited.
+
         let prepared = try XCTUnwrap(frozen.envelope["prepared"] as? [String: Any]), effect = try XCTUnwrap(prepared["effect"] as? [String: Any])
         let changed = try XCTUnwrap(effect["tasks"] as? [[String: Any]])
         let editedID = try XCTUnwrap((changed.first?["after"] as? [String: Any])?["id"] as? String)
@@ -944,7 +995,7 @@ final class NativeBoardMoveTests: XCTestCase {
         let excess = Data(repeating: 0x20, count: NativeBoardOrderJournalBudget.maximumBytes + 1)
         XCTAssertNoThrow(try NativeBoardOrderJournalBudget.require(exact, acknowledged: exact))
         XCTAssertThrowsError(try NativeBoardOrderJournalBudget.require(excess, acknowledged: exact))
-        // Preflight the real success-terminal encoding before journaling, avoiding an unretirable accepted save.
+
         XCTAssertThrowsError(try NativeBoardOrderJournalBudget.require(exact, acknowledged: excess))
     }
 
@@ -960,7 +1011,7 @@ final class NativeBoardMoveTests: XCTestCase {
         let sqlite = try SQLiteBridge(url: database)
         defer { sqlite.close() }
         func snapshot(_ sql: String) throws -> String {
-            // Preserve raw cell values while ignoring dictionary key order in the bridge's JSON envelope.
+
             try json(NativeJSON.jsonObject(with: Data(sqlite.execute(sql).utf8)))
         }
         let before = try snapshot("SELECT * FROM settings ORDER BY id")
@@ -1004,6 +1055,52 @@ final class NativeBoardMoveTests: XCTestCase {
     }
 
     func testBoardDragSubmittedDiagnosticIsContentFreeAndDoesNotClaimSavedEffect() async throws {
+        let scrollInbox = CGRect(x: 16, y: 175.66666666666666, width: 358, height: 67.66666666666669)
+        let scrollSource = CGRect(x: 16, y: 301.66666666666663, width: 358, height: 64)
+        let commonDelta = CGFloat(41) / 3
+        let movedInbox = scrollInbox.offsetBy(dx: 0, dy: commonDelta)
+        let movedSource = scrollSource.offsetBy(dx: 0, dy: commonDelta)
+        let inferredDelta = movedInbox.minY - scrollInbox.minY
+        XCTAssertEqual(movedSource.minY, 315.3333333333333)
+        XCTAssertNotEqual(movedSource, scrollSource.offsetBy(dx: 0, dy: inferredDelta))
+        XCTAssertTrue(NativeBoardDragGeometry.matchesVerticalTranslation(scrollInbox, movedInbox, delta: inferredDelta))
+        XCTAssertTrue(NativeBoardDragGeometry.matchesVerticalTranslation(scrollSource, movedSource, delta: inferredDelta))
+        XCTAssertTrue(NativeBoardDragGeometry.matchesVerticalTranslation(scrollSource, scrollSource.offsetBy(dx: 0, dy: -2), delta: -2))
+        for drift in [CGFloat(0.0001), CGFloat(0.01)] {
+            XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(scrollSource, movedSource.offsetBy(dx: 0, dy: drift), delta: inferredDelta))
+        }
+        for dimension in ["x", "width", "height"] {
+            var changed = movedSource
+            if dimension == "x" { changed.origin.x += 0.000000000001 }
+            if dimension == "width" { changed.size.width += 0.000000000001 }
+            if dimension == "height" { changed.size.height += 0.000000000001 }
+            XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(scrollSource, changed, delta: inferredDelta))
+        }
+        for invalid in [CGFloat.infinity, CGFloat.nan] {
+            XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(scrollSource, movedSource, delta: invalid))
+            XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(scrollSource,
+                CGRect(x: 16, y: invalid, width: 358, height: 64), delta: inferredDelta))
+        }
+        let extreme = CGRect(x: 16, y: CGFloat.greatestFiniteMagnitude, width: 358, height: 64)
+        XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(extreme, extreme, delta: .greatestFiniteMagnitude))
+        let recordedColumn = CGRect(x: 16, y: 395.3333333333333, width: 358, height: 67.66666666666669)
+        let recordedCurrent = CGRect(x: 16, y: 391.66666666666663, width: 358, height: 67.66666666666674)
+        let recordedDelta = recordedCurrent.minY - recordedColumn.minY
+        XCTAssertNotEqual(recordedColumn.height, recordedCurrent.height)
+        XCTAssertTrue(NativeBoardDragGeometry.matchesVerticalTranslation(recordedColumn, recordedCurrent, delta: recordedDelta))
+        let endpointULP = max(max(recordedColumn.minY.ulp, recordedColumn.maxY.ulp), max(recordedCurrent.minY.ulp, recordedCurrent.maxY.ulp))
+        let heightBound = min(CGFloat(0.000000001), 2 * endpointULP)
+        for drift in [4 * endpointULP, CGFloat(0.0001), CGFloat(0.01)] {
+            var changed = recordedCurrent; changed.size.height = recordedColumn.height + drift
+            XCTAssertGreaterThan(abs(changed.height - recordedColumn.height), heightBound)
+            XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(recordedColumn, changed, delta: recordedDelta))
+        }
+        var widthChanged = recordedCurrent; widthChanged.size.width = widthChanged.width.nextUp
+        XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(recordedColumn, widthChanged, delta: recordedDelta))
+        for invalid in [CGFloat.infinity, CGFloat.nan, CGFloat(0), CGFloat(-1), -recordedColumn.height] {
+            var changed = recordedCurrent; changed.size.height = invalid
+            XCTAssertFalse(NativeBoardDragGeometry.matchesVerticalTranslation(recordedColumn, changed, delta: recordedDelta))
+        }
         let ids = try await seedBoardOrderFixture(), faults = HostIOFaults(), core = host(faults)
         _ = try await core.start()
         _ = try await core.call("dataSetting", argumentsJSON: json([json([
@@ -1086,6 +1183,136 @@ final class NativeBoardMoveTests: XCTestCase {
             _ = try await core.call("logLine", argumentsJSON: json([stageMessage,
                 #"{"releaseCheck":"v1.3.5/ios-board-drag-stage","stage":"begin","reason":"ready","reason":"private"}"#]))
         }
+        let geometryMessage = NativeBoardDragGeometry.message
+        let sample = CGRect(x: 0.125, y: 12.0000001, width: 342.5, height: 53.25)
+        func geometryPayload(_ viewport: CGRect? = nil, area: CGRect? = nil, row: CGRect? = nil) throws -> [String: Any] {
+            try XCTUnwrap(NativeBoardDragGeometry.payload(reason: "geometry-area", originalViewport: sample,
+                currentViewport: viewport, originalArea: sample, currentArea: area, originalRow: sample, currentRow: row))
+        }
+        let geometryContext = try geometryPayload(sample, area: sample, row: sample)
+        let numeric = try XCTUnwrap(geometryContext["originalViewport"] as? [String: Any])
+        XCTAssertEqual(numeric["validity"] as? String, "finite")
+        XCTAssertEqual(numeric["y"] as? Double, 12.0000001)
+        XCTAssertNil(NativeBoardDragGeometry.payload(reason: "saved", originalViewport: sample,
+            currentViewport: sample, originalArea: sample, currentArea: sample, originalRow: sample, currentRow: sample))
+        var geometryContexts: [[String: Any]] = []
+        for value in [geometryContext,
+                      try geometryPayload(sample.offsetBy(dx: 0, dy: 0.0000001), area: sample, row: sample),
+                      try geometryPayload(sample, area: sample.offsetBy(dx: 0, dy: 4), row: sample),
+                      try geometryPayload(sample, area: CGRect(x: sample.minX, y: sample.minY, width: sample.width, height: sample.height + 1), row: sample),
+                      try geometryPayload(sample, area: sample, row: sample.offsetBy(dx: 0, dy: 0.0000001)),
+                      try geometryPayload(),
+                      try geometryPayload(CGRect(x: CGFloat.infinity, y: 0, width: 1, height: 1))] {
+            XCTAssertTrue(NativeBoardDragGeometry.accepts(value))
+            _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(value)]))
+            geometryContexts.append(value)
+        }
+        let rebasedGeometry = try XCTUnwrap(NativeBoardDragGeometry.payload(reason: "geometry-scroll-rebased",
+            originalViewport: sample, currentViewport: sample,
+            originalArea: sample, currentArea: sample.offsetBy(dx: 0, dy: -2), originalRow: sample, currentRow: sample))
+        XCTAssertTrue(NativeBoardDragGeometry.accepts(rebasedGeometry))
+        _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(rebasedGeometry)]))
+        geometryContexts.append(rebasedGeometry)
+        let roundoffGeometry = try XCTUnwrap(NativeBoardDragGeometry.payload(reason: "geometry-scroll-roundoff-rebased",
+            originalViewport: sample, currentViewport: sample, originalArea: scrollSource, currentArea: movedSource,
+            originalRow: sample, currentRow: sample))
+        XCTAssertTrue(NativeBoardDragGeometry.accepts(roundoffGeometry))
+        _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(roundoffGeometry)]))
+        geometryContexts.append(roundoffGeometry)
+        let heightRoundoffGeometry = try XCTUnwrap(NativeBoardDragGeometry.payload(reason: "geometry-scroll-height-roundoff-rebased",
+            originalViewport: sample, currentViewport: sample, originalArea: recordedColumn, currentArea: recordedCurrent,
+            originalRow: sample, currentRow: sample))
+        XCTAssertTrue(NativeBoardDragGeometry.accepts(heightRoundoffGeometry))
+        _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(heightRoundoffGeometry)]))
+        geometryContexts.append(heightRoundoffGeometry)
+        let columnMismatch = try XCTUnwrap(NativeBoardDragGeometry.payload(reason: "geometry-area",
+            originalViewport: sample, currentViewport: sample, originalArea: sample, currentArea: sample,
+            originalRow: sample, currentRow: sample, rebaseReason: .columnSize, columnOrdinal: 2,
+            originalColumn: sample, currentColumn: CGRect(x: sample.minX, y: sample.minY, width: sample.width, height: sample.height.nextUp)))
+        XCTAssertTrue(NativeBoardDragGeometry.accepts(columnMismatch))
+        XCTAssertEqual(columnMismatch["rebaseReason"] as? String, "column-size")
+        XCTAssertEqual(columnMismatch["columnOrdinal"] as? Int, 2)
+        _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(columnMismatch)]))
+        geometryContexts.append(columnMismatch)
+        let rowMismatch = try XCTUnwrap(NativeBoardDragGeometry.payload(reason: "geometry-rows",
+            originalViewport: sample, currentViewport: sample, originalArea: sample, currentArea: sample,
+            originalRow: sample, currentRow: sample, rebaseReason: .rowFrame))
+        XCTAssertTrue(NativeBoardDragGeometry.accepts(rowMismatch))
+        XCTAssertEqual(rowMismatch["columnOrdinal"] as? Int, -1)
+        XCTAssertEqual((rowMismatch["originalColumn"] as? [String: Any])?["validity"] as? String, "missing")
+        _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(rowMismatch)]))
+        geometryContexts.append(rowMismatch)
+        XCTAssertNil(NativeBoardDragGeometry.payload(reason: "geometry-area", originalViewport: sample,
+            currentViewport: sample, originalArea: sample, currentArea: sample, originalRow: sample, currentRow: sample,
+            rebaseReason: .columnSize, columnOrdinal: 5, originalColumn: sample, currentColumn: sample))
+        for (field, value) in [("rebaseReason", "arbitrary"), ("columnOrdinal", true), ("columnOrdinal", -2),
+                               ("columnOrdinal", 5), ("columnOrdinal", 1e100), ("columnOrdinal", 0.5), ("columnOrdinal", "2")] as [(String, Any)] {
+            var forged = columnMismatch; forged[field] = value
+            XCTAssertFalse(NativeBoardDragGeometry.accepts(forged))
+            await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(forged)])) }
+        }
+        var mixed = columnMismatch; mixed["rebaseReason"] = "row-frame"
+        XCTAssertFalse(NativeBoardDragGeometry.accepts(mixed))
+        var extraColumn = try XCTUnwrap(columnMismatch["originalColumn"] as? [String: Any]); extraColumn["text"] = "private"
+        mixed = columnMismatch; mixed["originalColumn"] = extraColumn
+        XCTAssertFalse(NativeBoardDragGeometry.accepts(mixed))
+        await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(mixed)])) }
+        let missing = try XCTUnwrap(geometryContexts[5]["currentViewport"] as? [String: Any])
+        XCTAssertEqual(missing["validity"] as? String, "missing")
+        let nonfinite = try XCTUnwrap(geometryContexts[6]["currentViewport"] as? [String: Any])
+        XCTAssertEqual(nonfinite["validity"] as? String, "nonfinite")
+        for value in [missing, nonfinite] {
+            for name in ["x", "y", "width", "height"] { XCTAssertEqual(value[name] as? Double, 0) }
+        }
+        for field in ["taskId", "text", "url", "outcome", "nonce"] {
+            var forged = geometryContext; forged[field] = "private"
+            XCTAssertFalse(NativeBoardDragGeometry.accepts(forged))
+            await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(forged)])) }
+            var rect = numeric; rect[field] = "private"
+            forged = geometryContext; forged["originalViewport"] = rect
+            XCTAssertFalse(NativeBoardDragGeometry.accepts(forged))
+            await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(forged)])) }
+        }
+        for field in geometryContext.keys {
+            var forged = geometryContext; forged.removeValue(forKey: field)
+            XCTAssertFalse(NativeBoardDragGeometry.accepts(forged))
+            await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(forged)])) }
+        }
+        for (field, value) in [("x", true), ("y", "12"), ("height", NSNull()), ("validity", "unknown")] as [(String, Any)] {
+            var rect = numeric; rect[field] = value
+            var forged = geometryContext; forged["originalViewport"] = rect
+            XCTAssertFalse(NativeBoardDragGeometry.accepts(forged))
+            await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(forged)])) }
+        }
+        for (field, value) in [("reason", "saved"), ("releaseCheck", "v1.3.5/ios-board-drag-stage")] {
+            var forged = geometryContext; forged[field] = value
+            XCTAssertFalse(NativeBoardDragGeometry.accepts(forged))
+            await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(forged)])) }
+        }
+        var forgedRect = numeric; forgedRect["x"] = Double.infinity
+        var forgedGeometry = geometryContext; forgedGeometry["originalViewport"] = forgedRect
+        XCTAssertFalse(NativeBoardDragGeometry.accepts(forgedGeometry))
+        let overflow = try json(geometryContext).replacingOccurrences(of: "0.125", with: "1e999")
+        await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, overflow])) }
+        forgedRect = missing; forgedRect["x"] = 1
+        forgedGeometry = geometryContext; forgedGeometry["currentViewport"] = forgedRect
+        XCTAssertFalse(NativeBoardDragGeometry.accepts(forgedGeometry))
+        await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(forgedGeometry)])) }
+        let invalidColumn = try XCTUnwrap(NativeBoardDragGeometry.payload(reason: "geometry-area",
+            originalViewport: sample, currentViewport: sample, originalArea: sample, currentArea: sample,
+            originalRow: sample, currentRow: sample, rebaseReason: .columnInvalid, columnOrdinal: 1,
+            originalColumn: sample, currentColumn: CGRect(x: 0, y: CGFloat.infinity, width: 1, height: 1)))
+        XCTAssertTrue(NativeBoardDragGeometry.accepts(invalidColumn))
+        let invalidColumnRecord = try XCTUnwrap(invalidColumn["currentColumn"] as? [String: Any])
+        XCTAssertEqual(invalidColumnRecord["validity"] as? String, "nonfinite")
+        for field in ["x", "y", "width", "height"] { XCTAssertEqual(invalidColumnRecord[field] as? Double, 0) }
+        _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(invalidColumn)]))
+        geometryContexts.append(invalidColumn)
+        mixed = columnMismatch; mixed["currentColumn"] = missing
+        XCTAssertFalse(NativeBoardDragGeometry.accepts(mixed))
+        await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([geometryMessage, json(mixed)])) }
+        var forgedStage: [String: Any] = stageContext; forgedStage["currentViewport"] = numeric
+        await expectFailure("INVALID_INPUT") { _ = try await core.call("logLine", argumentsJSON: json([stageMessage, json(forgedStage)])) }
         let pagingMessage = "Native iOS Inbox paging recovered"
         let pagingContext: [String: Any] = ["releaseCheck": "v1.3.5/ios-inbox-paging", "outcome": "recovered", "count": 55]
         _ = try await core.call("logLine", argumentsJSON: json([pagingMessage, json(pagingContext)]))
@@ -1157,6 +1384,18 @@ final class NativeBoardMoveTests: XCTestCase {
         let stages = lines.filter { $0["message"] as? String == stageMessage }
         XCTAssertEqual(stages.count, stageContexts.count)
         XCTAssertEqual(try stages.map { try json(XCTUnwrap($0["context"])) }.sorted(), try stageContexts.map { try json($0) }.sorted())
+        let geometryLines = lines.filter { $0["message"] as? String == geometryMessage }
+        XCTAssertEqual(geometryLines.count, geometryContexts.count)
+        for (line, expected) in zip(geometryLines, geometryContexts) {
+            let exported = try XCTUnwrap(line["context"] as? [String: Any])
+            XCTAssertEqual(exported["releaseCheck"] as? String, NativeBoardDragGeometry.releaseCheck)
+            XCTAssertEqual(exported["reason"] as? String, expected["reason"] as? String)
+            for field in ["originalViewport", "currentViewport", "originalArea", "currentArea", "originalRow", "currentRow"] {
+                let serialized = try XCTUnwrap(exported[field] as? String)
+                let decoded = try object(serialized)
+                XCTAssertEqual(try json(decoded), try json(XCTUnwrap(expected[field])))
+            }
+        }
         let paging = lines.filter { $0["message"] as? String == pagingMessage }
         XCTAssertEqual(paging.count, 1)
         XCTAssertEqual(try json(XCTUnwrap(paging.first?["context"])), try json([
@@ -1354,8 +1593,6 @@ extension NativeBoardMoveTests {
 }
 
 
-// Task740 public method coverage belongs in the physical project target too.
-// These are real JSC/SQLite calls, not the generic runBulkAction writer.
 extension NativeBoardMoveTests {
     private func inboxMove740Request(_ core: CoreHost, ids: [String], status: String) async throws -> [String: Any] {
         let params: [String: Any] = ["groupBy": "none", "collapsedGroupIds": [String](), "filters": [String: Any]()]
@@ -1376,7 +1613,7 @@ extension NativeBoardMoveTests {
             let unrelated = UUID().uuidString.lowercased()
             _ = try await core.call("captureSubmit", argumentsJSON: capture(core, title: "Task740 unrelated", id: unrelated))
             await core.close()
-            // Seed only this owned fixture, before a new production hydration.
+
             let sql = try SQLiteBridge(url: database)
             _ = try sql.execute("UPDATE tasks SET startTime='2070-10-10',dueDate='2070-10-11',isFocusedToday=1,focusOrder=7,pushCount=3 WHERE id=?", parametersJSON: json([fixture.ids[0]]))
             _ = try sql.execute("UPDATE tasks SET recurrence=? WHERE id=?", parametersJSON: json([json(["rule": "weekly", "strategy": "after-completion", "seriesId": fixture.ids[1], "rrule": "FREQ=WEEKLY;COUNT=3;X-MINDWTR-SERIES-ID=\(fixture.ids[1])"]), fixture.ids[1]]))
@@ -1425,7 +1662,7 @@ extension NativeBoardMoveTests {
         XCTAssertEqual(envelope.command["method"] as? String, "inboxTasksMoveCommit"); XCTAssertEqual(try json(XCTUnwrap(envelope.envelope["request"])), try json(request))
         await expectFailure("SAVE_FAILED") { _ = try await writer.retryPending() }
         let retried = try object(String(contentsOf: journal, encoding: .utf8))
-        // Match the existing recovery contract: outer JSON content and embedded request bytes both remain exact.
+
         XCTAssertEqual(try json(retried), try json(object(String(decoding: original, as: UTF8.self))))
         XCTAssertEqual(Data(try XCTUnwrap(retried["argumentsJSON"] as? String).utf8), Data(envelope.encoded.utf8))
         XCTAssertEqual(try inboxBulk739Snapshot(), before)
@@ -1441,7 +1678,7 @@ extension NativeBoardMoveTests {
     }
 }
 
-// Task741 public Inbox Add-tag: mixed changes, no-op, exact original journal recovery.
+
 extension NativeBoardMoveTests {
     private func inboxTag741Request(_ core: CoreHost, ids: [String], tag: String) async throws -> [String: Any] {
         var request = try await inboxMove740Request(core, ids: ids, status: "next")
@@ -1509,7 +1746,7 @@ extension NativeBoardMoveTests {
     }
 }
 
-// Task742 public Inbox Remove-tag: union paging, mixed changes, no-op and exact journal recovery.
+
 extension NativeBoardMoveTests {
     private func inboxRemove742Request(_ core: CoreHost, ids: [String], tags: [String]) async throws -> [String: Any] {
         var request = try await inboxMove740Request(core, ids: ids, status: "next")

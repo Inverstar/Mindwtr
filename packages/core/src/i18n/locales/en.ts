@@ -1,5 +1,6 @@
-// Split from i18n-translations.ts to make community translation contributions easier.
+
 export const en: Record<string, string> = {
+    "taskEdit.startAdvanceReminderLabel": "Before start",
     "taskEdit.advanceReminderLabel": "Advance reminder",
     "taskEdit.advanceReminderMinutes": "{count} min before",
     "taskEdit.advanceReminderHour": "1 hour before",
@@ -8,6 +9,25 @@ export const en: Record<string, string> = {
     "taskEdit.advanceReminderWeek": "1 week before",
     "taskEdit.advanceReminderNeedsDueTime": "Add a due date and time to set an advance reminder.",
     "taskEdit.advanceReminderSkipped": "Enable start/due reminders for this task to use an advance reminder.",
+    "settings.speechUseGemini": "Use Gemini",
+    "settings.speechNativeUnsupported": "This speech provider is not supported here yet. Select Gemini, OpenAI or Whisper to use voice capture.",
+    "settings.speechGeminiDisclosure": "Recordings are sent directly to Gemini for transcription. Mindwtr does not collect them.",
+    "settings.speechGeminiCredentialShared": "This Gemini API key is also used by Gemini text AI on this device.",
+    "settings.speechOpenAIDisclosure": "Recordings are sent directly to OpenAI or your configured transcription server. In smart mode, the transcript is also sent to OpenAI when an API key is available. Mindwtr does not collect this data.",
+    "settings.speechOpenAICredentialShared": "This API key is also used by OpenAI text AI on this device and sent to the configured transcription server.",
+    "quickAdd.audioStopAndSave": "Stop & save",
+    "quickAdd.audioTooLarge": "Recording is too large. Try a shorter recording.",
+    "quickAdd.audioNoSpeech": "No speech was found in the recording.",
+    "quickAdd.audioNotRetained": "Audio retention is off. Transcription will not resume after restarting the app.",
+    "quickAdd.audioSingleTaskOnly": "A recording can be saved to one task. Remove extra task lines.",
+    "settings.aiConfigureTextAssistant": "Configure text assistant",
+    "settings.aiRefreshModels": "Refresh models",
+    "settings.aiCredentialPresent": "API key available",
+    "settings.aiCredentialMissing": "No API key saved",
+    "settings.aiConsentRecordFailed": "Your agreement was accepted, but could not be saved on this device. You may be asked again.",
+    "settings.aiConfigurationSaved": "AI settings saved",
+    "settings.aiCredentialSaved": "API key saved",
+    "settings.aiCredentialCleared": "API key cleared",
     "settings.gmailCapture": "Gmail",
     "settings.gmailCaptureDesc": "Connect Google and capture emails from a label you choose.",
     "settings.gmailCaptureDisclosure": "Google grants read-only access to your whole mailbox, even though Mindwtr imports only emails with your selected label. Mindwtr never changes email or labels. Imported sender and email text become ordinary task data and may enter your configured sync, backups, exports, or optional AI features. Only use a designated test account.",
@@ -39,6 +59,10 @@ export const en: Record<string, string> = {
     "settings.gmailCaptureStorageFailed": "Gmail capture could not save securely. Check secure storage and available disk space.",
     "settings.gmailCaptureReceiptsReset": "Gmail capture's record of saved emails was damaged, so it was reset and capture is off. Choose a label and start capture again.",
     "settings.gmailCaptureCancelled": "Gmail connection cancelled.",
+
+    "task.addToChecklist": "Add to checklist…",
+
+    "task.addedToChecklist": "Added to checklist",
 
     "task.expandChecklist": "Turn checklist items into project tasks",
     "task.keepChecklistDescription": "Keep the original task and its checklist inside the project.",
@@ -179,7 +203,7 @@ export const en: Record<string, string> = {
         'settings.automationCaptureCopyFailed': "Couldn't copy the capture token.",
         'settings.automationCaptureLoadFailed': "Couldn't load automation capture settings.",
         'settings.automationCaptureUpdateFailed': "Couldn't update automation capture settings.",
-        // App
+
         'app.name': 'Mindwtr',
         'app.closeStillSavingTitle': 'Mindwtr is still saving',
         'app.closeStillSavingBody': 'Mindwtr has not finished saving your recent changes. Close anyway? Unsaved changes will be lost.',
@@ -200,7 +224,7 @@ export const en: Record<string, string> = {
         'markdown.openLinkFailed': "Could not open this link. Make sure the app that handles it is installed. You can copy the link and open it there.",
         'markdown.copyLinkFailed': "Could not copy this link.",
 
-        // Navigation
+
         'nav.main': 'Main',
         'nav.inbox': 'Inbox',
         'nav.board': 'Board View',
@@ -243,11 +267,11 @@ export const en: Record<string, string> = {
         'nav.sectionOrganize': 'Organize',
         'nav.sectionArchive': 'Archive',
 
-        // Accessibility
+
         'accessibility.skipToContent': 'Skip to content',
         'accessibility.mainContent': 'Main content',
 
-        // Quick Add
+
         'quickAdd.help': 'Quick add supports /start:<when>, /due:<when>, /review:<when>, /estimate:45m, /note:<text>, /link:<url>, /energy:<level>, /priority:<level>, /next, /* focus, /area:<name> or !Area, @context, #tag, +Project, %Person (or %"Full Name"). Due dates stay date-only unless you include a time.',
         'quickAdd.example': 'e.g. Call mom /due:tomorrow @phone',
         'quickAdd.pastedImageTitle': 'Screenshot',
@@ -287,10 +311,10 @@ export const en: Record<string, string> = {
         'quickAdd.bulkCreateError': 'Could not create all tasks.',
         'quickAdd.saveAndEdit': 'Save & edit',
 
-        // Checklist
+
         'checklist.progress': 'Checklist progress',
 
-        // Keybindings (Desktop)
+
         'keybindings.helpTitle': 'Keyboard Shortcuts',
         'keybindings.helpSubtitle': 'Press Esc to close',
         'keybindings.styleLabel': 'Keybinding Style',
@@ -345,7 +369,7 @@ export const en: Record<string, string> = {
         'keybindings.list.toggleDetails': 'Toggle list details',
         'keybindings.list.toggleDensity': 'Toggle density',
 
-        // Tabs (Mobile)
+
         'tab.inbox': 'Inbox',
         'tab.next': 'Focus',
         'tab.board': 'Board',
@@ -354,7 +378,7 @@ export const en: Record<string, string> = {
         'tab.calendar': 'Calendar',
         'tab.review': 'Review',
 
-        // List Views
+
         'list.inbox': 'Inbox',
         'list.todo': 'Todo',
         'list.inProgress': 'In Progress',
@@ -372,10 +396,8 @@ export const en: Record<string, string> = {
         'list.taskDeleted': 'Task deleted',
         'list.taskCopied': 'Task copied to clipboard',
         'task.copyTitle': 'Copy Title',
-        "task.copyTaskLink": "Copy task link",
+        "task.copyTaskLink": "Copy Mindwtr link",
         "task.copyTaskId": "Copy task ID",
-        "task.addToChecklist": "Add to checklist…",
-        "task.addedToChecklist": "Added to checklist",
         "task.linkNotFound": "This task is not in this library. It may have been deleted or not synced to this device.",
         'task.titleCopied': 'Title copied',
         'task.titlesCopied': 'Titles copied',
@@ -411,7 +433,7 @@ export const en: Record<string, string> = {
         'reference.empty': 'Nothing filed yet',
         'reference.emptyHint': 'Reference holds info you might want later — no action required.',
 
-        // Status Labels
+
         'status.inbox': 'Inbox',
         'status.todo': 'Todo',
         'status.next': 'Next',
@@ -423,7 +445,7 @@ export const en: Record<string, string> = {
         'status.archived': 'Archived',
         'status.active': 'Active',
 
-        // Priority Labels
+
         'priority.low': 'Low',
         'priority.medium': 'Medium',
         'priority.high': 'High',
@@ -432,7 +454,7 @@ export const en: Record<string, string> = {
         'energyLevel.medium': 'Medium energy',
         'energyLevel.high': 'High energy',
 
-        // Task Edit
+
         'taskEdit.editTask': 'Edit Task',
         'taskEdit.aiAssistant': 'AI assistant',
         'task.dateIssue.startAfterDue': 'Starts after due date',
@@ -667,13 +689,13 @@ export const en: Record<string, string> = {
         'task.aria.dueTime': 'Due time',
         'task.aria.location': 'Location',
 
-        // Compact unit labels (time-estimate chips, calendar duration labels)
+
         'units.minutesShort': '{{minutes}}m',
         'units.hoursShort': '{{hours}}h',
         'units.hoursMinutesShort': '{{hours}}h {{minutes}}m',
         'units.hoursPlusShort': '{{hours}}h+',
 
-        // Recurrence Labels
+
         'recurrence.none': 'None',
         'recurrence.daily': 'Daily',
         'recurrence.weekly': 'Weekly',
@@ -688,7 +710,7 @@ export const en: Record<string, string> = {
         'recurrence.endsOnDate': 'On date',
         'recurrence.endsAfterCount': 'After',
         'recurrence.occurrenceUnit': 'occurrence(s)',
-        // Separator for the "After 6 of 10 occurrence(s)" progress form.
+
         'recurrence.occurrenceProgressOf': 'of',
         'recurrence.dayUnit': 'day(s)',
         'recurrence.weekUnit': 'week(s)',
@@ -721,7 +743,7 @@ export const en: Record<string, string> = {
         'recurrence.showFutureInCalendarHint': 'Planning-only preview; the next task is still created when this one is completed.',
         'recurrence.nextCalendarPreview': 'Next calendar preview',
 
-        // Inbox (Mobile)
+
         'inbox.title': 'Inbox',
         'inbox.processButton': 'Process Inbox',
         'inbox.projectHint': 'Something that takes more than one action? While processing, choose “Yes, make it a project” to name the outcome and its first next action.',
@@ -772,7 +794,7 @@ export const en: Record<string, string> = {
         'inbox.movedToTrash': '{{title}} moved to Trash',
         'inbox.fileIt': 'File it',
 
-        // Next Actions (Mobile)
+
         'next.title': 'Next Actions',
         'next.ready': 'tasks ready to go',
         'next.current': 'Current Actions',
@@ -783,10 +805,12 @@ export const en: Record<string, string> = {
         'next.warningCount': 'items in Next Actions',
         'next.warningHint': 'Consider focusing on fewer projects. GTD recommends keeping Next Actions to 10-15 items for clarity.',
 
-        // Contact / Contexts (Mobile updates)
+
     'contexts.new': 'New context',
     'tags.new': 'New tag',
         'contexts.title': 'Contexts',
+        "contexts.collapseSidebar": "Collapse contexts panel",
+        "contexts.expandSidebar": "Expand contexts panel",
         'contexts.filter': 'Filter tasks by context',
         'contexts.dropAdd': 'Add {context}',
         'contexts.dropAdded': 'Added {context}',
@@ -839,7 +863,7 @@ export const en: Record<string, string> = {
         'contexts.noContexts': 'No contexts found. Add contexts like @home, @work, @computer to your tasks',
         'contexts.noTasks': 'No active tasks for this context',
 
-        // Board
+
         'board.title': 'Board View',
         'board.next': 'Next Actions',
         'board.todo': 'Todo',
@@ -850,7 +874,7 @@ export const en: Record<string, string> = {
         'board.dragTask': 'Drag task',
         'board.delete': 'Delete',
 
-        // Calendar
+
         'calendar.title': 'Calendar',
         'calendar.tasksAndEvents': 'Tasks and external events by date',
         'calendar.today': 'Today',
@@ -934,7 +958,7 @@ export const en: Record<string, string> = {
         'shortcuts.captureUnavailable': 'Capture shortcut unavailable',
         'shortcuts.missingTitle': 'Mindwtr could not read a task title from that shortcut link.',
 
-        // Projects
+
         'projects.title': 'Projects',
         'projects.statusLabel': 'Status',
         'projects.activeSection': 'Active Projects',
@@ -1118,7 +1142,7 @@ export const en: Record<string, string> = {
         'projects.collapseSidebar': 'Collapse projects panel',
         'projects.resizeSidebar': 'Resize projects panel',
 
-        // Review Steps
+
         'review.title': 'Review',
         'review.openTasks': 'Open tasks',
         'review.intro': 'Get clear, get current, and get creative.',
@@ -1189,6 +1213,7 @@ export const en: Record<string, string> = {
         'review.projectsStepDesc': 'Ensure every active project has a next action.',
         'review.projectsHint': 'Review each project. Does it have at least one concrete Next Action? If not, add one now. Mark completed projects as done.',
         'review.hasNextAction': 'Has Next Action',
+    'review.projectDeferred': 'Scheduled',
         'review.needsAction': 'Needs Action',
         'review.noActiveTasks': 'No active tasks',
         'review.somedayStep': 'Someday/Maybe',
@@ -1218,7 +1243,7 @@ export const en: Record<string, string> = {
         'review.nextStepBtn': 'Next Step',
         'review.stuckQuestion': 'Is this item stuck?',
         'review.stuckPrompt': 'Try rewording it to be more actionable, or delete/incubate it if it\'s no longer relevant.',
-        // Mobile Review keys
+
         'review.notSet': 'Not set',
         'review.description': 'Description',
         'review.startTime': 'Defer until',
@@ -1247,7 +1272,7 @@ export const en: Record<string, string> = {
         'review.expandEverything': 'Expand projects',
         'review.collapseEverything': 'Collapse all',
 
-        // Processing
+
         'process.title': 'Process Item',
         'process.refineTitle': 'Refine the task',
         'process.refineDesc': 'Clarify what this is before deciding what to do with it.',
@@ -1321,7 +1346,7 @@ export const en: Record<string, string> = {
         'process.delegateSendError': 'Could not send the delegation message.',
         'process.delegateRequestCopied': 'Request copied — paste it into an email or chat.',
 
-        // Settings
+
         'settings.title': 'Settings',
         'settings.subtitle': 'Customize your Mindwtr experience',
         'settings.appearance': 'Appearance',
@@ -1391,7 +1416,7 @@ export const en: Record<string, string> = {
         'settings.logCleared': 'Log file cleared.',
         'settings.logClearFailed': 'Could not clear the log file.',
         'settings.shareUnavailable': 'Sharing is not available on this device.',
-        // Mobile Settings
+
         'settings.useSystem': 'Use System Theme',
         'settings.followDevice': 'Follow device appearance settings',
         'settings.darkMode': 'Dark Mode',
@@ -1721,6 +1746,7 @@ export const en: Record<string, string> = {
         'ai.addSteps': 'Add steps',
         'ai.working': 'Working...',
         'ai.breakdownTitle': 'Suggested steps',
+        'copilot.suggest': 'Suggest',
         'copilot.suggested': 'Suggested',
         'copilot.applyHint': 'Tap to apply',
         'copilot.applyAll': 'Apply all',
@@ -1855,7 +1881,7 @@ export const en: Record<string, string> = {
         'digest.reviewDue': 'Review due',
         'digest.noItems': 'No urgent items today.',
 
-        // Common
+
         'common.tasks': 'tasks',
         'common.day': 'day',
         'common.days': 'days',
@@ -1925,7 +1951,7 @@ export const en: Record<string, string> = {
         'attachments.transcriptionUnavailable': 'Speech-to-text is not ready. Check your AI settings and try again.',
         'attachments.transcriptionFailed': 'Transcription failed. Please try again.',
 
-        // Bulk Actions
+
         'bulk.select': 'Select',
         'bulk.exitSelect': 'Done',
         'bulk.selected': 'selected',
@@ -1958,7 +1984,7 @@ export const en: Record<string, string> = {
         'bulk.moveFailed': 'Failed to move selected tasks',
         'bulk.updateFailed': 'Failed to update selected tasks',
 
-        // Sorting
+
         'sort.label': 'Sort',
         'sort.default': 'Default',
         'sort.due': 'Due date',
@@ -1970,7 +1996,7 @@ export const en: Record<string, string> = {
         'sort.created-desc': 'Newest',
         'sort.completed': 'Completion date',
 
-        // Agenda
+
         'agenda.title': 'Focus',
         'agenda.active': 'active items',
         'agenda.collapseOtherSections': 'Focus only',
@@ -2021,7 +2047,7 @@ export const en: Record<string, string> = {
         'focus.group.noEnergy': 'No energy',
         'focus.group.noPriority': 'No priority',
 
-        // Task Age
+
         'taskAge.day': 'day old',
         'taskAge.days': 'days old',
         'taskAge.week': 'week old',
@@ -2029,13 +2055,13 @@ export const en: Record<string, string> = {
         'taskAge.month': 'month old',
         'taskAge.months': 'months old',
 
-        // Energy Contexts
+
         'context.energy.focused': 'Focused',
         'context.energy.lowenergy': 'Low Energy',
         'context.energy.creative': 'Creative',
         'context.energy.routine': 'Routine',
 
-        // Waiting (Mobile)
+
         'waiting.title': 'Waiting For',
         'waiting.subtitle': 'Tasks waiting on someone else or external events',
         'waiting.count': 'Waiting',
@@ -2045,7 +2071,7 @@ export const en: Record<string, string> = {
         'waiting.empty': 'Nothing you\'re waiting on',
         'waiting.emptyHint': 'Park tasks here when the next move is someone else\'s — you\'ll see them until they clear.',
 
-        // Someday (Mobile)
+
         'someday.title': 'Someday/Maybe',
         'someday.subtitle': 'Ideas and goals you might want to pursue in the future',
         'someday.ideas': 'Ideas',
@@ -2065,7 +2091,7 @@ export const en: Record<string, string> = {
         'viewSections.updateFailed': 'Could not update Someday sections.',
         'done.emptyHint': 'Completed tasks land here — a running log of what you finished.',
 
-        // Search
+
         'search.title': 'Search',
         'search.placeholder': 'Search tasks and projects...',
         'search.scopeHint': 'Tasks, projects, people',
@@ -2105,7 +2131,7 @@ export const en: Record<string, string> = {
         'search.due.nextWeek': 'Next week',
         'search.due.none': 'No due date',
 
-        // Archived
+
         'archived.tasksSegment': 'Tasks',
         'archived.title': 'Archived',
         'archived.searchPlaceholder': 'Search archived tasks...',
@@ -2343,7 +2369,7 @@ export const en: Record<string, string> = {
         'settings.sync.incompleteAfterSwitch': 'The new sync settings are active, but this sync did not finish. Mindwtr will retry on its own.',
         'settings.sync.remoteWriteDeferred': 'Your changes are saved on this device. Another device is writing to the sync location right now; Mindwtr will upload them on its own shortly.',
         'settings.selectSyncFolderTitle': 'Select sync folder',
-        // Mobile-only copy migrated from keyed helpers.
+
         'calendar.mobile.1Day': '1 day',
         'calendar.mobile.day': 'Day',
         'calendar.mobile.dayDetailsPanelHandle': 'Day details panel handle',
@@ -2650,7 +2676,7 @@ export const en: Record<string, string> = {
         'captureNotification.text': 'Tap to capture to your Inbox',
         'captureNotification.channelName': 'Quick capture',
 
-        // Mind sweep (guided capture)
+
         'mindSweep.launchButton': 'Mind Sweep',
         'mindSweep.title': 'Mind Sweep',
         'mindSweep.intro': "Walk through a few cue lists and write down whatever surfaces. Don't filter or organize — every item lands in your Inbox to sort out later.",
@@ -2735,7 +2761,7 @@ export const en: Record<string, string> = {
         'obsidian.filesUpdated': 'Updated {{count}} Obsidian file(s).',
         'obsidian.sourceAttachmentTitle': 'Obsidian source',
 
-        // First-run onboarding modal (both platforms).
+
         'onboarding.title': 'Welcome to Mindwtr',
         'onboarding.subtitle': 'Capture what’s on your mind, sort it out later, and focus on a few things at a time. Bring your existing data, or start with a small guided project.',
         'onboarding.skip': 'Skip onboarding',
@@ -2763,7 +2789,7 @@ export const en: Record<string, string> = {
         'onboarding.toastReady': 'Getting Started is ready in Projects.',
         'onboarding.toastFailed': 'Failed to create Getting Started onboarding.',
 
-        // Seeded Getting Started content (first-run tutorial data).
+
         'starter.projectTitle': 'Getting Started',
         'starter.projectNotes': 'These getting-started tasks are optional. Delete this project anytime when Mindwtr feels set up.',
         'starter.processInbox.title': 'Start here: process your first inbox item',
@@ -2804,7 +2830,7 @@ export const en: Record<string, string> = {
         'starter.sampleBuyMilk': 'Buy milk',
         'starter.sampleReplySam': 'Reply to Sam',
 
-        // Settings — moved from apps/desktop settings/labels.ts (settings-i18n-20260724-01)
+
         'settings.integrations': 'Integrations',
         'settings.searchPlaceholder': 'Search settings…',
         'settings.lookAndFeel': 'Look & Feel',

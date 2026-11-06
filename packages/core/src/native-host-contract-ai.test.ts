@@ -2,37 +2,25 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { loadTranslations } from './i18n/i18n-loader';
 import { createNativeHostContract, NATIVE_AI_UNJOURNALED_COMMANDS, type NativeAIHost, type NativeHostResult } from './native-host-contract';
+import { readNativeAIExtraBodyInput } from './native-host-contract-ai';
 import type { NativeAIActionAnswer, NativeAISettingChange, NativeAISettings, NativeAICopilotApplied, NativeAICopilotSuggestion } from './native-host-contract-ai';
 import { NATIVE_UNJOURNALED_COMMANDS } from './native-request-receipts';
 import { openSqliteHost } from './screen-parity.replay';
 import { flushPendingSave, resetForTests, setStorageAdapter, useTaskStore } from './store';
 import { createTaskDraft, type TaskDraft } from './task-draft';
-import type { AppSettings, ChecklistItem, Project, Task } from './types';
+import type { AppSettings, ChecklistItem, Project, Section, Task } from './types';
 import { generateUUID } from './uuid';
 
-/**
- * The frozen React Native AI screens (ai-settings-parity.fixtures.json and
- * ai-actions-parity.fixtures.json, captured by apps/mobile/components/settings/
- * ai-settings-screen.parity.test.tsx and apps/mobile/components/ai-actions.parity.test.tsx),
- * replayed through the native host contract. Each replay plays the native screen: it keeps
- * the screen's own state (which cards and pickers are open, the typed extra parameters,
- * the editor's draft and copilot chips, the dialog), sends each control's command, and lays
- * the view out in the order React Native draws it. The provider and the model lists answer
- * from the scenario's queues exactly as the React Native harnesses' stubs do.
- */
 
 const device = vi.hoisted(() => ({
     queues: {} as Record<string, unknown[]>,
     calls: [] as unknown[][],
-    /** The abort signal each provider call and model list was given (review C1 5), apart from `calls`. */
+
     signals: [] as (AbortSignal | undefined)[],
     modelFetch: null as null | ((url: string, init: RequestInit) => Promise<unknown>),
 }));
 
-/**
- * The next queued answer for `name`: `{ value }` answers it, `{ error }` rejects, a function is awaited for its entry (it can
- * change the store while the request waits); none queued rejects with `fallback`.
- */
+
 const answer = async (name: string, fallback: string): Promise<any> => {
     const queue = device.queues[name];
     const next = queue && queue.length > 0 ? queue.shift() : { error: fallback };
@@ -81,7 +69,7 @@ const TINT = true;
 
 type Device = { language?: string; foss?: boolean; storage?: Record<string, string>; secrets?: Record<string, string>; queues?: Record<string, unknown[]> };
 
-/** `warnings`: where the host's log warnings go (the Settings harness records them among its calls). */
+
 function createDevice(input: Device, warnings: unknown[][] = []) {
     const storage = new Map(Object.entries(input.storage ?? {}));
     const secrets = new Map(Object.entries(input.secrets ?? {}));
@@ -95,7 +83,7 @@ function createDevice(input: Device, warnings: unknown[][] = []) {
         },
         secrets: {
             get: async (key) => secrets.get(key) ?? null,
-            // RN's AI keys are written readable while the device is unlocked.
+
             set: async (key, entry) => { log.push(['setSecret', key, entry, 'whenUnlockedThisDeviceOnly']); secrets.set(key, entry); },
             delete: async (key) => { log.push(['deleteSecret', key]); secrets.delete(key); },
         },
@@ -117,12 +105,12 @@ function createDevice(input: Device, warnings: unknown[][] = []) {
 const writes: unknown[][] = [];
 let realActions: Record<string, (...args: any[]) => Promise<any>> | null = null;
 
-async function seed(data: { tasks?: Task[]; projects?: Project[]; settings: AppSettings }) {
+async function seed(data: { tasks?: Task[]; projects?: Project[]; sections?: Section[]; settings: AppSettings }) {
     await flushPendingSave();
     resetForTests();
     const state = useTaskStore.getState() as unknown as Record<string, (...args: any[]) => Promise<any>>;
     realActions ??= { updateTask: state.updateTask, batchUpdateTasks: state.batchUpdateTasks, updateSettings: state.updateSettings };
-    let stored = JSON.parse(JSON.stringify({ tasks: data.tasks ?? [], projects: data.projects ?? [], sections: [], areas: [], people: [], settings: data.settings }));
+    let stored = JSON.parse(JSON.stringify({ tasks: data.tasks ?? [], projects: data.projects ?? [], sections: data.sections ?? [], areas: [], people: [], settings: data.settings }));
     setStorageAdapter({ getData: async () => stored, saveData: async (next) => { stored = JSON.parse(JSON.stringify(next)); } });
     useTaskStore.setState({
         ...realActions,
@@ -146,8 +134,6 @@ async function openHost(host: NativeAIHost, language = 'en') {
 }
 type Host = Awaited<ReturnType<typeof openHost>>;
 
-// ---------------------------------------------------------------------------
-// Settings › AI.
 
 type SettingsScenario = { name: string; settings: string; device: Device; actions: [string, ...unknown[]][] };
 type SettingsFixture = { settings: Record<string, AppSettings>; scenarios: SettingsScenario[]; observations: Record<string, Record<string, unknown>[]> };
@@ -384,8 +370,6 @@ async function replaySettings(scenario: SettingsScenario, strings: Record<string
     return observations;
 }
 
-// ---------------------------------------------------------------------------
-// The AI actions.
 
 type ActionsScenario = { name: string; screen: 'editor' | 'inbox' | 'review'; settings: string; taskId?: string; device: Device; actions: [string, ...unknown[]][] };
 type ActionsFixture = {
@@ -432,7 +416,7 @@ async function replayActions(scenario: ActionsScenario, strings: Record<string, 
         let copilot: { suggestion: NativeAICopilotSuggestion | null; applied: NativeAICopilotApplied } = { suggestion: null, applied: { tags: [] } };
         let dialog: ReturnType<typeof shown> = null;
         let dialogKind: 'clarify' | 'breakdown' | null = null;
-        // The editor asks the copilot once typing pauses: when it opens and after each change.
+
         let pending = true;
         const read = () => value(contract.getTaskEditorAI({ id, draft, copilot }));
         const typed = () => {
@@ -577,7 +561,7 @@ async function replayActions(scenario: ActionsScenario, strings: Record<string, 
             else review.selected.add(id);
         } else if (kind === 'apply') {
             const chosen = review.suggestions.filter((entry) => review.selected.has(entry.id));
-            // Each suggestion's task at the revision the analysis read it (a native host keeps no other copy of the stale tasks).
+
             const taskRevisions = Object.fromEntries(chosen.flatMap((entry) => (entry.taskRevision ? [[entry.id, entry.taskRevision]] : [])));
             value(await contract.runReviewAction({
                 requestId: generateUUID(),
@@ -628,10 +612,6 @@ describe('native host contract: AI', () => {
     });
 });
 
-// ---------------------------------------------------------------------------
-// Replays after a restart, over a real SQLite file with the app's request receipts.
-// A restart is process death: a new host over the same file and the same device (RN's
-// key-value store and keystore keep what the first run stored).
 
 describe('native host contract: AI commands replayed after a restart', () => {
     const originalTz = process.env.TZ;
@@ -709,7 +689,7 @@ describe('native host contract: AI commands replayed after a restart', () => {
             expect(value(result).changed).toBe(true);
             expect(wrote).toBe(false);
             expect(dev.log.length).toBe(consentWrites);
-            // Consent recorded, the next turn-on asks nothing.
+
             await useTaskStore.getState().updateSettings({ ai: { ...useTaskStore.getState().settings.ai, enabled: false } });
             expect(value(await env.host.setAISetting({ requestId: generateUUID(), change })).consent).toBeNull();
         } finally {
@@ -724,7 +704,7 @@ describe('native host contract: AI commands replayed after a restart', () => {
             const input = { requestId: generateUUID(), field: 'assistant' as const, provider: 'openai', value: 'sk-secret-000111' };
             expect(value(await env.host.setAIKey(input))).toEqual({ mask: '•'.repeat(16) });
             expect(dev.secrets.get('mindwtr-ai-key_openai')).toBe('sk-secret-000111');
-            // The same request with another key is another action.
+
             expect(await env.host.setAIKey({ ...input, value: 'other' })).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
             const rows = await env.sql<{ request_id: string; method: string; reply: string }>('SELECT request_id, method, reply FROM native_request_receipts');
             expect(rows.map((row) => row.request_id)).not.toContain(input.requestId);
@@ -750,7 +730,7 @@ describe('native host contract: AI commands replayed after a restart', () => {
             const { result, wrote, receipts } = await env.replay((restarted) => restarted.setAIEndpoint(input));
             expect(value(result)).toEqual({ changed: false });
             expect({ wrote, receipts }).toEqual({ wrote: false, receipts: false });
-            // The speech card shows a transcription server only while OpenAI transcribes.
+
             expect(await env.host.setAIEndpoint({ requestId: generateUUID(), field: 'speech', value: 'http://stt' }))
                 .toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
         } finally {
@@ -820,8 +800,6 @@ describe('native host contract: AI commands replayed after a restart', () => {
     });
 });
 
-// ---------------------------------------------------------------------------
-// Keys never leave the keystore.
 
 describe('native host contract: AI keys stay out of views, errors and logs', () => {
     beforeAll(() => {
@@ -860,7 +838,7 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(text).not.toContain('pw-9x7');
     });
 
-    // Review C1 1: the endpoint changed while the request waited; its error echoes the password the request was sent with.
+
     it('drops the password the request was sent with, though the endpoint changed while it waited', async () => {
         const settings: AppSettings = { ai: { enabled: true, provider: 'openai', baseUrl: 'http://ann:pw-old-1@10.0.0.5:11434/v1' } };
         const tasks = [{ id: 't1', title: 'Plan the trip', status: 'next', contexts: [], tags: [], createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' }] as Task[];
@@ -885,7 +863,26 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(JSON.stringify([analysis, warned])).not.toContain('pw-old-1');
     });
 
-    // Review C1 2: sync installs a newer, still-stale copy of a task while the analysis waits; Apply must refuse it (CAS).
+    it('sends the same sequence-aware stale snapshot the wizard shows, including Per-section flow', async () => {
+        const stamp = '2026-01-01T00:00:00.000Z';
+        const project: Project = { id: 'p', title: 'Project', status: 'active', color: '#000000', order: 0, tagIds: [], perSectionFlow: true, createdAt: stamp, updatedAt: stamp };
+        const section: Section = { id: 's', projectId: 'p', title: 'Sequence', order: 0, isSequential: true, createdAt: stamp, updatedAt: stamp };
+        const task = (id: string, status: Task['status'], order: number): Task => ({ id, title: id, projectId: 'p', sectionId: 's', status, order, contexts: [], tags: [], createdAt: stamp, updatedAt: stamp });
+        await seed({ tasks: [task('head', 'waiting', 0), task('tail', 'next', 1)], projects: [project], sections: [section], settings: { ai: { enabled: true, provider: 'openai', baseUrl: 'http://local/v1' } } });
+        const dev = createDevice({ queues: { analyzeReview: [{ value: { suggestions: [] } }] } });
+        const info = vi.fn();
+        dev.host.log!.info = info;
+        const host = await openHost(dev.host);
+        const wizard = value(host.getWeeklyReview({ checkpoint: JSON.stringify({ step: 'stale', startedAt: new Date().toISOString() }), offset: 0, limit: 100 }));
+        expect(wizard.content.step).toBe('stale');
+        expect(wizard.items.filter((item) => item.type === 'task').map((item) => item.row.id)).toEqual(['head']);
+        await host.requestWeeklyReviewAnalysis();
+        const request = device.calls.find((call) => call[1] === 'analyzeReview')!;
+        expect((request[3] as { items: { id: string }[] }).items.map((item) => item.id)).toEqual(['head', 'project:p']);
+        expect(info).toHaveBeenCalledWith('Weekly review sequence candidates prepared', { scope: 'ai', extra: { releaseCheck: 'v1.3.8/review-sequence', candidateCount: 2, staleTaskCount: 1, staleProjectCount: 1 } });
+    });
+
+
     it('gives each suggestion the revision the analysis read, so Apply refuses a task changed while it waited', async () => {
         const tasks = [{ id: 's1', title: 'Old errand', status: 'next', contexts: [], tags: [], rev: 3, revBy: 'this', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }] as Task[];
         await seed({ tasks, settings: { ai: { enabled: true, provider: 'openai', baseUrl: 'http://local/v1' } } });
@@ -908,7 +905,7 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(useTaskStore.getState()._tasksById.get('s1')!.status).toBe('next');
     });
 
-    // Review C1 5: the host's signal (an input change, a close, a timeout) reaches every provider call and model list.
+
     it('hands the caller\'s abort signal to each provider call and to the model list\'s fetch', async () => {
         const tasks = [{ id: 't1', title: 'Plan the trip', status: 'next', contexts: [], tags: [], createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }] as Task[];
         await seed({ tasks, settings: { ai: { enabled: true, provider: 'openai', baseUrl: 'http://local/v1' } } });
@@ -933,7 +930,7 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(seen[0].signal?.aborted).toBe(true);
     });
 
-    // Review C1 verification B: a cancelled model list frees its request, so the same request later fetches again.
+
     it('fetches a model list again after its earlier load was cancelled (endpoint A, B, then A while A loads)', async () => {
         await seed({ settings: { ai: { enabled: true, provider: 'openai', baseUrl: 'http://a/v1' } } });
         let release!: () => void;
@@ -950,7 +947,7 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(value(contract.getAISettings()).modelLists.assistant.request).not.toBe(atA);
         value(await contract.setAIEndpoint({ requestId: generateUUID(), field: 'assistant', value: 'http://a/v1' }));
         expect(value(contract.getAISettings()).modelLists.assistant.request).toBe(atA);
-        // The host cancels A's first load before it asks again.
+
         first.abort();
         view = value(await contract.loadAIModels({ list: 'assistant', request: atA }, { signal: new AbortController().signal }));
         release();
@@ -985,10 +982,56 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(device.calls).toEqual([['ai', 'predictMetadata', expect.objectContaining({ provider: 'gemini', apiKey: 'gem-1' }), request]]);
     });
 
+    it('uses a selected configuration key owner without a settings visit or broad key-store access', async () => {
+        await seed({ settings: { ai: { provider: 'openai' } } });
+        const dev = createDevice({ storage: { 'mindwtr-ai-key:openai': 'legacy-must-stay' } });
+        const save = vi.fn<(provider: string, value: string) => Promise<void>>().mockResolvedValue(undefined);
+        dev.host.saveConfigurationKey = save;
+        dev.host.storage.getItem = async () => { throw new Error('Broad storage read must not run'); };
+        dev.host.secrets.set = async () => { throw new Error('Default setter must not run'); };
+        dev.host.secrets.delete = async () => { throw new Error('Default deleter must not run'); };
+        const contract = await openHost(dev.host);
+        const input = { requestId: generateUUID(), field: 'assistant' as const, provider: 'openai', value: 'sensitive-replacement' };
+        expect(value(await contract.setAIKey(input))).toEqual({ mask: '•'.repeat(input.value.length) });
+        expect(value(await contract.setAIKey(input))).toEqual({ mask: '•'.repeat(input.value.length) });
+        expect(save).toHaveBeenCalledExactlyOnceWith('openai', 'sensitive-replacement');
+        expect(value(await contract.setAIKey({ ...input, requestId: generateUUID(), value: '' }))).toEqual({ mask: '' });
+        expect(save).toHaveBeenLastCalledWith('openai', '');
+        expect(await contract.setAIKey({ ...input, requestId: generateUUID(), provider: 'gemini' }))
+            .toMatchObject({ ok: false, error: { code: 'STALE_REVISION' } });
+        expect(save).toHaveBeenCalledTimes(2);
+        save.mockRejectedValueOnce(new Error('Denied sensitive-replacement'));
+        const failed = await contract.setAIKey({ ...input, requestId: generateUUID() });
+        expect(failed).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
+        expect(JSON.stringify(failed)).not.toContain('sensitive-replacement');
+        expect(dev.storage.get('mindwtr-ai-key:openai')).toBe('legacy-must-stay');
+        expect(dev.log).toEqual([]); expect(device.calls).toEqual([]);
+    });
+
+    it('uses an optional read-only action loader without secure or legacy migrations and fails closed on denial', async () => {
+        const request = { title: 'Read-only capture question', contexts: ['@desk'], tags: ['#saved'] };
+        await seed({ settings: { ai: { enabled: true, provider: 'openai' } } });
+        const dev = createDevice({ storage: { 'mindwtr-ai-key:openai': 'legacy-must-stay' },
+            queues: { predictMetadata: [{ value: { context: '@desk' } }] } });
+        const load = vi.fn<(provider: string) => Promise<string | null>>().mockResolvedValue('selected-action-value');
+        dev.host.loadRequestKey = load;
+        dev.host.secrets.get = async () => { throw new Error('Default loader must not run'); };
+        const contract = await openHost(dev.host);
+        expect(value(await contract.requestAICopilot({ request }))).toEqual({ suggestion: { context: '@desk' } });
+        expect(load).toHaveBeenCalledExactlyOnceWith('openai');
+        expect(device.calls).toEqual([['ai', 'predictMetadata', expect.objectContaining({ provider: 'openai', apiKey: 'selected-action-value' }), request]]);
+        expect(dev.log).toEqual([]);
+        expect(dev.storage.get('mindwtr-ai-key:openai')).toBe('legacy-must-stay');
+        load.mockRejectedValueOnce(new Error('Secure access denied'));
+        expect(value(await contract.requestAICopilot({ request }))).toEqual({ suggestion: null });
+        expect(device.calls).toHaveLength(1);
+        expect(dev.log).toEqual([]);
+    });
+
     it('Break down on a finished list task reopens it through a status edit, as React Native does', async () => {
         const tasks = [{
             id: 'l1', title: 'Pack', status: 'done', taskMode: 'list', contexts: [], tags: [], checklist: [{ id: 'c1', title: 'Passport', isCompleted: true }],
-            // Done just now, so it is not archived on load.
+
             createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
         }] as Task[];
         await seed({ tasks, settings: { ai: { enabled: true, provider: 'openai', baseUrl: 'http://local/v1' } } });
@@ -1017,7 +1060,7 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(view.draft).toMatchObject({ title: 'Call Sam', contexts: ['@calls'] });
     });
 
-    // Pass C1 native: RN's Process Inbox shows Clarify while AI is on (InboxCaptureCard's aiEnabled); the native view says so.
+
     it('names Process Inbox\'s Clarify button while AI is on, and no button while it is off', async () => {
         const tasks = [{ id: 'i1', title: 'Gift', status: 'inbox', tags: [], contexts: [], createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' }] as Task[];
         await seed({ tasks, settings: { ai: { enabled: true, provider: 'openai' } } });
@@ -1038,4 +1081,142 @@ describe('native host contract: AI keys stay out of views, errors and logs', () 
         expect(await bare.openAISettings({ requestId: generateUUID() })).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
         expect(device.calls).toEqual([]);
     });
+});
+
+
+describe('private extra body editor process receipts', () => {
+    afterAll(() => resetForTests());
+    const sourceText = '{"nested":{"private":"EXTRA-BODY-PRIVATE-SENTINEL"}}';
+    const privateDevice = () => {
+        const dev = createDevice({});
+        const deny = vi.fn(async () => { throw new Error('Private binding must not run'); });
+        dev.host.storage = { getItem: deny, setItem: deny, removeItem: deny };
+        dev.host.secrets = { get: deny, set: deny, delete: deny };
+        dev.host.fetch = deny;
+        return { ...dev, deny };
+    };
+
+    it('preflights exact shared clear/object semantics and bounds formatting expansion', () => {
+        expect(readNativeAIExtraBodyInput(' \n ')).toEqual({ value: undefined, formatted: '' });
+        expect(readNativeAIExtraBodyInput('{}')).toEqual({ value: undefined, formatted: '' });
+        expect(readNativeAIExtraBodyInput('{"thinking":{"type":"disabled"}}'))
+            .toEqual({ value: { thinking: { type: 'disabled' } }, formatted: '{\n  "thinking": {\n    "type": "disabled"\n  }\n}' });
+        const expansion = '{"a":'.repeat(60) + '0' + '}'.repeat(60);
+        expect(expansion.length).toBeLessThan(4000);
+        for (const invalid of [null, false, [], 'null', '[]', 'true', '"object"', '{bad}', 'x'.repeat(4001), expansion])
+            expect(readNativeAIExtraBodyInput(invalid)).toBeNull();
+    });
+
+    it('saves only the requested object without secrets, consent, HTTP, private replies or disk receipts', async () => {
+        const dev = privateDevice();
+        const env = await openSqliteHost({ settings: { ai: { provider: 'openai', enabled: false, model: 'custom',
+            baseUrl: 'https://private.invalid', speechToText: { provider: 'whisper' } }, unrelated: 'retained' } as AppSettings,
+            tasks: [{ id: 'extra-body-row', title: 'Keep', status: 'inbox', createdAt: '2026-10-31T00:00:00.000Z', updatedAt: '2026-10-31T00:00:00.000Z' }] }, undefined, { ai: dev.host });
+        try {
+            const before = structuredClone(useTaskStore.getState().settings);
+            const raw = await env.sql('SELECT * FROM tasks');
+            const input = { requestId: generateUUID(), text: sourceText };
+            expect(env.host.probeAIExtraBodyParamsOutcome(input)).toBeNull();
+            expect(await env.host.setAIExtraBodyParams(input)).toEqual({ ok: true, value: { changed: true } });
+            expect(env.host.probeAIExtraBodyParamsOutcome(input)).toEqual({ ok: true, value: { changed: true } });
+            expect(useTaskStore.getState().settings.ai).toEqual({ ...before.ai, openAIExtraBodyParams: JSON.parse(sourceText) });
+            expect((useTaskStore.getState().settings as AppSettings & { unrelated: string }).unrelated).toBe('retained');
+            expect(await env.sql('SELECT * FROM tasks')).toEqual(raw);
+            expect(await env.sql('SELECT * FROM native_request_receipts')).toEqual([]);
+            expect(dev.deny).not.toHaveBeenCalled(); expect(dev.log).toEqual([]); expect(device.calls).toEqual([]);
+            expect(NATIVE_AI_UNJOURNALED_COMMANDS).toContain('setAIExtraBodyParams');
+            expect(NATIVE_UNJOURNALED_COMMANDS.has('setAIExtraBodyParams')).toBe(true);
+        } finally { await env.close(); }
+    });
+
+    it('clears with blank or empty object and skips a subsequent effective clear', async () => {
+        const dev = privateDevice(), env = await openSqliteHost({ settings: { ai: { provider: 'openai', openAIExtraBodyParams: { old: true } } } }, undefined, { ai: dev.host });
+        try {
+            expect(await env.host.setAIExtraBodyParams({ requestId: generateUUID(), text: '  ' })).toEqual({ ok: true, value: { changed: true } });
+            expect(useTaskStore.getState().settings.ai?.openAIExtraBodyParams).toBeUndefined();
+            expect(await env.host.setAIExtraBodyParams({ requestId: generateUUID(), text: '{}' })).toEqual({ ok: true, value: { changed: false } });
+            expect(await env.sql('SELECT * FROM native_request_receipts')).toEqual([]);
+        } finally { await env.close(); }
+    });
+
+    it('rejects malformed, over-bound, non-OpenAI and changed-input requests without echoing private text or mutating', async () => {
+        const dev = privateDevice(), env = await openSqliteHost({ settings: { ai: { provider: 'openai', openAIExtraBodyParams: { old: true } } } }, undefined, { ai: dev.host });
+        try {
+            const before = structuredClone(useTaskStore.getState().settings);
+            const expansion = '{"a":'.repeat(60) + '0' + '}'.repeat(60);
+            for (const text of ['["EXTRA-BODY-PRIVATE-SENTINEL"]', '{bad}', 'null', 'true', 'x'.repeat(4001), expansion]) {
+                const input = { requestId: generateUUID(), text };
+                const result = await env.host.setAIExtraBodyParams(input);
+                expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+                expect(env.host.probeAIExtraBodyParamsOutcome(input)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+                expect(JSON.stringify(result)).not.toContain('EXTRA-BODY-PRIVATE-SENTINEL');
+            }
+            const extra = { requestId: generateUUID(), text: sourceText, extra: true };
+            expect(await env.host.setAIExtraBodyParams(extra)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+            const hostile = { requestId: generateUUID(), text: '' };
+            Object.defineProperty(hostile, 'text', { get() { throw new Error('EXTRA-BODY-PRIVATE-SENTINEL'); } });
+            expect(env.host.probeAIExtraBodyParamsOutcome(hostile)).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
+            expect(await env.host.setAIExtraBodyParams(hostile)).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
+            expect(useTaskStore.getState().settings).toEqual(before);
+            await useTaskStore.getState().updateSettings({ ai: { ...before.ai, provider: 'anthropic' } }); await flushPendingSave();
+            const changed = structuredClone(useTaskStore.getState().settings);
+            expect(await env.host.setAIExtraBodyParams({ requestId: generateUUID(), text: sourceText }))
+                .toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+            expect(useTaskStore.getState().settings).toEqual(changed); expect(await env.sql('SELECT * FROM native_request_receipts')).toEqual([]);
+        } finally { await env.close(); }
+    });
+
+    it('answers exact saved A after B and provider changes, while semantic-equivalent changed text reuses no receipt', async () => {
+        const dev = privateDevice(), env = await openSqliteHost({ settings: { ai: { provider: 'openai' } } }, undefined, { ai: dev.host });
+        try {
+            const a = { requestId: generateUUID(), text: sourceText };
+            const reply = await env.host.setAIExtraBodyParams(a); expect(reply).toEqual({ ok: true, value: { changed: true } });
+            expect(await env.host.setAIExtraBodyParams({ requestId: generateUUID(), text: '{"later":"B"}' })).toMatchObject({ ok: true });
+            const before = useTaskStore.getState().settings;
+            expect(await env.host.setAIExtraBodyParams(a)).toEqual(reply);
+            expect(env.host.probeAIExtraBodyParamsOutcome(a)).toEqual(reply);
+            expect(useTaskStore.getState().settings).toBe(before);
+            const altered = { ...a, text: ' ' + sourceText };
+            expect(env.host.probeAIExtraBodyParamsOutcome(altered)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+            expect(await env.host.setAIExtraBodyParams(altered)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+            await useTaskStore.getState().updateSettings({ ai: { ...before.ai, provider: 'gemini' } }); await flushPendingSave();
+            const afterProvider = useTaskStore.getState().settings;
+            expect(env.host.probeAIExtraBodyParamsOutcome(a)).toEqual(reply);
+            expect(env.host.probeAIExtraBodyParamsOutcome({ requestId: generateUUID(), text: sourceText })).toBeNull();
+            expect(useTaskStore.getState().settings).toBe(afterProvider);
+            expect(await env.sql('SELECT * FROM native_request_receipts')).toEqual([]);
+            await env.restart();
+            expect(env.host.probeAIExtraBodyParamsOutcome(a)).toBeNull();
+            expect(useTaskStore.getState().settings.ai?.openAIExtraBodyParams).toEqual({ later: 'B' });
+        } finally { await env.close(); }
+    });
+
+    it('retains an unsaved exact attempt and retry only saves once its original raw snapshot is requeued', async () => {
+        const dev = privateDevice(); let failing = false, failures = 0;
+        const env = await openSqliteHost({ settings: { ai: { provider: 'openai' } } }, client => ({ ...client,
+            run: async (sql, params) => {
+                if (failing && sql === 'COMMIT') { failures++; throw new Error('EXTRA-BODY-PRIVATE-SENTINEL'); }
+                return client.run(sql, params);
+            },
+        }), { ai: dev.host });
+        try {
+            const input = { requestId: generateUUID(), text: sourceText };
+            failing = true;
+            const result = await env.host.setAIExtraBodyParams(input);
+            expect(result).toMatchObject({ ok: false, error: { code: 'SAVE_FAILED' } });
+            expect(JSON.stringify(result)).not.toContain('EXTRA-BODY-PRIVATE-SENTINEL'); expect(failures).toBeGreaterThan(0);
+            expect(env.host.probeAIExtraBodyParamsOutcome(input)).toBeNull();
+            expect(await env.host.setAIExtraBodyParams({ ...input, text: ' ' + sourceText }))
+                .toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+            expect(await env.sql('SELECT * FROM native_request_receipts')).toEqual([]);
+            failing = false;
+            await useTaskStore.getState().persistSnapshot(); await flushPendingSave();
+            const accepted = useTaskStore.getState().settings;
+            expect(await env.host.setAIExtraBodyParams(input)).toEqual({ ok: true, value: { changed: true } });
+            expect(env.host.probeAIExtraBodyParamsOutcome(input)).toEqual({ ok: true, value: { changed: true } });
+            expect(useTaskStore.getState().settings).toBe(accepted);
+            expect(await env.sql('SELECT * FROM native_request_receipts')).toEqual([]);
+            expect(dev.deny).not.toHaveBeenCalled();
+        } finally { failing = false; await env.close(); }
+    }, 20_000);
 });

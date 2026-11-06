@@ -1,7 +1,5 @@
-// Dropbox credential storage and access-token refresh for the mobile apps. The token bundle
-// is one JSON string in the platform keystore (`when-unlocked`); a bundle left in the old
-// plaintext key-value location is moved into the keystore on first read. Without a keystore
-// the bundle lives in memory for this process only.
+
+
 
 import type { SyncSecretStoragePort, SyncSecretVault } from './sync-secret-storage';
 import type { SyncKeyValueStoragePort } from './sync-storage-keys';
@@ -51,18 +49,18 @@ const requireDropboxTokens = (tokens: DropboxAuthTokens): DropboxAuthTokens => {
 };
 
 export type DropboxTokenStore = {
-    getStoredDropboxTokens(): Promise<DropboxAuthTokens | null>;
-    saveDropboxTokens(tokens: DropboxAuthTokens): Promise<void>;
-    clearDropboxTokens(): Promise<void>;
-    isDropboxConnected(): Promise<boolean>;
+    getStoredDropboxTokens(beforeMutation?: () => void): Promise<DropboxAuthTokens | null>;
+    saveDropboxTokens(tokens: DropboxAuthTokens, beforeMutation?: () => void): Promise<void>;
+    clearDropboxTokens(beforeMutation?: () => void): Promise<void>;
+    isDropboxConnected(beforeMutation?: () => void): Promise<boolean>;
     refreshDropboxAccessToken(clientId: string, refreshToken: string, fetcher?: typeof fetch): Promise<DropboxAuthTokens>;
-    /** Resolve an access token from an explicit credential bundle without touching storage. */
+
     getValidDropboxAccessTokenForTokens(
         clientId: string,
         tokens: DropboxAuthTokens,
         fetcher?: typeof fetch,
     ): Promise<DropboxAccessTokenResolution>;
-    /** Force-refresh an explicit credential bundle without promoting it to storage. */
+
     forceRefreshDropboxAccessTokenForTokens(
         clientId: string,
         tokens: DropboxAuthTokens,
@@ -70,16 +68,16 @@ export type DropboxTokenStore = {
     ): Promise<DropboxAccessTokenResolution>;
     getValidDropboxAccessToken(clientId: string, fetcher?: typeof fetch): Promise<string>;
     forceRefreshDropboxAccessToken(clientId: string, fetcher?: typeof fetch): Promise<string>;
-    /** Revoke an explicit token bundle without reading or clearing durable credentials. */
+
     revokeDropboxTokens(clientId: string, tokens: DropboxAuthTokens, fetcher?: typeof fetch): Promise<void>;
-    disconnectDropbox(clientId: string, fetcher?: typeof fetch): Promise<void>;
+    disconnectDropbox(clientId: string, fetcher?: typeof fetch, beforeMutation?: () => void): Promise<void>;
 };
 
 export type DropboxTokenStoreDeps = {
     storage: SyncKeyValueStoragePort;
     secrets: SyncSecretStoragePort;
     vault: SyncSecretVault;
-    /** The default fetcher for token requests when a call passes none. */
+
     fetch: typeof fetch;
     now?: () => number;
 };
@@ -91,17 +89,20 @@ export const createDropboxTokenStore = ({
     fetch: defaultFetcher,
     now = () => Date.now(),
 }: DropboxTokenStoreDeps): DropboxTokenStore => {
-    const readRawTokenPayload = async (): Promise<string | null> => {
+    const readRawTokenPayload = async (beforeMutation?: () => void): Promise<string | null> => {
         if (await vault.isSecureStoreAvailable()) {
             const secureValue = await secrets.getItem(DROPBOX_SECURESTORE_TOKENS_KEY);
             if (secureValue) {
+                beforeMutation?.();
                 await storage.removeItem(DROPBOX_ASYNC_TOKENS_KEY);
                 return secureValue;
             }
 
             const legacyValue = await storage.getItem(DROPBOX_ASYNC_TOKENS_KEY);
             if (legacyValue !== null) {
+                beforeMutation?.();
                 await secrets.setItem(DROPBOX_SECURESTORE_TOKENS_KEY, legacyValue, 'when-unlocked');
+                beforeMutation?.();
                 await storage.removeItem(DROPBOX_ASYNC_TOKENS_KEY);
             }
             return legacyValue;
@@ -112,37 +113,46 @@ export const createDropboxTokenStore = ({
 
         const legacyValue = await storage.getItem(DROPBOX_ASYNC_TOKENS_KEY);
         if (legacyValue !== null) {
+            beforeMutation?.();
             await vault.evacuateLegacySecretToSession(
                 DROPBOX_SECURESTORE_TOKENS_KEY,
                 legacyValue,
-                () => storage.removeItem(DROPBOX_ASYNC_TOKENS_KEY),
+                () => { beforeMutation?.(); return storage.removeItem(DROPBOX_ASYNC_TOKENS_KEY); },
             );
         }
         return legacyValue;
     };
 
-    const writeRawTokenPayload = async (value: string): Promise<void> => {
+    const writeRawTokenPayload = async (value: string, beforeMutation?: () => void): Promise<void> => {
         if (await vault.isSecureStoreAvailable()) {
+            beforeMutation?.();
             await secrets.setItem(DROPBOX_SECURESTORE_TOKENS_KEY, value, 'when-unlocked');
+            beforeMutation?.();
             await storage.removeItem(DROPBOX_ASYNC_TOKENS_KEY);
+            beforeMutation?.();
             vault.deleteSessionSecret(DROPBOX_SECURESTORE_TOKENS_KEY);
             return;
         }
 
+        beforeMutation?.();
         await storage.removeItem(DROPBOX_ASYNC_TOKENS_KEY);
+        beforeMutation?.();
         vault.setSessionSecret(DROPBOX_SECURESTORE_TOKENS_KEY, value);
     };
 
-    const clearRawTokenPayload = async (): Promise<void> => {
+    const clearRawTokenPayload = async (beforeMutation?: () => void): Promise<void> => {
         if (await vault.isSecureStoreAvailable()) {
+            beforeMutation?.();
             await secrets.deleteItem(DROPBOX_SECURESTORE_TOKENS_KEY);
         }
+        beforeMutation?.();
         await storage.removeItem(DROPBOX_ASYNC_TOKENS_KEY);
+        beforeMutation?.();
         vault.deleteSessionSecret(DROPBOX_SECURESTORE_TOKENS_KEY);
     };
 
-    const getStoredDropboxTokens = async (): Promise<DropboxAuthTokens | null> => {
-        const raw = await readRawTokenPayload();
+    const getStoredDropboxTokens = async (beforeMutation?: () => void): Promise<DropboxAuthTokens | null> => {
+        const raw = await readRawTokenPayload(beforeMutation);
         if (!raw) return null;
         try {
             return sanitizeTokens(JSON.parse(raw));
@@ -151,16 +161,16 @@ export const createDropboxTokenStore = ({
         }
     };
 
-    const saveDropboxTokens = async (tokens: DropboxAuthTokens): Promise<void> => {
+    const saveDropboxTokens = async (tokens: DropboxAuthTokens, beforeMutation?: () => void): Promise<void> => {
         const sanitized = sanitizeTokens(tokens);
         if (!sanitized) {
             throw new Error('Invalid Dropbox token payload');
         }
-        await writeRawTokenPayload(JSON.stringify(sanitized));
+        await writeRawTokenPayload(JSON.stringify(sanitized), beforeMutation);
     };
 
-    const clearDropboxTokens = async (): Promise<void> => {
-        await clearRawTokenPayload();
+    const clearDropboxTokens = async (beforeMutation?: () => void): Promise<void> => {
+        await clearRawTokenPayload(beforeMutation);
     };
 
     const requestDropboxAccessToken = async (
@@ -242,7 +252,7 @@ export const createDropboxTokenStore = ({
                 },
             });
         } catch {
-            // Disconnect must still remove the local candidate when revoke is offline.
+
         }
     };
 
@@ -250,8 +260,8 @@ export const createDropboxTokenStore = ({
         getStoredDropboxTokens,
         saveDropboxTokens,
         clearDropboxTokens,
-        isDropboxConnected: async () => {
-            const tokens = await getStoredDropboxTokens();
+        isDropboxConnected: async (beforeMutation) => {
+            const tokens = await getStoredDropboxTokens(beforeMutation);
             return Boolean(tokens?.refreshToken && tokens.accessToken);
         },
         refreshDropboxAccessToken,
@@ -295,18 +305,18 @@ export const createDropboxTokenStore = ({
             return refreshed.accessToken;
         },
         revokeDropboxTokens,
-        disconnectDropbox: async (clientId, fetcher = defaultFetcher) => {
+        disconnectDropbox: async (clientId, fetcher = defaultFetcher, beforeMutation) => {
             requireDropboxClientId(clientId);
-            const stored = await getStoredDropboxTokens();
+            const stored = await getStoredDropboxTokens(beforeMutation);
             if (!stored) {
-                await clearDropboxTokens();
+                await clearDropboxTokens(beforeMutation);
                 return;
             }
 
             try {
                 await revokeDropboxTokens(clientId, stored, fetcher);
             } finally {
-                await clearDropboxTokens();
+                await clearDropboxTokens(beforeMutation);
             }
         },
     };

@@ -14,7 +14,7 @@ const task = (extra: Partial<Task> = {}): Task => ({
     ...extra,
 });
 
-// The original legacy-API RED cases are frozen under .orchestrator/baselines/date-recovery-red.
+
 describe('native date draft recovery', () => {
     const originalTZ = process.env.TZ;
     let durable: AppData;
@@ -94,6 +94,24 @@ describe('native date draft recovery', () => {
         expect.soft(await commit(restarted, prepared)).toMatchObject({ ok: true });
         expect(stored()).toBe(before);
         expect(json(stored())).toEqual(committed);
+        expect(saved()).toEqual(committed);
+        expect(saveData).not.toHaveBeenCalled();
+    });
+
+    it('acknowledges a picked local review clock after timezone restart without writing again', async () => {
+        const host = await seed({ reviewAt: '2026-10-05', startTime: '2026-10-03', dueDate: '2026-10-07' });
+        const base = draft(host);
+        const picked = edit(host, base, { type: 'pickTime', field: 'reviewAt', time: '11:00' });
+        expect(picked.reviewAt).toBe('2026-10-05T11:00');
+        const prepared = prepare(host, { id: 'edit', base: { reviewAt: base.reviewAt }, patch: { reviewAt: picked.reviewAt } });
+        expect(await commit(host, prepared)).toMatchObject({ ok: true });
+        const committed = saved();
+        expect(committed).toMatchObject({ reviewAt: picked.reviewAt, startTime: '2026-10-03', dueDate: '2026-10-07', rev: 8 });
+        expect(saveData).toHaveBeenCalledTimes(1);
+
+        const restarted = await open('America/Los_Angeles');
+        expect(draft(restarted).reviewAt).toBe('2026-10-05T11:00');
+        expect(await commit(restarted, prepared)).toMatchObject({ ok: true });
         expect(saved()).toEqual(committed);
         expect(saveData).not.toHaveBeenCalled();
     });

@@ -178,8 +178,8 @@ struct SearchScreen: View {
                         }
                         .buttonStyle(.plain).disabled(!model.searchActionsEnabled).accessibilityIdentifier("search-hidden-completed")
                     }
-                    // Core follows RN's flat order: projects, then tasks.
-                    // Sibling lazy rows need distinct identities across both result types.
+
+
                     ForEach(projects.map { (id: "project-" + $0.text("id"), row: $0) }, id: \.id) { projectResult($0.row) }
                     ForEach(tasks.map { (id: "task-" + $0.text("id"), row: $0) }, id: \.id) { taskResult($0.row) }
                     if hasSearch && projects.isEmpty && tasks.isEmpty {
@@ -225,7 +225,7 @@ struct SearchScreen: View {
                     inputFocused = false
                     Task { await model.completeSearchTask(row.text("id")) }
                 } label: {
-                    taskGlyph(cancelled: row.flag("cancelled")).foregroundStyle(palette.secondary).frame(width: 44, height: 44)
+                    taskGlyph(cancelled: row.flag("cancelled")).foregroundStyle(palette.secondary).frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).disabled(!model.searchActionsEnabled)
                 .accessibilityLabel(model.label("review.markDone"))
@@ -306,7 +306,7 @@ struct SearchScreen: View {
                         .disabled(!filtersEnabled).accessibilityIdentifier("search-filters-clear")
                 }
                 Button { closeFilters() } label: {
-                    AppIcon(name: "x", size: 18).foregroundStyle(palette.secondary).frame(width: 44, height: 44)
+                    AppIcon(name: "x", size: 18).foregroundStyle(palette.secondary).frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).disabled(model.busy || model.retryNeeded)
                 .accessibilityLabel(model.label("common.close")).accessibilityIdentifier("search-filters-close")
@@ -411,7 +411,7 @@ struct SearchScreen: View {
     }
 }
 
-/// RN's wrapping chip row, with intrinsic widths and accessible multiline labels.
+
 struct AppChipFlow: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let sizes = arrangement(width: proposal.width ?? 320, subviews: subviews)

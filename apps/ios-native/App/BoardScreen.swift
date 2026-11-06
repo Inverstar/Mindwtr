@@ -1,8 +1,9 @@
 import SwiftUI
 import UIKit
 import Combine
+import MindwtrNativeCore
 
-// MARK: Board drag geometry and claim (Foundation-only seam)
+
 struct BoardDragRowFrame: Equatable {
     let status: String
     let id: String
@@ -127,6 +128,46 @@ struct BoardDragState {
         invalidate(); self.capture = capture; self.measurements = measurements
     }
 
+    mutating func rebaseForVerticalScroll(_ next: BoardDragMeasurements,
+        rejected: (NativeBoardDragGeometry.RebaseRejection, Int?, CGRect?, CGRect?) -> Void = { _, _, _, _ in }) -> Bool {
+        func refuse(_ reason: NativeBoardDragGeometry.RebaseRejection, column: Int? = nil,
+                    original: CGRect? = nil, current: CGRect? = nil) -> Bool {
+            rejected(reason, column, original, current)
+            return false
+        }
+        guard claim == nil else { return refuse(.claimed) }
+        guard let capture, let original = measurements else { return refuse(.captureUnavailable) }
+        guard original.viewports.count == 1, next.viewports.count == 1 else { return refuse(.viewportCount) }
+        guard original.viewports[0] == next.viewports[0] else { return refuse(.viewportChanged) }
+        guard BoardDragGeometry.valid(next.viewports[0]) else { return refuse(.viewportInvalid) }
+        guard original.columns.count == next.columns.count else { return refuse(.columnCount) }
+        guard let first = original.columns.first, let current = next.columns.first else { return refuse(.columnsUnavailable) }
+        let delta = current.frame.minY - first.frame.minY
+        guard delta.isFinite else { return refuse(.translationNonfinite) }
+        guard delta != 0 else { return refuse(.translationZero) }
+        for (ordinal, pair) in zip(original.columns, next.columns).enumerated() {
+            let (prior, current) = pair
+            guard prior.status.utf8.elementsEqual(current.status.utf8) else {
+                return refuse(.columnIdentity, column: ordinal, original: prior.frame, current: current.frame)
+            }
+            guard BoardDragGeometry.valid(prior.frame), BoardDragGeometry.valid(current.frame) else {
+                return refuse(.columnInvalid, column: ordinal, original: prior.frame, current: current.frame)
+            }
+            let matches = NativeBoardDragGeometry.matchesVerticalTranslation(prior.frame, current.frame, delta: delta,
+                rejected: { rejected($0, ordinal, prior.frame, current.frame) })
+            guard matches else { return false }
+        }
+        guard original.rows.count == next.rows.count else { return refuse(.rowCount) }
+        for (prior, current) in zip(original.rows, next.rows) {
+            guard prior.status.utf8.elementsEqual(current.status.utf8) else { return refuse(.rowStatus) }
+            guard prior.id.utf8.elementsEqual(current.id.utf8) else { return refuse(.rowIdentity) }
+            guard prior.frame == current.frame else { return refuse(.rowFrame) }
+        }
+        guard next.geometry(for: capture)?.canBegin(capture) == true else { return refuse(.sourceIneligible) }
+        measurements = next
+        return true
+    }
+
     func reusableCapture(matching candidate: BoardOrderDragCapture, measurements: BoardDragMeasurements) -> BoardOrderDragCapture? {
         guard claim == nil, let capture, self.measurements == measurements,
               capture.hostID == candidate.hostID, capture.moveAllowed == candidate.moveAllowed,
@@ -179,11 +220,10 @@ struct BoardDragState {
         return true
     }
 }
-// MARK: End Board drag geometry and claim
 
-// Nonobservable, diagnostic-only slots; callbacks retain their original attempt.
+
 final class BoardDragDiagnostics {
-    enum Stage: String, CaseIterable { case begin, cancel, validate, hover, drop, load }
+    enum Stage: String, CaseIterable { case begin, cancel, validate, hover, drop, load, rebase, roundoffRebase }
     final class Attempt {
         private var emitted = Set<Stage>()
         func take(_ stage: Stage) -> Bool { emitted.insert(stage).inserted }
@@ -192,7 +232,7 @@ final class BoardDragDiagnostics {
     func begin() { attempt = Attempt() }
 }
 
-/// RN Board stacks full-width columns in a single vertical scroll.
+
 struct BoardScreen: View {
     @ObservedObject var model: CoreModel
     let palette: AppPalette
@@ -232,12 +272,12 @@ struct BoardScreen: View {
                             value: BoardDragMeasurements(viewports: [geometry.frame(in: .global)]))
                     }
                 }
-                .refreshable { endInput(); await model.refresh() }
+                .refreshable { endInput(); await model.pullToRefresh() }
                 .onPreferenceChange(BoardRowFrames.self) { frames in
                     guard trackingAnchor, model.boardCurrent, !model.busy, !model.boardFiltersPresented,
                           !model.taskPresented, !model.areaPickerPresented else { return }
-                    // Retain the first fully visible row/header. Rebuilding a
-                    // fresh revision restores this ID instead of an old pixel offset.
+
+
                     if let first = frames.filter({ $0.value.minY >= 0 }).min(by: { $0.value.minY < $1.value.minY }) {
                         model.boardScrollAnchor = first.key
                     }
@@ -260,8 +300,35 @@ struct BoardScreen: View {
         .onChange(of: model.areaPickerPresented) { if $0 { endInput() } }
         .onPreferenceChange(BoardDragFrames.self) { value in
             if dragMeasurements != value {
-                let reason = geometryCancellationReason(value)
-                dragMeasurements = value; cancelDrag(reason: reason)
+                let original = drag.measurements
+                var rebaseReason: NativeBoardDragGeometry.RebaseRejection?
+                var columnOrdinal: Int?
+                var originalColumn: CGRect?
+                var currentColumn: CGRect?
+                if drag.rebaseForVerticalScroll(value, rejected: { reason, ordinal, before, after in
+                    rebaseReason = reason; columnOrdinal = ordinal
+                    originalColumn = before; currentColumn = after
+                }) {
+                    if let attempt = dragDiagnostics.attempt, let original,
+                       let before = original.columns.first, let after = value.columns.first {
+                        let delta = after.frame.minY - before.frame.minY
+                        let rounded = zip(original.columns, value.columns).contains {
+                            $0.1.frame != $0.0.frame.offsetBy(dx: 0, dy: delta)
+                        }
+                        let heightRounded = zip(original.columns, value.columns).contains { $0.0.frame.height != $0.1.frame.height }
+                        let rebaseReason = heightRounded ? "geometry-scroll-height-roundoff-rebased"
+                            : rounded ? "geometry-scroll-roundoff-rebased" : "geometry-scroll-rebased"
+                        if attempt.take(rounded ? .roundoffRebase : .rebase) {
+                            logDragGeometry(reason: rebaseReason,
+                                            original: original, next: value, capture: drag.capture)
+                        }
+                    }
+                } else {
+                    let reason = geometryCancellationReason(value)
+                    cancelDrag(reason: reason, next: value, rebaseReason: rebaseReason,
+                               columnOrdinal: columnOrdinal, originalColumn: originalColumn, currentColumn: currentColumn)
+                }
+                dragMeasurements = value
             }
         }
         .onReceive(dragInvalidations) { cancelDrag(reason: "model") }
@@ -441,7 +508,7 @@ struct BoardScreen: View {
     }
 
     private func makeDragProvider(item: CoreObject, column: CoreObject, filters: CoreObject) -> NSItemProvider {
-        // SwiftUI may ask for the same source again; never revoke an admitted load.
+
         guard drag.claim == nil else { return NSItemProvider() }
         func refuse(_ reason: String) -> NSItemProvider {
             cancelDrag(reason: "new-drag"); dragDiagnostics.begin()
@@ -504,10 +571,43 @@ struct BoardScreen: View {
         return "geometry-other"
     }
 
-    private func cancelDrag(reason: String) {
+    private func cancelDrag(reason: String, next: BoardDragMeasurements? = nil,
+                            rebaseReason: NativeBoardDragGeometry.RebaseRejection? = nil, columnOrdinal: Int? = nil,
+                            originalColumn: CGRect? = nil, currentColumn: CGRect? = nil) {
         guard drag.capture != nil || drag.claim != nil || dropIndicator != nil else { return }
+        let original = drag.measurements, capture = drag.capture
         drag.invalidate(); dropIndicator = nil
-        traceDrag(.cancel, reason: reason)
+        guard let attempt = dragDiagnostics.attempt, attempt.take(.cancel) else { return }
+        model.logBoardDragStage("cancel", reason: reason)
+        if next != nil {
+            logDragGeometry(reason: reason, original: original, next: next, capture: capture,
+                            rebaseReason: rebaseReason, columnOrdinal: columnOrdinal,
+                            originalColumn: originalColumn, currentColumn: currentColumn)
+        }
+    }
+
+    private func logDragGeometry(reason: String, original: BoardDragMeasurements?, next: BoardDragMeasurements?,
+                                 capture: BoardOrderDragCapture?,
+                                 rebaseReason: NativeBoardDragGeometry.RebaseRejection? = nil, columnOrdinal: Int? = nil,
+                                 originalColumn: CGRect? = nil, currentColumn: CGRect? = nil) {
+        func viewport(_ value: BoardDragMeasurements?) -> CGRect? {
+            guard let value, value.viewports.count == 1 else { return nil }
+            return value.viewports[0]
+        }
+        func area(_ value: BoardDragMeasurements?) -> CGRect? {
+            guard let capture, let rows = value?.columns.filter({ $0.status == capture.status }), rows.count == 1 else { return nil }
+            return rows[0].frame
+        }
+        func row(_ value: BoardDragMeasurements?) -> CGRect? {
+            guard let capture, let rows = value?.rows.filter({ $0.status == capture.status && $0.id == capture.taskID }), rows.count == 1 else { return nil }
+            return rows[0].frame
+        }
+        let originalViewport = viewport(original), currentViewport = viewport(next)
+        let originalArea = area(original), currentArea = area(next), originalRow = row(original), currentRow = row(next)
+        model.logBoardDragGeometry(reason: reason, originalViewport: originalViewport, currentViewport: currentViewport,
+            originalArea: originalArea, currentArea: currentArea, originalRow: originalRow, currentRow: currentRow,
+            rebaseReason: rebaseReason, columnOrdinal: columnOrdinal,
+            originalColumn: originalColumn, currentColumn: currentColumn)
     }
 
     private func dragTarget(_ point: CGPoint, status: String) -> BoardDropTarget? {
@@ -549,7 +649,7 @@ struct BoardScreen: View {
         }
         let diagnosticAttempt = dragDiagnostics.attempt
         dropIndicator = nil
-        // The load must begin inside performDrop; only its completion hops to MainActor.
+
         providers[0].loadDataRepresentation(forTypeIdentifier: Self.dragType) { data, error in
             Task { @MainActor in
                 guard error == nil, let data, data.count == 36, drag.matches(claim), scenePhase == .active,
@@ -619,8 +719,7 @@ struct BoardScreen: View {
     }
 }
 
-/// Observe horizontal drags alongside the Board's vertical ScrollView.
-/// Like RN Swipeable, crossing the action threshold closes the panel and acts once.
+
 struct SwipeActionCard<Content: View>: View {
     let palette: AppPalette
     let enabled: Bool
@@ -641,8 +740,8 @@ struct SwipeActionCard<Content: View>: View {
     @GestureState private var offset: CGFloat = 0
 
     var body: some View {
-        // A Button's touch-up can fire after a short simultaneous drag. Use a
-        // distinct tap recognizer, while retaining the button's VoiceOver role.
+
+
         content
             .contentShape(Rectangle())
             .onTapGesture { if enabled { open() } }
@@ -988,7 +1087,7 @@ private struct BoardCardDropDelegate: DropDelegate {
     let perform: (DropInfo) -> Bool
 
     func validateDrop(info: DropInfo) -> Bool {
-        // Item providers are available only during performDrop, not validation.
+
         let conforms = info.hasItemsConforming(to: [type])
         let admitted = active()
         validated(conforms, admitted)

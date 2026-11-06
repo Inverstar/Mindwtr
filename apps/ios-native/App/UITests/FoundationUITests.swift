@@ -1,6 +1,1051 @@
 import XCTest
 
 final class FoundationUITests: XCTestCase {
+    private func nativeShareApp(_ largest: Bool) throws -> (XCUIApplication, String) {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_SHARE_UI_OWNED_NATIVE_DEV"] == "1",
+              let run = environment["MINDWTR_SHARE_UI_RUN"], run.range(of: "^[a-z0-9-]{8,40}$", options: .regularExpression) != nil else {
+            throw XCTSkip("Root-owned fresh native.dev App/group and synthetic run binding are required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = ["-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        if largest { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
+        return (app, run)
+    }
+    private func nativeShareTextURLFlow(largest: Bool) throws {
+        continueAfterFailure = false
+        let (app, run) = try nativeShareApp(largest)
+        app.launch(); defer { app.terminate() }
+        let input = app.textViews["capture-input"]
+        boardEnabled(input, timeout: 40)
+        let text = "Share text " + run, saved = text + " edited"
+        let url = "https://example.invalid/share/" + run
+        expectation(for: NSPredicate(format: "value == %@", text), evaluatedWith: input)
+        waitForExpectations(timeout: 30)
+        XCTAssertFalse(app.buttons["capture-voice-record"].isEnabled)
+        captureCopilotTap(app, "capture-options")
+        let note = app.descendants(matching: .any).matching(identifier: "capture-note").firstMatch
+        boardEnabled(note)
+        XCTAssertEqual(note.value as? String, "Body " + url, "Canonical subject/body/URL formatting must not duplicate the URL")
+        replaceProjectNotesText(note, with: "Share edited note " + run)
+        captureCopilotTap(app, "capture-options")
+        revealPagedElement(app, input, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        if largest {
+            input.tap(); input.typeKey("a", modifierFlags: .command); input.typeText(saved)
+            XCTAssertEqual(input.value as? String, saved)
+        } else { replaceProjectNotesText(input, with: saved) }
+        let another = app.switches["capture-add-another"]
+        revealPagedElement(app, another, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        boardEnabled(another)
+        if another.value as? String == "1" { another.tap() }
+        captureCopilotTap(app, "capture-save")
+        expectation(for: NSPredicate(format: "value == %@", url), evaluatedWith: input)
+        waitForExpectations(timeout: 40)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        captureCopilotTap(app, "capture-close")
+        XCTAssertTrue(input.waitForNonExistence(timeout: 30))
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["capture-open"], timeout: 40)
+        let reoffered = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true"), object: app.textViews["capture-input"])
+        reoffered.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [reoffered], timeout: 2), .completed)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", saved)).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 20), "Saved share remains visible after cold launch")
+    }
+    func testNativeShareTextURLExplicitSaveCloseAndColdRead() throws { try nativeShareTextURLFlow(largest: false) }
+    func testNativeShareTextURLExplicitSaveCloseAndColdReadLargestText() throws { try nativeShareTextURLFlow(largest: true) }
+
+    private func nativeOSShareObserve(_ app: XCUIApplication, _ phase: String) {
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "OS Share " + phase; shot.lifetime = .keepAlways; add(shot)
+        let hierarchy = app.debugDescription
+        let tree = XCTAttachment(string: String(hierarchy.prefix(131_072)))
+        tree.name = "OS Share " + phase + " hierarchy"; tree.lifetime = .keepAlways; add(tree)
+        print("OS Share \(phase) hierarchy:\n" + String(hierarchy.prefix(65_536)))
+    }
+    func testNativeOSShareSafariInspect() throws {
+        continueAfterFailure = false
+        let (native, run) = try nativeShareApp(false)
+        XCTAssertEqual(native.state, .notRunning, "Inspection must leave the owned containing App stopped")
+        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+        safari.activate(); defer { safari.terminate() }
+        nativeOSShareWait(safari, "Safari foreground", timeout: 20) { safari.state == .runningForeground }
+        let heading = safari.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Mindwtr OS share " + run + " a")).firstMatch
+        nativeOSShareWait(safari, "root-opened first fixture page") { heading.exists }
+        nativeOSShareObserve(safari, "Safari loaded page inspection")
+        let menu = safari.buttons["MoreMenuButton"]
+        nativeOSShareWait(safari, "observed Page Menu") { menu.exists && menu.isEnabled && menu.isHittable }
+        menu.tap()
+        nativeOSShareObserve(safari, "Safari Page Menu inspection")
+        let share = safari.buttons.matching(NSPredicate(format: "label == %@", "Share")).firstMatch
+        if share.exists && share.isEnabled && share.isHittable {
+            share.tap()
+            nativeOSShareWait(safari, "Share menu dismissal") { !share.isHittable }
+            nativeOSShareObserve(safari, "Safari system Share inspection")
+        }
+        XCTAssertEqual(native.state, .notRunning)
+    }
+
+    private func nativeOSShareWait(_ app: XCUIApplication, _ phase: String, timeout: TimeInterval = 30,
+                                   _ condition: @escaping () -> Bool) {
+        let expected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+        let outcome = XCTWaiter.wait(for: [expected], timeout: timeout)
+        if outcome != .completed { nativeOSShareObserve(app, phase + " failed") }
+        XCTAssertEqual(outcome, .completed, phase)
+    }
+    private func nativeOSShareRequire(_ app: XCUIApplication, _ phase: String, _ condition: Bool) {
+        if !condition { nativeOSShareObserve(app, phase + " failed") }
+        XCTAssertTrue(condition, phase)
+    }
+    func testNativeOSShareActualProducerSaveCloseAndColdRead() throws {
+        continueAfterFailure = false
+        let (app, run) = try nativeShareApp(false)
+        guard let raw = ProcessInfo.processInfo.environment["MINDWTR_OS_SHARE_EXPECTATIONS"] else {
+            throw XCTSkip("Root-derived expectations from the two real copied producer envelopes are required")
+        }
+        XCTAssertLessThanOrEqual(raw.utf8.count, 131_072)
+        let expected = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(expected.keys), Set(["first", "second"]))
+        func draft(_ name: String) throws -> (title: String, note: String) {
+            let object = try XCTUnwrap(expected[name] as? [String: Any])
+            XCTAssertEqual(Set(object.keys), Set(["title", "note"]))
+            let title = try XCTUnwrap(object["title"] as? String), note = try XCTUnwrap(object["note"] as? String)
+            XCTAssertFalse(title.isEmpty); XCTAssertLessThanOrEqual(title.utf8.count, 8192)
+            XCTAssertLessThanOrEqual(note.utf8.count, 65_536)
+            return (title, note)
+        }
+        let first = try draft("first"), second = try draft("second")
+        let savedTitle = "OS share saved " + run, savedNote = "OS share note " + run
+        XCTAssertNotEqual(savedTitle, second.title)
+        app.launch(); defer { app.terminate() }
+        let input = app.textViews["capture-input"]
+        func expectTitle(_ value: String, phase: String) {
+            nativeOSShareWait(app, phase, timeout: 40) {
+                input.exists && input.isEnabled && (input.value as? String ?? "").utf8.elementsEqual(value.utf8)
+            }
+            nativeOSShareRequire(app, phase + " source voice guard", app.buttons["capture-voice-record"].exists && !app.buttons["capture-voice-record"].isEnabled)
+        }
+        func openExpectedNote(_ value: String, phase: String) -> XCUIElement {
+            captureCopilotTap(app, "capture-options")
+            let note = app.descendants(matching: .any).matching(identifier: "capture-note").firstMatch
+            nativeOSShareWait(app, phase) { note.exists && note.isEnabled }
+            let actual = note.value as? String ?? ""
+            nativeOSShareRequire(app, phase + " canonical note", value.isEmpty
+                ? actual.isEmpty || actual == note.placeholderValue : actual.utf8.elementsEqual(value.utf8))
+            return note
+        }
+        expectTitle(first.title, phase: "first original title")
+        let note = openExpectedNote(first.note, phase: "first original note")
+        nativeOSShareObserve(app, "first actual producer prefill")
+        note.tap(); note.typeKey("a", modifierFlags: .command); note.typeText(savedNote)
+        nativeOSShareRequire(app, "edited note", (note.value as? String ?? "").utf8.elementsEqual(savedNote.utf8))
+        captureCopilotTap(app, "capture-options")
+        revealPagedElement(app, input, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        input.tap(); input.typeKey("a", modifierFlags: .command); input.typeText(savedTitle)
+        nativeOSShareRequire(app, "edited title", (input.value as? String ?? "").utf8.elementsEqual(savedTitle.utf8))
+        let another = app.switches["capture-add-another"]
+        revealPagedElement(app, another, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        boardEnabled(another)
+        if another.value as? String == "1" { another.tap() }
+        nativeOSShareObserve(app, "first actual producer explicit save")
+        captureCopilotTap(app, "capture-save")
+        expectTitle(second.title, phase: "second original title")
+        _ = openExpectedNote(second.note, phase: "second original note")
+        nativeOSShareRequire(app, "no persistence retry before Close", !app.buttons["persistence-retry"].exists)
+        nativeOSShareObserve(app, "second actual producer explicit Close")
+        captureCopilotTap(app, "capture-close")
+        nativeOSShareWait(app, "second original closed") { !input.exists && app.buttons["capture-open"].exists && app.buttons["capture-open"].isEnabled }
+        nativeOSShareRequire(app, "no persistence retry after Close", !app.buttons["persistence-retry"].exists)
+        app.terminate(); app.launch()
+        nativeOSShareWait(app, "ordinary cold readiness", timeout: 40) { app.buttons["capture-open"].exists && app.buttons["capture-open"].isEnabled }
+        let reoffered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in input.exists }, object: input)
+        reoffered.isInverted = true
+        let noReoffer = XCTWaiter.wait(for: [reoffered], timeout: 2)
+        if noReoffer != .completed { nativeOSShareObserve(app, "cold source reoffered failed") }
+        XCTAssertEqual(noReoffer, .completed)
+        let saved = app.descendants(matching: .any).matching(NSPredicate(format:
+            "identifier BEGINSWITH %@ AND label == %@", "task-title-", savedTitle)).firstMatch
+        nativeOSShareWait(app, "saved original cold row") { saved.exists }
+        let ignored = app.descendants(matching: .any).matching(NSPredicate(format:
+            "identifier BEGINSWITH %@ AND label == %@", "task-title-", second.title)).firstMatch
+        nativeOSShareRequire(app, "ignored original has no task row", !ignored.exists)
+        nativeOSShareRequire(app, "no cold persistence retry", !app.buttons["persistence-retry"].exists)
+        nativeOSShareObserve(app, "actual producer consumer cold read")
+    }
+
+    private func quickCaptureIntentState(_ app: XCUIApplication, _ expected: String) {
+        let state = app.staticTexts["quick-capture-intent-state"]
+        expectation(for: NSPredicate { _, _ in state.exists && state.label.contains(expected) }, evaluatedWith: state)
+        waitForExpectations(timeout: 40)
+    }
+
+    func testAddTaskIntentRetainsPendingAndDirtyEditorThenOrdinarySave() throws {
+        continueAfterFailure = false
+        let library = "23957f26-772e-4249-beae-eddd37fb986d"
+        guard ProcessInfo.processInfo.environment["MINDWTR_QUICK_CAPTURE_INTENT_UI_LIBRARY"] == library,
+              let run = ProcessInfo.processInfo.environment["MINDWTR_QUICK_CAPTURE_INTENT_UI_RUN"],
+              UUID(uuidString: run)?.uuidString.lowercased() == run else {
+            throw XCTSkip("A fresh root-owned shortcut library and run UUID are required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = ["--native-ui-test-library", library, "--native-quick-capture-intent-ui-fixture",
+            "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        app.launch(); defer { app.terminate() }
+        let input = app.textViews["capture-input"]
+        boardEnabled(input, timeout: 40); quickCaptureIntentState(app, "confirmed=1|")
+        XCTAssertEqual(input.value as? String, "")
+        captureCopilotTap(app, "capture-close")
+        XCTAssertTrue(input.waitForNonExistence(timeout: 30))
+        quickCaptureIntentState(app, "items=0|")
+
+        boardTap(app, "quick-capture-intent-conceal")
+        quickCaptureIntentState(app, "pending=true|confirmed=1|")
+        quickCaptureIntentState(app, "concealed=true|")
+        XCTAssertFalse(input.exists)
+        boardTap(app, "quick-capture-intent-reveal")
+        boardEnabled(input); quickCaptureIntentState(app, "confirmed=2|")
+        captureCopilotTap(app, "capture-close")
+        XCTAssertTrue(input.waitForNonExistence(timeout: 30))
+        quickCaptureIntentState(app, "items=0|")
+
+        boardTap(app, "quick-capture-intent-busy")
+        quickCaptureIntentState(app, "pending=true|confirmed=2|")
+        XCTAssertFalse(input.exists)
+        boardTap(app, "quick-capture-intent-release-busy")
+        boardEnabled(input); quickCaptureIntentState(app, "confirmed=3|")
+        let title = "Shortcut task " + run
+        replaceProjectNotesText(input, with: title)
+        boardTap(app, "quick-capture-intent-perform")
+        quickCaptureIntentState(app, "confirmed=4|")
+        XCTAssertEqual(input.value as? String, title, "An existing capture satisfies the intent without replacing its draft")
+        let another = app.switches["capture-add-another"]
+        revealPagedElement(app, another, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        boardEnabled(another)
+        if another.value as? String == "1" { another.tap() }
+        captureCopilotTap(app, "capture-save-edit")
+        task497Editor(app, title: title)
+        let editor = app.textFields["task-editor-title"]
+        replaceProjectNotesText(editor, with: title + " unsaved")
+        boardTap(app, "quick-capture-intent-perform")
+        quickCaptureIntentState(app, "pending=true|confirmed=4|")
+        XCTAssertEqual(editor.value as? String, title + " unsaved")
+        XCTAssertFalse(input.exists)
+        boardTap(app, "task-view-close"); boardTap(app, "task-editor-discard")
+        boardEnabled(input); quickCaptureIntentState(app, "confirmed=5|")
+        XCTAssertEqual(input.value as? String, "")
+        captureCopilotTap(app, "capture-close")
+        XCTAssertTrue(input.waitForNonExistence(timeout: 30))
+        quickCaptureIntentState(app, "pending=false|confirmed=5|")
+        quickCaptureIntentState(app, "items=1|")
+
+        app.terminate(); app.launchArguments.removeAll { $0 == "--native-quick-capture-intent-ui-fixture" }; app.launch()
+        boardEnabled(app.buttons["capture-open"], timeout: 40)
+        XCTAssertFalse(input.exists)
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title + " unsaved")).firstMatch.exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+
+    private func navigationReplayState(_ app: XCUIApplication, _ expected: String, task: Bool = false) {
+        let state = app.staticTexts[task ? "navigation-replay-task-state" : "navigation-replay-state"]
+        expectation(for: NSPredicate { _, _ in state.exists && state.label.contains(expected) }, evaluatedWith: state)
+        waitForExpectations(timeout: 40)
+    }
+    func testPrivateNavigationReplayURLTaskJoinsContentNativeSettlementAndDiagnostics() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-task"], timeout: 40)
+        boardTap(app, "navigation-replay-logging"); navigationReplayState(app, "mode=logging|")
+        boardTap(app, "navigation-replay-task"); navigationReplayState(app, "mode=captured|")
+        boardTap(app, "navigation-replay-request")
+        task454Preview(app, title: "Task454 first preview")
+        navigationReplayState(app, "phase=complete|settled=1|outcome=completed", task: true)
+        boardTap(app, "task-view-close")
+        boardTap(app, "navigation-replay-export"); navigationReplayState(app, "marker=true")
+        boardTap(app, "navigation-replay-restore-logging"); navigationReplayState(app, "mode=restore-logging|")
+    }
+    private func navigationReplayRetirementJoins(_ hold: String, reached: String, release: String) throws {
+        let app = try task454App("REPLAY_RETIRE")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-none"], timeout: 40)
+        boardTap(app, "navigation-replay-logging"); navigationReplayState(app, "mode=logging|")
+        boardTap(app, "navigation-replay-none"); navigationReplayState(app, "mode=captured|")
+        boardTap(app, "navigation-replay-" + hold)
+        boardTap(app, "navigation-replay-request"); navigationReplayState(app, reached)
+        boardTap(app, "navigation-replay-retire"); navigationReplayState(app, "retirement=draining")
+        let state = app.staticTexts["navigation-replay-state"]
+        let premature = expectation(for: NSPredicate { _, _ in state.exists && state.label.contains("retirement=retired") }, evaluatedWith: state)
+        premature.isInverted = true
+        waitForExpectations(timeout: 1)
+        XCTAssertTrue(state.label.contains("settled=0"), state.label)
+        boardTap(app, "navigation-replay-" + release)
+        navigationReplayState(app, "retirement=retired")
+        XCTAssertTrue(state.label.contains("settled=1|outcome=ignored"), state.label)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+    func testPrivateNavigationReplayRetirementJoinsInFlightNativeSubmission() throws {
+        try navigationReplayRetirementJoins("hold-submit", reached: "submitting=true", release: "release-submit")
+    }
+    func testPrivateNavigationReplayRetirementJoinsOriginalHostDiagnosticTail() throws {
+        try navigationReplayRetirementJoins("hold-tail", reached: "mode=tail-held|", release: "release-tail")
+    }
+
+    func testPrivateNavigationReplayRestartRevokesUnsubmittedRenderAndRequiresFreshExplicitRead() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-missing"], timeout: 40)
+        boardTap(app, "navigation-replay-hold-render")
+        boardTap(app, "navigation-replay-missing"); navigationReplayState(app, "mode=captured|")
+        boardTap(app, "navigation-replay-request"); navigationReplayState(app, "mode=render-held|")
+        boardTap(app, "navigation-replay-probe"); navigationReplayState(app, "mode=probe-admitting|")
+        boardTap(app, "navigation-replay-restart"); navigationReplayState(app, "mode=restarted|")
+        boardTap(app, "navigation-replay-release-render")
+        navigationReplayState(app, "phase=held|settled=0|outcome=none")
+        boardTap(app, "navigation-replay-probe"); navigationReplayState(app, "mode=probe-admitting|")
+        boardTap(app, "navigation-replay-request")
+        navigationReplayState(app, "phase=complete|settled=1|outcome=completed")
+        XCTAssertTrue(app.descendants(matching: .any)["inbox-scroll"].firstMatch.exists)
+    }
+    func testPrivateNavigationReplayRestartFlagCannotDiscardSubmittedOriginalHostDiagnostic() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-none"], timeout: 40)
+        boardTap(app, "navigation-replay-logging"); navigationReplayState(app, "mode=logging|")
+        boardTap(app, "navigation-replay-none"); navigationReplayState(app, "mode=captured|")
+        boardTap(app, "navigation-replay-hold-tail")
+        boardTap(app, "navigation-replay-request"); navigationReplayState(app, "mode=tail-held|")
+        boardTap(app, "navigation-replay-restart-required")
+        boardTap(app, "navigation-replay-restart"); navigationReplayState(app, "mode=restart-held|")
+        navigationReplayState(app, "submitted=true")
+        boardTap(app, "navigation-replay-release-tail")
+        navigationReplayState(app, "phase=held|settled=1|outcome=ignored")
+        boardTap(app, "navigation-replay-export"); navigationReplayState(app, "marker=true")
+        boardTap(app, "navigation-replay-clear-restart")
+        boardTap(app, "navigation-replay-request")
+        navigationReplayState(app, "phase=complete|settled=1|outcome=ignored")
+        boardTap(app, "navigation-replay-restore-logging"); navigationReplayState(app, "mode=restore-logging|")
+    }
+
+    func testPrivateNavigationReplayRejectsWrongTicketAndDefersLaterIngressToNextFrontier() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-task"], timeout: 40)
+        boardTap(app, "navigation-replay-hold-render")
+        boardTap(app, "navigation-replay-task"); navigationReplayState(app, "mode=captured|")
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        let originalTitleLabel = app.staticTexts.matching(identifier: "task-view-task-title").firstMatch.label
+        navigationReplayState(app, "mode=render-held|")
+        boardTap(app, "navigation-replay-task-wrong-ticket"); navigationReplayState(app, "mode=wrong-delivered|", task: true)
+        let state = app.staticTexts["navigation-replay-task-state"]
+        XCTAssertTrue(state.label.contains("wrongEligible=true|"), state.label)
+        XCTAssertTrue(state.label.contains("wrongWaiterACK=false|"), state.label)
+        XCTAssertTrue(state.label.contains("wrongRendered=false|"), state.label)
+        boardTap(app, "navigation-replay-task-second"); navigationReplayState(app, "captures=2", task: true)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "task-view-task-title").firstMatch.label, originalTitleLabel)
+        boardTap(app, "navigation-replay-task-release-render")
+        navigationReplayState(app, "phase=complete|settled=1|outcome=completed", task: true)
+        boardTap(app, "navigation-replay-task-probe"); navigationReplayState(app, "mode=probe-captured|", task: true)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "task-view-task-title").firstMatch.label, originalTitleLabel)
+        boardTap(app, "task-view-close")
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 second preview")
+        navigationReplayState(app, "phase=complete|settled=2|outcome=completed", task: true)
+        boardTap(app, "task-view-close")
+    }
+    func testPrivateNavigationReplaySameTargetInputsRequireDistinctActualContentEntries() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-task"], timeout: 40)
+        boardTap(app, "navigation-replay-hold-render")
+        boardTap(app, "navigation-replay-task"); navigationReplayState(app, "captures=1")
+        boardTap(app, "navigation-replay-same-task"); navigationReplayState(app, "captures=2")
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        let originalTitleLabel = app.staticTexts.matching(identifier: "task-view-task-title").firstMatch.label
+        navigationReplayState(app, "mode=render-held|phase=rendering|settled=0", task: true)
+        boardTap(app, "navigation-replay-task-release-render-next")
+        navigationReplayState(app, "mode=render-held|phase=rendering|settled=1", task: true)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "task-view-task-title").firstMatch.label, originalTitleLabel)
+        boardTap(app, "navigation-replay-task-release-render")
+        navigationReplayState(app, "phase=complete|settled=2|outcome=completed", task: true)
+        boardTap(app, "task-view-close")
+    }
+    func testPrivateNavigationReplayProjectMissingRepeatedInboxAndExactNone() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-task"], timeout: 40)
+        boardTap(app, "navigation-replay-hold-render")
+        for (index, input) in ["task", "project", "missing", "missing", "none"].enumerated() {
+            boardTap(app, "navigation-replay-" + input); navigationReplayState(app, "captures=\(index + 1)")
+        }
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        navigationReplayState(app, "mode=render-held|phase=rendering|settled=0", task: true)
+        boardTap(app, "navigation-replay-task-release-render-next")
+        navigationReplayState(app, "mode=render-held|phase=rendering|settled=1")
+        XCTAssertEqual(app.staticTexts["project-detail-title"].label, "Task454 project")
+        boardTap(app, "navigation-replay-release-render-next")
+        navigationReplayState(app, "mode=render-held|phase=rendering|settled=2")
+        XCTAssertTrue(app.descendants(matching: .any)["inbox-scroll"].firstMatch.exists)
+        func generation() -> Int {
+            let field = app.staticTexts["navigation-replay-state"].label.components(separatedBy: "|")
+                .first { $0.hasPrefix("inboxGeneration=") } ?? ""
+            return Int(field.replacingOccurrences(of: "inboxGeneration=", with: "")) ?? -1
+        }
+        let firstGeneration = generation(); XCTAssertGreaterThanOrEqual(firstGeneration, 0)
+        boardTap(app, "navigation-replay-release-render-next")
+        navigationReplayState(app, "mode=render-held|phase=rendering|settled=3")
+        XCTAssertGreaterThan(generation(), firstGeneration, "Already-visible Inbox requires another owned read and item-bound entry")
+        boardTap(app, "navigation-replay-release-render")
+        navigationReplayState(app, "phase=complete|settled=5|outcome=ignored")
+    }
+    func testPrivateNavigationReplayBackgroundRevokesHeldActualContentEntry() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-task"], timeout: 40)
+        boardTap(app, "navigation-replay-hold-render")
+        boardTap(app, "navigation-replay-task"); navigationReplayState(app, "mode=captured|")
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        navigationReplayState(app, "mode=render-held|", task: true)
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        navigationReplayState(app, "phase=held|settled=0|outcome=none", task: true)
+        boardTap(app, "navigation-replay-task-release-render")
+        boardTap(app, "navigation-replay-task-probe"); navigationReplayState(app, "mode=probe-admitting|", task: true)
+        navigationReplayState(app, "settled=0|outcome=none", task: true)
+        boardTap(app, "navigation-replay-task-request")
+        navigationReplayState(app, "phase=complete|settled=1|outcome=completed", task: true)
+        boardTap(app, "task-view-close")
+    }
+
+    func testPrivateNavigationReplayEditingRejectsHeldActualContentEntryWithoutSavingTask() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-task"], timeout: 40)
+        boardTap(app, "navigation-replay-hold-render")
+        boardTap(app, "navigation-replay-task"); navigationReplayState(app, "mode=captured|")
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        navigationReplayState(app, "mode=render-held|", task: true)
+        boardTap(app, "task-mode-edit")
+        let title = app.textFields["task-editor-title"]; boardEnabled(title)
+        replaceProjectNotesText(title, with: "Synthetic unsaved replay edit")
+        boardTap(app, "navigation-replay-task-release-render")
+        navigationReplayState(app, "phase=held|settled=0|outcome=none", task: true)
+        boardTap(app, "navigation-replay-task-probe"); navigationReplayState(app, "mode=probe-admitting|", task: true)
+        boardTap(app, "task-view-close"); boardTap(app, "task-editor-discard")
+        boardEnabled(app.buttons["navigation-replay-request"])
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        navigationReplayState(app, "phase=complete|settled=1|outcome=completed", task: true)
+        boardTap(app, "task-view-close")
+    }
+    func testPrivateNavigationReplayAdmissionAndFinishUncertaintyRequireOriginalExplicitRetry() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-none"], timeout: 40)
+        for (index, fault) in ["admission-after", "finish-before", "finish-after"].enumerated() {
+            boardTap(app, "navigation-replay-none"); navigationReplayState(app, "captures=\(index + 1)")
+            boardTap(app, "navigation-replay-" + fault)
+            boardTap(app, "navigation-replay-request")
+            navigationReplayState(app, "phase=held|settled=\(index)|")
+            navigationReplayState(app, "submitted=\(fault != "admission-after")")
+            boardTap(app, "navigation-replay-request")
+            let state = app.staticTexts["navigation-replay-state"]
+            let premature = expectation(for: NSPredicate { _, _ in state.exists && !state.label.contains("settled=\(index)|") }, evaluatedWith: state)
+            premature.isInverted = true
+            waitForExpectations(timeout: 1)
+            boardTap(app, "navigation-replay-release-native"); navigationReplayState(app, "mode=native-released|")
+            boardTap(app, "navigation-replay-request")
+            navigationReplayState(app, "phase=complete|settled=\(index + 1)|outcome=ignored")
+        }
+    }
+
+    func testPrivateNavigationReplaySpotlightConsentHoldsBeforeAdmissionAndRevokesWaitingRender() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-consent-on"], timeout: 40)
+        boardTap(app, "navigation-replay-consent-on"); navigationReplayState(app, "mode=consent-on|")
+        boardTap(app, "navigation-replay-search-task"); navigationReplayState(app, "captures=1")
+        for policy in ["consent-off", "consent-unknown", "consent-changing"] {
+            if policy != "consent-off" {
+                boardTap(app, "navigation-replay-consent-on"); navigationReplayState(app, "mode=consent-on|")
+            }
+            boardTap(app, "navigation-replay-" + policy); navigationReplayState(app, "mode=" + policy + "|")
+            boardTap(app, "navigation-replay-request")
+            navigationReplayState(app, "phase=held|settled=0|outcome=none")
+            boardTap(app, "navigation-replay-probe"); navigationReplayState(app, "mode=probe-captured|")
+            XCTAssertFalse(app.staticTexts["task-view-task-title"].exists)
+        }
+        boardTap(app, "navigation-replay-consent-on"); navigationReplayState(app, "mode=consent-on|")
+        boardTap(app, "navigation-replay-hold-render")
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        navigationReplayState(app, "mode=render-held|", task: true)
+        boardTap(app, "navigation-replay-task-consent-off"); navigationReplayState(app, "mode=consent-off|", task: true)
+        boardTap(app, "navigation-replay-task-release-render")
+        navigationReplayState(app, "phase=held|settled=0|outcome=none", task: true)
+        boardTap(app, "navigation-replay-task-probe"); navigationReplayState(app, "mode=probe-admitting|", task: true)
+        boardTap(app, "navigation-replay-task-consent-on"); navigationReplayState(app, "mode=consent-on|", task: true)
+        boardTap(app, "navigation-replay-task-request")
+        navigationReplayState(app, "phase=complete|settled=1|outcome=completed", task: true)
+        boardTap(app, "task-view-close")
+        boardTap(app, "navigation-replay-search-inbox"); navigationReplayState(app, "captures=2")
+        boardTap(app, "navigation-replay-search-invalid"); navigationReplayState(app, "captures=3")
+        boardTap(app, "navigation-replay-hold-render")
+        boardTap(app, "navigation-replay-request")
+        navigationReplayState(app, "mode=render-held|phase=rendering|settled=1")
+        XCTAssertTrue(app.descendants(matching: .any)["inbox-scroll"].firstMatch.exists)
+        boardTap(app, "navigation-replay-release-render")
+        navigationReplayState(app, "phase=complete|settled=3|outcome=ignored")
+        boardTap(app, "navigation-replay-restore-consent"); navigationReplayState(app, "mode=restore-consent|")
+    }
+    func testPrivateNavigationReplayContinuesEmptyNonfinalTerminalPages() throws {
+        let app = try task454App("REPLAY_TASK")
+        app.launchArguments.append("--native-navigation-replay-fixture")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["navigation-replay-terminal-frontier"], timeout: 40)
+        boardTap(app, "navigation-replay-terminal-frontier"); navigationReplayState(app, "captures=33")
+        boardTap(app, "navigation-replay-request")
+        navigationReplayState(app, "phase=complete|settled=33|outcome=ignored")
+        boardTap(app, "navigation-replay-task"); navigationReplayState(app, "captures=34")
+        boardTap(app, "navigation-replay-request"); task454Preview(app, title: "Task454 first preview")
+        navigationReplayState(app, "phase=complete|settled=34|outcome=completed", task: true)
+        boardTap(app, "task-view-close")
+    }
+
+    private func navigationCaptureApp(_ suffix: String) throws -> XCUIApplication {
+        let app = try task454App("NAV_" + suffix)
+        app.launchArguments.append("--native-navigation-capture-fixture")
+        app.launch(); navigationCaptureState(app, "ready=true")
+        return app
+    }
+    private func navigationCaptureState(_ app: XCUIApplication, _ expected: String, timeout: TimeInterval = 40) {
+        let state = app.staticTexts["navigation-capture-state"]
+        expectation(for: NSPredicate { _, _ in state.exists && state.label.contains(expected) }, evaluatedWith: state)
+        waitForExpectations(timeout: timeout)
+    }
+    private func navigationCaptureValue(_ app: XCUIApplication, _ name: String) -> String {
+        app.staticTexts["navigation-capture-state"].label.components(separatedBy: "|")
+            .first { $0.hasPrefix(name + "=") } ?? "missing"
+    }
+    private func navigationCaptureCompletion(_ app: XCUIApplication, _ mode: String) {
+        let state = app.staticTexts["navigation-capture-state"]
+        expectation(for: NSPredicate { _, _ in
+            state.exists && ["done-", "refused-", "failed-"].contains { state.label.contains("mode=" + $0 + mode + "|") }
+        }, evaluatedWith: state)
+        waitForExpectations(timeout: 40)
+        XCTAssertTrue(state.label.contains("mode=done-" + mode + "|"), state.label)
+    }
+    func testNavigationCaptureJoinsActualReadTailWithoutInvalidatingOriginalPreview() throws {
+        let app = try navigationCaptureApp("TAIL"); defer { app.terminate() }
+        boardTap(app, "navigation-capture-logging")
+        navigationCaptureState(app, "mode=logging|")
+        boardTap(app, "navigation-capture-tail")
+        navigationCaptureCompletion(app, "tail")
+        XCTAssertEqual(navigationCaptureValue(app, "accepted"), "accepted=3")
+        XCTAssertEqual(navigationCaptureValue(app, "confirmed"), "confirmed=2")
+        XCTAssertEqual(navigationCaptureValue(app, "stored"), "stored=2")
+        XCTAssertEqual(navigationCaptureValue(app, "premature"), "premature=false")
+        XCTAssertEqual(navigationCaptureValue(app, "joined"), "joined=true")
+        navigationCaptureState(app, "exact=true|ordered=true|")
+        navigationCaptureState(app, "stable=true|preview=true|")
+        navigationCaptureState(app, "originalRead=true|dispatches=1|reads=1|tails=1")
+        boardTap(app, "navigation-capture-export"); navigationCaptureState(app, "logMarker=true")
+        boardTap(app, "navigation-capture-restore-logging")
+    }
+    func testNavigationCaptureObservesSettledActualReadTail() throws {
+        let app = try navigationCaptureApp("TAIL"); defer { app.terminate() }
+        let state = app.staticTexts["navigation-capture-state"]
+        let observationID = UUID().uuidString.lowercased()
+        func observe(_ stage: String, _ predicate: NSPredicate) -> [String: Any] {
+            let expectation = XCTNSPredicateExpectation(predicate: predicate, object: state)
+            let result = XCTWaiter(delegate: nil).wait(for: [expectation], timeout: 40)
+            return ["stage": stage, "waitResult": result == .completed ? "completed" : "not-completed-\(result.rawValue)",
+                    "state": state.exists ? state.label : "missing"]
+        }
+        func attachJSON(_ value: [String: Any], name: String, frame: String) throws {
+            let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+            let text = String(decoding: data, as: UTF8.self)
+            let attachment = XCTAttachment(string: text)
+            attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+            print(frame + text)
+        }
+        let ready: [String: Any] = ["stage": "ready", "waitResult": "setup-helper", "state": state.label]
+        boardTap(app, "navigation-capture-logging")
+        let logging = observe("logging", NSPredicate { _, _ in state.exists && state.label.contains("mode=logging|") })
+        boardTap(app, "navigation-capture-tail")
+        let terminal = observe("terminal", NSPredicate { _, _ in
+            state.exists && ["done-", "refused-", "failed-"].contains { state.label.contains("mode=" + $0 + "tail|") }
+                && state.label.contains("|tails=1|")
+        })
+        let terminalName = "Navigation TAIL observer terminal " + observationID
+        try attachJSON(["schema": 2, "observationID": observationID, "checkpoint": terminal],
+                       name: terminalName, frame: "NAVIGATION_TAIL_OBSERVATION_TERMINAL ")
+        let shot = app.screenshot(), hierarchyText = app.debugDescription
+        let screenshotName = "Navigation TAIL observer screenshot " + observationID
+        let screenshot = XCTAttachment(screenshot: shot)
+        screenshot.name = screenshotName; screenshot.lifetime = .keepAlways; add(screenshot)
+        let hierarchyName = "Navigation TAIL observer hierarchy " + observationID
+        let hierarchy = XCTAttachment(string: hierarchyText)
+        hierarchy.name = hierarchyName; hierarchy.lifetime = .keepAlways; add(hierarchy)
+        app.terminate()
+        try attachJSON(["schema": 2, "observationID": observationID,
+                        "testCase": "FoundationUITests/testNavigationCaptureObservesSettledActualReadTail()",
+                        "library": app.launchArguments[1], "checkpoints": [ready, logging, terminal],
+                        "terminalName": terminalName, "screenshotName": screenshotName, "screenshotBytes": shot.pngRepresentation.count,
+                        "hierarchyName": hierarchyName, "hierarchy": hierarchyText,
+                        "complete": true, "terminated": app.state == .notRunning],
+                       name: "Navigation TAIL observer complete " + observationID, frame: "NAVIGATION_TAIL_OBSERVATION_COMPLETE ")
+    }
+    func testNavigationCaptureTransfersOriginalPendingHeadBeforeLaterAndACKArrivals() throws {
+        let app = try navigationCaptureApp("HEAD"); defer { app.terminate() }
+        boardTap(app, "navigation-capture-head")
+        navigationCaptureCompletion(app, "head")
+        navigationCaptureState(app, "accepted=4|confirmed=4|stored=4|exact=true|ordered=true|joined=true|stable=true|preview=true")
+        navigationCaptureState(app, "dispatches=1|reads=1|tails=1")
+        navigationCaptureState(app, "pending=false|buffered=0|failed=false")
+    }
+    func testNavigationCaptureRetryRetainsExactFirstEventAndDoesNotDispatchLaterCallbacks() throws {
+        let app = try navigationCaptureApp("RETRY"); defer { app.terminate() }
+        boardTap(app, "navigation-capture-fault")
+        navigationCaptureState(app, "accepted=1|confirmed=0|")
+        navigationCaptureState(app, "failed=true")
+        boardTap(app, "navigation-capture-second")
+        navigationCaptureState(app, "accepted=2|confirmed=0|")
+        navigationCaptureState(app, "buffered=2|failed=true")
+        boardTap(app, "navigation-capture-release-fault")
+        let state = app.staticTexts["navigation-capture-state"]
+        expectation(for: NSPredicate { _, _ in
+            state.exists && (state.label.hasPrefix("held|") || state.label.hasPrefix("unavailable|"))
+        }, evaluatedWith: state)
+        waitForExpectations(timeout: 40)
+        XCTAssertEqual(navigationCaptureValue(app, "confirmed"), "confirmed=2")
+        XCTAssertEqual(navigationCaptureValue(app, "stored"), "stored=2")
+        XCTAssertEqual(navigationCaptureValue(app, "exact"), "exact=true")
+        XCTAssertEqual(navigationCaptureValue(app, "failed"), "failed=false")
+        navigationCaptureState(app, "dispatches=0|reads=0|tails=0")
+        navigationCaptureState(app, "pending=false|buffered=0|failed=false")
+    }
+    func testNavigationCaptureDirtyPreconditionRefusesBeforeStickyAuthority() throws {
+        let app = try navigationCaptureApp("REFUSAL"); defer { app.terminate() }
+        boardTap(app, "navigation-capture-dirty")
+        boardTap(app, "navigation-capture-reserve")
+        navigationCaptureState(app, "refused|")
+        navigationCaptureState(app, "accepted=0|confirmed=0|stored=0")
+        boardTap(app, "navigation-capture-clean")
+        boardTap(app, "navigation-capture-reserve")
+        navigationCaptureState(app, "held|")
+        boardTap(app, "navigation-capture-second")
+        navigationCaptureState(app, "accepted=1|confirmed=1|stored=1|exact=true")
+        navigationCaptureState(app, "dispatches=0|reads=0|tails=0")
+    }
+    func testNavigationCaptureColdReservationCapturesRawSpotlightBeforeHostWithoutReplay() throws {
+        let app = try navigationCaptureApp("COLD"); defer { app.terminate() }
+        boardTap(app, "navigation-capture-reserve"); navigationCaptureState(app, "held|")
+        app.terminate()
+        app.launchEnvironment["MINDWTR_NAVIGATION_COLD_SPOTLIGHT"] = "1"
+        app.launch()
+        navigationCaptureState(app, "accepted=1|confirmed=1|stored=1|exact=true|ordered=true")
+        navigationCaptureState(app, "dispatches=0|reads=0|tails=0|beforeHost=1")
+        navigationCaptureState(app, "pending=false|buffered=0|failed=false")
+        XCTAssertFalse(app.staticTexts["task-view-task-title"].exists)
+    }
+
+    func testNavigationCaptureRealColdURLIsRetainedBeforeFirstHostWithoutReplay() throws {
+        let app = try navigationCaptureApp("COLD_URL"); defer { app.terminate() }
+        boardTap(app, "navigation-capture-reserve"); navigationCaptureState(app, "held|")
+        app.terminate()
+        app.launchEnvironment["MINDWTR_NAVIGATION_COLD_URL"] = "1"
+        try task454Open(app, "mindwtr-native-dev://open?task=task454-b&source=e%CC%81")
+        navigationCaptureState(app, "ready=true|accepted=1|confirmed=1|stored=1|exact=true|ordered=true")
+        navigationCaptureState(app, "dispatches=0|reads=0|tails=0|beforeHost=1|coldURL=true")
+        navigationCaptureState(app, "pending=false|buffered=0|failed=false")
+        XCTAssertFalse(app.staticTexts["task-view-task-title"].exists)
+    }
+
+    private func reminderHandoverApp(_ suffix: String) throws -> XCUIApplication {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", try task371Library(suffix, prefix: "MINDWTR_REMINDER_HANDOVER_UI_"),
+            "--native-reminder-handover-fixture", "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        app.launch()
+        boardEnabled(app.buttons["reminder-handover-wrapper"], timeout: 60)
+        reminderHandoverState(app, "startupReady=true")
+        return app
+    }
+    private func reminderHandoverState(_ app: XCUIApplication, _ value: String, timeout: TimeInterval = 30) {
+        let state = app.staticTexts["reminder-handover-state"]
+        var lastLabel: String?
+        var printedChanges = 0
+        expectation(for: NSPredicate { _, _ in
+            guard state.exists else { return false }
+            let label = state.label
+            if label != lastLabel {
+                lastLabel = label
+                if printedChanges < 32 {
+                    print("Reminder handover wait=\(String(value.prefix(128))) state=\(String(label.prefix(2048)))")
+                    printedChanges += 1
+                }
+            }
+            return label.contains(value)
+        }, evaluatedWith: state)
+        waitForExpectations(timeout: timeout)
+    }
+    private func reminderHandoverCount(_ app: XCUIApplication, _ name: String) -> String {
+        app.staticTexts["reminder-handover-state"].label.components(separatedBy: "|")
+            .first { $0.hasPrefix(name + "=") } ?? "missing"
+    }
+    private func reminderHandoverWrapper(_ app: XCUIApplication) {
+        boardTap(app, "reminder-handover-wrapper")
+        reminderHandoverState(app, "wrapper-retry-held")
+        reminderHandoverState(app, "pending=1|wrappers=1|publishing=true")
+        reminderHandoverState(app, "callbacks=1|once=true")
+    }
+    private func reminderHandoverEnableLogging(_ app: XCUIApplication) {
+        boardTap(app, "reminder-handover-logging")
+        reminderHandoverState(app, "logging-enabled")
+    }
+    private func reminderHandoverExport(_ app: XCUIApplication, marker: Bool) {
+        boardTap(app, "reminder-handover-export")
+        reminderHandoverState(app, "log-exported")
+        reminderHandoverState(app, "logMarker=\(marker)")
+    }
+    private func reminderHandoverRestoreLogging(_ app: XCUIApplication) {
+        boardTap(app, "reminder-handover-restore-logging")
+        reminderHandoverState(app, "logging-restored")
+    }
+    func testReminderHandoverJoinsActualWrapperRetryAndKeepsFirstCallbackBytes() throws {
+        let app = try reminderHandoverApp("WRAPPER"); defer { app.terminate() }
+        reminderHandoverEnableLogging(app)
+        reminderHandoverWrapper(app)
+        boardTap(app, "reminder-handover-request")
+        reminderHandoverState(app, "preparing|")
+        boardTap(app, "reminder-handover-duplicate")
+        reminderHandoverState(app, "callbacks=2|once=true")
+        reminderHandoverState(app, "handover=false")
+        reminderHandoverExport(app, marker: false)
+        XCTAssertTrue(app.staticTexts["reminder-handover-state"].label.contains("ready=true|same=true|fenced=true"))
+        boardTap(app, "reminder-handover-release-wrapper")
+        reminderHandoverState(app, "held|", timeout: 60)
+        reminderHandoverState(app, "pending=0|wrappers=0|publishing=false")
+        reminderHandoverState(app, "first=true")
+        reminderHandoverState(app, "handover=true|stored=1|storedFirst=true")
+        reminderHandoverExport(app, marker: true)
+        reminderHandoverRestoreLogging(app)
+    }
+    func testReminderHandoverJoinsRealCoreReceiptTailAndRetainsColdReceiptsBeyond128() throws {
+        let app = try reminderHandoverApp("RECEIPT"); defer { app.terminate() }
+        boardTap(app, "reminder-handover-receipt")
+        reminderHandoverState(app, "core-receipt-held")
+        boardTap(app, "reminder-handover-request")
+        reminderHandoverState(app, "preparing|core-receipt-held|ready=true|same=true|fenced=true|held=false|lease=true")
+        reminderHandoverState(app, "handover=false")
+        boardTap(app, "reminder-handover-release-receipt")
+        reminderHandoverState(app, "held|", timeout: 60)
+        reminderHandoverState(app, "lease=false|retry=false")
+        boardTap(app, "reminder-handover-duplicate-receipt")
+        reminderHandoverState(app, "outcome=known-terminal")
+        reminderHandoverState(app, "stored=0|")
+        boardTap(app, "reminder-handover-burst")
+        reminderHandoverState(app, "stored=135|", timeout: 90)
+        reminderHandoverState(app, "callbacks=137|once=true")
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["reminder-handover-probe-receipt"], timeout: 60)
+        reminderHandoverState(app, "held=true")
+        reminderHandoverState(app, "startupNil=true")
+        reminderHandoverState(app, "stored=135|", timeout: 60)
+        boardTap(app, "reminder-handover-probe-receipt")
+        reminderHandoverState(app, "receipt-retained")
+        XCTAssertTrue(app.staticTexts["reminder-handover-state"].label.contains("dispatches=0"))
+    }
+    func testReminderHandoverRoutesCallbackCreatedBeforeReservationThroughOriginalHeldOwner() throws {
+        let app = try reminderHandoverApp("ENTRY"); defer { app.terminate() }
+        reminderHandoverWrapper(app)
+        boardTap(app, "reminder-handover-entry")
+        reminderHandoverState(app, "callback-entry-held")
+        boardTap(app, "reminder-handover-request")
+        boardTap(app, "reminder-handover-release-wrapper")
+        reminderHandoverState(app, "handover=true|stored=1|", timeout: 60)
+        reminderHandoverState(app, "callbacks=1|once=false")
+        boardTap(app, "reminder-handover-release-entry")
+        reminderHandoverState(app, "callbacks=2|once=true")
+        reminderHandoverState(app, "stored=2|")
+        XCTAssertTrue(app.staticTexts["reminder-handover-state"].label.contains("dispatches=0"))
+    }
+    func testReminderHandoverPresealDirtyRefusalKeepsOriginalEnvelopeAndReadyHost() throws {
+        let app = try reminderHandoverApp("REFUSAL"); defer { app.terminate() }
+        reminderHandoverEnableLogging(app)
+        reminderHandoverWrapper(app)
+        boardTap(app, "reminder-handover-dirty")
+        boardTap(app, "reminder-handover-request")
+        reminderHandoverState(app, "refused|dirty|ready=true|same=true|fenced=false")
+        reminderHandoverState(app, "pending=1|wrappers=1|publishing=true")
+        reminderHandoverExport(app, marker: false)
+        boardTap(app, "reminder-handover-clean-and-request")
+        reminderHandoverState(app, "preparing|")
+        boardTap(app, "reminder-handover-dirty")
+        boardTap(app, "reminder-handover-release-wrapper")
+        reminderHandoverState(app, "refused|dirty|ready=true|same=true|fenced=false", timeout: 60)
+        reminderHandoverState(app, "handover=false")
+        reminderHandoverState(app, "lease=false|retry=false")
+        boardTap(app, "reminder-handover-clean-and-request")
+        reminderHandoverState(app, "handover=true|stored=1|storedFirst=true", timeout: 60)
+        reminderHandoverExport(app, marker: true)
+        reminderHandoverRestoreLogging(app)
+    }
+    func testReminderHandoverPostsealFailureStaysHeldAndColdReacquiresOriginalSource() throws {
+        let app = try reminderHandoverApp("COLD"); defer { app.terminate() }
+        reminderHandoverWrapper(app)
+        boardTap(app, "reminder-handover-target-failure")
+        boardTap(app, "reminder-handover-request")
+        boardTap(app, "reminder-handover-release-wrapper")
+        reminderHandoverState(app, "unavailable|", timeout: 60)
+        reminderHandoverState(app, "handover=false")
+        boardTap(app, "reminder-handover-duplicate")
+        reminderHandoverState(app, "pending=1|wrappers=0|publishing=false")
+        reminderHandoverState(app, "callbacks=2|once=true")
+        XCTAssertTrue(app.staticTexts["reminder-handover-state"].label.contains("ready=true|same=true|fenced=true"))
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["task-view-close"], timeout: 60)
+        boardTap(app, "task-view-close")
+        boardEnabled(app.buttons["reminder-handover-wrapper"], timeout: 60)
+        reminderHandoverState(app, "startupReady=true")
+        reminderHandoverState(app, "held=true")
+        reminderHandoverState(app, "replayEnabled=true", timeout: 60)
+        reminderHandoverState(app, "dispatches=1")
+    }
+    func testReminderHandoverColdCompleteHeaderStillReacquiresLiveOriginalFinalAck() throws {
+        let app = try reminderHandoverApp("COLD_ACK"); defer { app.terminate() }
+        reminderHandoverEnableLogging(app)
+        let originalLogging = reminderHandoverCount(app, "loggingOriginal") == "loggingOriginal=true"
+        reminderHandoverWrapper(app)
+        boardTap(app, "reminder-handover-before-ack")
+        boardTap(app, "reminder-handover-request")
+        boardTap(app, "reminder-handover-release-wrapper")
+        reminderHandoverState(app, "import-before-final-ack", timeout: 60)
+        reminderHandoverState(app, "handover=false")
+        reminderHandoverExport(app, marker: false)
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["task-view-close"], timeout: 60)
+        boardTap(app, "task-view-close")
+        boardEnabled(app.buttons["reminder-handover-wrapper"], timeout: 60)
+        reminderHandoverState(app, "startupReady=true")
+        reminderHandoverState(app, "held=true")
+        reminderHandoverState(app, "replayEnabled=true", timeout: 60)
+        reminderHandoverState(app, "dispatches=1")
+        reminderHandoverExport(app, marker: true)
+        boardTap(app, originalLogging ? "reminder-handover-logging-on" : "reminder-handover-logging-off")
+        reminderHandoverState(app, "logging-restored")
+    }
+
+    func testReminderHandoverColdPersonalReplayWaitsForUnlockAndProcessesFreshCallback() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", try task371Library("COLD_PERSONAL_REPLAY", prefix: "MINDWTR_REMINDER_HANDOVER_UI_"),
+            "--native-reminder-handover-fixture", "--native-app-lock-auth", "success,cancel,success,success",
+            "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["reminder-handover-controls"], timeout: 60)
+        boardTap(app, "reminder-handover-controls")
+        task97Open(app)
+        XCTAssertEqual(task102LockToggle(app).value as? String, "0", "Use a fresh root-owned isolated library")
+        task102LockToggle(app).tap()
+        boardTap(app, "general-back"); boardTap(app, "settings-back")
+        boardTap(app, "reminder-handover-controls")
+        boardTap(app, "reminder-handover-request")
+        reminderHandoverState(app, "held|", timeout: 60)
+        app.terminate()
+        let authIndex = try XCTUnwrap(app.launchArguments.firstIndex(of: "--native-app-lock-auth"))
+        app.launchArguments[authIndex + 1] = "cancel,success,success"
+        app.launch()
+        task102Gate(app)
+        reminderHandoverState(app, "replayEnabled=false")
+        reminderHandoverState(app, "dispatches=0")
+        boardTap(app, "reminder-handover-held-dismiss")
+        reminderHandoverState(app, "confirmed=1", timeout: 60)
+        reminderHandoverState(app, "pending=0|wrappers=0|publishing=false", timeout: 60)
+        reminderHandoverState(app, "dispatches=0")
+        boardTap(app, "app-lock-unlock")
+        reminderHandoverState(app, "held=true", timeout: 60)
+        reminderHandoverState(app, "replayEnabled=true", timeout: 60)
+        reminderHandoverState(app, "dispatches=1", timeout: 60)
+        reminderHandoverState(app, "lease=false|retry=false", timeout: 60)
+        XCUIDevice.shared.press(.home); app.activate()
+        boardEnabled(app.buttons["capture-open"], timeout: 60)
+        reminderHandoverState(app, "dispatches=1")
+    }
+
+    func testReminderHandoverCancelledOriginalActionKeepsRetryDebtWithoutSeal() throws {
+        let app = try reminderHandoverApp("CANCEL"); defer { app.terminate() }
+        boardTap(app, "reminder-handover-receipt")
+        reminderHandoverState(app, "core-receipt-held")
+        boardTap(app, "reminder-handover-request")
+        reminderHandoverState(app, "preparing|")
+        boardTap(app, "reminder-handover-cancel")
+        boardTap(app, "reminder-handover-release-receipt")
+        reminderHandoverState(app, "refused|", timeout: 60)
+        reminderHandoverState(app, "ready=true|same=true|fenced=false|held=false|lease=false|retry=true")
+        reminderHandoverState(app, "handover=false")
+        reminderHandoverState(app, "callbacks=1|once=true")
+    }
+
+    func testReminderHandoverCommonWakeAndEntityAdmissionsStayFenced() throws {
+        let app = try reminderHandoverApp("ADMISSION"); defer { app.terminate() }
+        reminderHandoverWrapper(app)
+        boardTap(app, "reminder-handover-request")
+        reminderHandoverState(app, "preparing|")
+        let admissions = reminderHandoverCount(app, "admissions"), entities = reminderHandoverCount(app, "entities")
+        boardTap(app, "reminder-handover-retire")
+        reminderHandoverState(app, "retirement=personal:refused")
+        boardTap(app, "reminder-handover-wake")
+        let reopened = expectation(for: NSPredicate { _, _ in
+            self.reminderHandoverCount(app, "admissions") != admissions || self.reminderHandoverCount(app, "entities") != entities
+        }, evaluatedWith: nil)
+        reopened.isInverted = true; waitForExpectations(timeout: 1)
+        XCTAssertTrue(app.staticTexts["reminder-handover-state"].label.contains("ready=true|same=true|fenced=true"))
+        let syncAdmissions = try XCTUnwrap(Int(reminderHandoverCount(app, "syncAdmissions").replacingOccurrences(of: "syncAdmissions=", with: "")))
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10))
+        app.activate()
+        XCTAssertEqual(reminderHandoverCount(app, "admissions"), admissions)
+        XCTAssertEqual(reminderHandoverCount(app, "entities"), entities)
+        boardEnabled(app.buttons["reminder-handover-release-wrapper"], timeout: 30)
+        reminderHandoverState(app, "syncPending=true")
+        XCTAssertEqual(reminderHandoverCount(app, "syncAdmissions"), "syncAdmissions=\(syncAdmissions)")
+        XCTAssertTrue(app.staticTexts["reminder-handover-state"].label.contains("ready=true|same=true|fenced=true"))
+        boardTap(app, "reminder-handover-release-wrapper")
+        reminderHandoverState(app, "handover=true", timeout: 60)
+        reminderHandoverState(app, "syncPending=false|syncAdmissions=\(syncAdmissions + 1)", timeout: 60)
+    }
+
+    func testReminderHandoverOrdinaryRetryPublishesBothRetainedEnvelopesOnce() throws {
+        let app = try reminderHandoverApp("PERSISTENT"); defer { app.terminate() }
+        boardTap(app, "reminder-handover-persistent")
+        reminderHandoverState(app, "publisher-failure-held")
+        reminderHandoverState(app, "pending=1|wrappers=0|publishing=true")
+        boardTap(app, "reminder-handover-second")
+        boardTap(app, "reminder-handover-duplicate")
+        reminderHandoverState(app, "pending=2|wrappers=0|publishing=true")
+        reminderHandoverState(app, "confirmed=0|callbacks=3|once=true")
+        boardTap(app, "reminder-handover-release-persistent")
+        reminderHandoverState(app, "storage-usable")
+        XCTAssertTrue(app.staticTexts["reminder-handover-state"].label.contains("pending=2|wrappers=0|publishing=true"))
+        boardTap(app, "reminder-handover-release-failure")
+        reminderHandoverState(app, "pending=2|wrappers=0|publishing=false")
+        reminderHandoverState(app, "nativePending=1")
+        boardEnabled(app.buttons["persistence-retry"], timeout: 30)
+        boardTap(app, "reminder-handover-controls")
+        boardTap(app, "persistence-retry")
+        boardTap(app, "task-view-close")
+        boardTap(app, "task-view-close")
+        boardTap(app, "reminder-handover-controls")
+        reminderHandoverState(app, "pending=0|wrappers=0|publishing=false", timeout: 60)
+        reminderHandoverState(app, "first=true|confirmed=2|callbacks=3|once=true")
+        reminderHandoverState(app, "lease=false|retry=false")
+        boardTap(app, "reminder-handover-request")
+        reminderHandoverState(app, "handover=true", timeout: 60)
+    }
+
+    func testReminderHandoverSimulatorFixtureRequiresExplicitFlagAndIsolatedSelection() throws {
+        #if targetEnvironment(simulator)
+        guard ProcessInfo.processInfo.environment["MINDWTR_REMINDER_HANDOVER_OWNED_SIMULATOR"] == "1" else {
+            throw XCTSkip("Only a fresh task-owned simulator may exercise its standard empty App container")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication(); defer { app.terminate() }
+        let library = try task371Library("GATES", prefix: "MINDWTR_REMINDER_HANDOVER_UI_")
+        app.launchArguments = ["--native-ui-test-library", library]
+        app.launch(); boardEnabled(app.buttons["tab-inbox"], timeout: 60)
+        XCTAssertFalse(app.buttons["reminder-handover-request"].exists, "Missing explicit flag cannot enable the fixture")
+        app.terminate()
+        app.launchArguments = ["--native-reminder-handover-fixture"]
+        app.launch(); boardEnabled(app.buttons["tab-inbox"], timeout: 60)
+        XCTAssertFalse(app.buttons["reminder-handover-request"].exists, "Standard selection cannot enable the fixture")
+        app.terminate()
+        app.launchArguments = ["--native-ui-test-library", library, "--native-reminder-handover-fixture"]
+        app.launch(); boardEnabled(app.buttons["reminder-handover-wrapper"], timeout: 60)
+        reminderHandoverState(app, "ready=true")
+        #else
+        throw XCTSkip("The standard-container gate case is confined to a fresh task-owned simulator")
+        #endif
+    }
+
+    private func workspaceRetirementApp(_ suffix: String) throws -> XCUIApplication {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", try task371Library(suffix, prefix: "MINDWTR_SANDBOX_RETIRE_UI_"),
+            "--native-workspace-retirement-fixture", "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        app.launch()
+        boardEnabled(app.buttons["workspace-retirement-hold"], timeout: 60)
+        return app
+    }
+    private func workspaceRetirementState(_ app: XCUIApplication, containing value: String, timeout: TimeInterval = 30) {
+        let state = app.staticTexts["workspace-retirement-state"]
+        expectation(for: NSPredicate { _, _ in state.exists && state.label.contains(value) }, evaluatedWith: state)
+        waitForExpectations(timeout: timeout)
+    }
+    func testWorkspaceRetirementWaitsForOriginalReadTailAndKeepsScopeExplicit() throws {
+        let app = try workspaceRetirementApp("READ_TAIL")
+        boardTap(app, "workspace-retirement-hold")
+        workspaceRetirementState(app, containing: "read-returned")
+        boardTap(app, "workspace-retirement-request")
+        workspaceRetirementState(app, containing: "draining|pending|read-returned|none")
+        let premature = expectation(for: NSPredicate { _, _ in
+            app.staticTexts["workspace-retirement-state"].label.contains("APP_HOST_RETIREMENT_ONLY")
+        }, evaluatedWith: nil)
+        premature.isInverted = true
+        waitForExpectations(timeout: 1)
+        boardTap(app, "workspace-retirement-release")
+        workspaceRetirementState(app, containing: "retired|retired|read-finished|APP_HOST_RETIREMENT_ONLY", timeout: 60)
+        XCTAssertFalse(app.buttons["workspace-retirement-hold"].isEnabled)
+        boardTap(app, "workspace-retirement-picker")
+        workspaceRetirementState(app, containing: "picker-captures=0")
+        boardTap(app, "workspace-retirement-intent")
+        workspaceRetirementState(app, containing: "late-intent-captures=1;pending=true;dispatches=0;wakeChanged=false")
+    }
+    func testWorkspaceRetirementRefusesPendingPersonalDraft() throws {
+        let app = try workspaceRetirementApp("DIRTY")
+        boardTap(app, "workspace-retirement-dirty")
+        workspaceRetirementState(app, containing: "dirty-draft")
+        boardTap(app, "workspace-retirement-request")
+        workspaceRetirementState(app, containing: "personal|refused|dirty-draft|none")
+        XCTAssertTrue(app.buttons["workspace-retirement-hold"].isEnabled)
+    }
+    func testWorkspaceRetirementOrdinaryCloseIsNotAnAcknowledgedRetirement() throws {
+        let app = try workspaceRetirementApp("CLOSED")
+        boardTap(app, "workspace-retirement-close")
+        workspaceRetirementState(app, containing: "ordinary-close-armed")
+        boardTap(app, "workspace-retirement-request")
+        workspaceRetirementState(app, containing: "unavailable|pending|host-closed|none", timeout: 60)
+        XCTAssertFalse(app.buttons["workspace-retirement-hold"].isEnabled)
+        boardTap(app, "workspace-retirement-request")
+        workspaceRetirementState(app, containing: "unavailable|pending|host-closed|none")
+    }
+    func testWorkspaceRetirementNativeRefusalRestoresReadAndSearchBeforeExactCleanup() throws {
+        let app = try workspaceRetirementApp("REFUSED")
+        boardTap(app, "workspace-retirement-hold")
+        workspaceRetirementState(app, containing: "read-returned")
+        boardTap(app, "workspace-retirement-native-draft")
+        workspaceRetirementState(app, containing: "native-draft-armed")
+        boardTap(app, "workspace-retirement-request")
+        boardTap(app, "workspace-retirement-release")
+        workspaceRetirementState(app, containing: "personal|refused|native-draft-checkpointed|none", timeout: 60)
+        workspaceRetirementState(app, containing: "current=true|wakeRestored=true")
+        boardTap(app, "workspace-retirement-native-cleanup")
+        workspaceRetirementState(app, containing: "native-draft-cleaned")
+        boardTap(app, "workspace-retirement-request")
+        workspaceRetirementState(app, containing: "retired|retired|native-draft-cleaned|APP_HOST_RETIREMENT_ONLY", timeout: 60)
+    }
+
     private var task586Application: XCUIApplication?
     private var task601Application: XCUIApplication?
     private var task680Application: XCUIApplication?
@@ -135,7 +1180,7 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
         let settings = app.buttons["menu-settings"]
         boardEnabled(settings)
-        if !settings.isHittable {
+        if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
             task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
         }
         boardTap(app, "menu-settings")
@@ -207,7 +1252,7 @@ final class FoundationUITests: XCTestCase {
         task496Command(app, "busy")
         task496Wait(app) { ($0["cancelled"] as? Int) == 1 && ($0["draining"] as? Bool) == false && ($0["owner"] as? Bool) == false }
         XCTAssertEqual((task496State(app)["runs"] as? [Any])?.count, 2)
-        // The real shared task writer saves while Stop has retired the watcher; there is no App due callback.
+
         task496Command(app, "save")
         task496Wait(app) { ($0["saves"] as? Int) == 1 && ($0["busy"] as? Bool) == true }
         task496Command(app, "idle")
@@ -311,9 +1356,9 @@ final class FoundationUITests: XCTestCase {
         task442Reveal(app, toggle, in: app.scrollViews["calendar-settings-scroll"])
         XCTAssertEqual(toggle.value as? String, "0")
         XCTAssertFalse(app.staticTexts["calendar-settings-error"].exists)
-        // A separate accepted target edit is held, then cancelled through the actual App button.
+
         app.terminate(); app.launch()
-        // Reopening the fixture deliberately starts from its in-memory enabled model.
+
         task496OpenSettings(app)
         task496Command(app, "hold")
         let target = app.buttons["calendar-push-target-0"]
@@ -432,7 +1477,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["persistence-retry"].exists)
     }
 
-    // Warm fixed inputs exercise deferred model ingress; cold cases use the actual OS URL callback.
+
     private func task454App(_ suffix: String, delivery: String = "") throws -> XCUIApplication {
         let library = try task371Library(suffix, prefix: "MINDWTR_ENTITY_UI_")
         continueAfterFailure = false
@@ -539,7 +1584,7 @@ final class FoundationUITests: XCTestCase {
         for _ in 0..<2 {
             boardEnabled(app.buttons["tab-menu"], timeout: 40)
             boardTap(app, "tab-menu")
-            // Holding More beyond the echo window makes the next identical event a fresh delivery.
+
             XCTAssertFalse(app.staticTexts.matching(identifier: "task-view-task-title").firstMatch.waitForExistence(timeout: 2))
             boardTap(app, "menu-dismiss")
             task454Preview(app, title: "Task454 first preview")
@@ -575,10 +1620,10 @@ final class FoundationUITests: XCTestCase {
         try task454Open(app, "mindwtr-native-dev://open?task=task454-a"); defer { app.terminate() }
         boardEnabled(app.buttons["tab-menu"], timeout: 40)
         let title = app.staticTexts.matching(identifier: "task-view-task-title").firstMatch
-        // A retry triggered by its own busy release would exhaust both failures and open here.
+
         XCTAssertFalse(title.waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["persistence-retry"].exists)
-        // Each of the two injected failures may need its own external foreground wake.
+
         for _ in 0..<2 {
             XCUIDevice.shared.press(.home); app.activate()
             if title.waitForExistence(timeout: 3) { break }
@@ -631,7 +1676,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(failure.waitForExistence(timeout: 3))
         boardTap(app, "menu-dismiss")
         XCTAssertTrue(failure.waitForExistence(timeout: 40))
-        // Two injected reads fail. A self-wake would immediately succeed on the third and erase this error.
+
         let disappeared = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: failure)
         disappeared.isInverted = true
         waitForExpectations(timeout: 3)
@@ -698,7 +1743,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["persistence-retry"].exists)
     }
 
-    // The harness stages only isolated libraries and durable synthetic inbox records while the app is stopped.
+
     func testNativeReminderResponseColdOpenUsesPreviewAndDoesNotReplayFinishedOpen() throws {
         let library = try task371Library("TASK", prefix: "MINDWTR_RESPONSE_UI_")
         continueAfterFailure = false
@@ -735,8 +1780,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["review-guide-close"].exists)
     }
 
-    // These cases require a saved-WebDAV library in the flow's state, staged externally
-    // through the real settings writer. No backend address or credential lives here.
+
     private func task371Library(_ suffix: String, prefix: String = "MINDWTR_UNLOCK_UI_") throws -> String {
         guard let raw = ProcessInfo.processInfo.environment[prefix + suffix + "_LIBRARY"] else {
             throw XCTSkip("An externally staged WebDAV library in the requested state is required")
@@ -753,8 +1797,10 @@ final class FoundationUITests: XCTestCase {
             boardEnabled(app.buttons["tab-menu"], timeout: 30)
             boardTap(app, "tab-menu")
             let settings = app.buttons["menu-settings"]
-            if !settings.isHittable {
-                revealPagedElement(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
+            boardEnabled(settings, timeout: 30)
+            let menuScroll = app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch
+            if !settings.isHittable && menuScroll.exists {
+                revealPagedElement(app, settings, in: menuScroll)
             }
             boardTap(app, "menu-settings")
         }
@@ -873,7 +1919,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["sync-encryption-open-enable"].exists)
         app.terminate(); app.launch()
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
-        if !app.buttons["menu-settings"].isHittable {
+        if !app.buttons["menu-settings"].isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
             revealPagedElement(app, app.buttons["menu-settings"], in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
         }
         boardTap(app, "menu-settings")
@@ -960,8 +2006,8 @@ final class FoundationUITests: XCTestCase {
         }
         revealPagedElement(app, app.buttons["sync-encryption-enable"], in: app.scrollViews["sync-screen"])
         boardTap(app, "sync-encryption-enable")
-        // Root's one-shot HTTP failure must leave a real unfinished transition.
-        // A normally completed Enable has no Abandon opener and fails this check.
+
+
         boardEnabled(app.buttons["sync-encryption-open-abandon"], timeout: 60)
         for name in encryptionFields("enable") {
             let field = app.secureTextFields["sync-encryption-" + name]
@@ -976,7 +2022,7 @@ final class FoundationUITests: XCTestCase {
         revealPagedElement(app, app.buttons["sync-encryption-cancel"], in: app.scrollViews["sync-screen"])
         boardTap(app, "sync-encryption-cancel")
         boardEnabled(app.buttons["sync-encryption-open-abandon"], timeout: 30)
-        // Preserve the unfinished journal and bytes for root's external snapshot.
+
     }
 
     func testNativeEncryptionAbandonCancelAndMixedRecheckKeepLocationPaused() throws {
@@ -1023,7 +2069,7 @@ final class FoundationUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", library, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch(); defer { app.terminate() }
-        // Root has conditionally finished the peer's canonical ciphertext before launch.
+
         task371OpenSync(app, openFlow: false)
         let recheck = app.buttons["sync-encryption-recheck"]
         boardEnabled(recheck, timeout: 30)
@@ -1039,7 +2085,7 @@ final class FoundationUITests: XCTestCase {
         for id in ["open-enable", "open-change", "open-disable"] {
             XCTAssertFalse(app.buttons["sync-encryption-" + id].exists)
         }
-        // Leave Unlock unsubmitted so root can verify discovery wrote no plaintext.
+
     }
 
     func testNativeEncryptionLocalEnableSurvivesColdRestartWithoutBackend() throws {
@@ -1251,7 +2297,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["sync-reload"].isEnabled)
         for name in fields { XCTAssertTrue(app.secureTextFields["sync-encryption-" + name].waitForNonExistence(timeout: 10)) }
         XCTAssertFalse(app.staticTexts["synthetic-background-371"].exists)
-        // No editable reload/new operation may replace the retained delayed owner.
+
         if app.buttons["sync-reload"].exists { XCTAssertFalse(app.buttons["sync-reload"].isEnabled) }
         task371Restart(app)
         app.terminate()
@@ -1264,8 +2310,10 @@ final class FoundationUITests: XCTestCase {
             boardEnabled(app.buttons["tab-menu"], timeout: 30)
             boardTap(app, "tab-menu")
             let settings = app.buttons["menu-settings"]
-            if !settings.isHittable {
-                revealPagedElement(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
+            boardEnabled(settings, timeout: 30)
+            let menuScroll = app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch
+            if !settings.isHittable && menuScroll.exists {
+                revealPagedElement(app, settings, in: menuScroll)
             }
             boardTap(app, "menu-settings")
         }
@@ -1356,8 +2404,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse((token.value as? String ?? "").isEmpty); XCTAssertNotEqual(token.value as? String, token.placeholderValue)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", typed + "!", typed + "!")).firstMatch.exists)
 
-        // An explicitly edited empty token is accepted by the shared form for
-        // unauthenticated servers; it must not be treated as untouched authority.
+
         revealPagedElement(app, token, in: app.scrollViews["sync-screen"])
         token.tap(); token.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count + 1))
         boardEnabled(app.buttons["sync-save"], timeout: 30)
@@ -1383,7 +2430,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "sync-option-selfhosted"); boardEnabled(token, timeout: 30)
         XCTAssertTrue((token.value as? String ?? "").isEmpty || (token.value as? String) == token.placeholderValue)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", typed, typed)).firstMatch.exists)
-        // Save/Sync/Test are never invoked; this case requires no server.
+
     }
 
     func testNativeSelfHostedMaintainedServerTestSaveAndColdTokenReuse() throws {
@@ -1408,7 +2455,7 @@ final class FoundationUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication(), title = "Native self-hosted round trip 402"
         app.launchArguments = ["--native-ui-test-library", library, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
-        // The private test-runner configuration is never copied into app arguments/environment.
+
         app.launchEnvironment = [:]
         app.launch(); defer { app.terminate() }
         func stageForm() {
@@ -1464,7 +2511,7 @@ final class FoundationUITests: XCTestCase {
         completed("Connection OK\nSelf-hosted endpoint is reachable.")
         XCTAssertTrue(app.buttons["sync-option-selfhosted"].isSelected, "Test keeps the selected form staged")
         boardTap(app, "sync-back"); task322OpenSync(app)
-        // Reopening reads stored Off: connection Test did not activate the staged form.
+
         XCTAssertTrue(app.buttons["sync-option-off"].isSelected); XCTAssertFalse(app.secureTextFields["sync-token"].exists)
         stageForm()
         revealPagedElement(app, app.buttons["sync-save"], in: app.scrollViews["sync-screen"])
@@ -1482,11 +2529,11 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["sync-status"].exists, "The later completion must come from this explicit Sync")
         boardEnabled(app.buttons["sync-now"], timeout: 30)
         revealPagedElement(app, app.buttons["sync-now"], in: app.scrollViews["sync-screen"])
-        // No token setter or typing occurs after cold reopening: shared null-token reuse owns this Sync.
+
         boardTap(app, "sync-now"); completed("Success\nSync completed!")
         XCTAssertTrue(app.buttons["sync-option-selfhosted"].isSelected)
         XCTAssertEqual(importedTaskIdentity(), acceptedIdentity)
-        // Root independently verifies the original seeded ID, phone SQLite and maintained server bytes/receipts.
+
     }
 
     func testNativeSelfHostedProjectDownloadOpenColdAndArchived() throws {
@@ -1594,8 +2641,8 @@ final class FoundationUITests: XCTestCase {
             boardEnabled(button, timeout: 30)
             XCTAssertEqual(button.label, "Download")
             button.tap()
-            // Missing becomes available only after the owned download's row refresh.
-            // A previously enabled Open/Back alone cannot prove this transition.
+
+
             XCTAssertTrue(button.waitForNonExistence(timeout: 60))
             ready(id)
             XCTAssertFalse(app.buttons["Close"].firstMatch.exists, "Download must not automatically open its file")
@@ -1606,7 +2653,7 @@ final class FoundationUITests: XCTestCase {
             let file = app.buttons["project-attachment-open-" + id]
             revealPagedElement(app, file, in: scroll, outerEdge: true)
             boardEnabled(file, timeout: 30); file.tap()
-            // Project text documents use the existing system Share presentation.
+
             let close = app.buttons["Close"].firstMatch
             boardEnabled(close, timeout: 20)
             var previousFrame: CGRect?
@@ -1630,12 +2677,12 @@ final class FoundationUITests: XCTestCase {
         projects(); open(false); download(active); view(active)
         boardTap(app, "project-back")
         app.terminate(); app.launch(); projects(); open(false)
-        // No Save, token edit, Sync or Download occurs in the cold active-file phase.
+
         ready(active); view(active); boardTap(app, "project-back")
         open(true); ready(archived); archivedControls(); download(archived)
         archivedControls(); view(archived); archivedControls(); boardTap(app, "project-back")
         boardEnabled(app.textFields["projects-create-title"], timeout: 30)
-        // Root independently verifies GET receipts, exact hashes/rows and cold no-GET.
+
     }
 
     func testNativeSelfHostedProjectDownloadColdRetryAndStop() throws {
@@ -1700,22 +2747,21 @@ final class FoundationUITests: XCTestCase {
             let arguments = ["--native-ui-test-library", library, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
             app.launchArguments = arguments + ["--native-project-download-stop-after-filled-once"]
             app.launch()
-            // Preflight the stopped library with scripts/check-project-download-fixture.py (README).
-            // Root stages only synthetic SQLite/config in this fresh library; no files or journal.
-            // The isolated filled-stage flag starts at Projects to avoid automatic Sync prefetch.
+
+
             openActiveProject()
             let download = app.buttons["project-attachment-download-" + fileID]
             revealPagedElement(app, download, in: scroll, outerEdge: true)
             boardEnabled(download, timeout: 30); XCTAssertEqual(download.label, "Download")
             download.tap()
-            // The approved hook fails only after this invocation durably fills its real stage.
+
             pending()
             for id in ["project-back", "project-attachment-open-" + fileID] {
                 let button = app.buttons[id]
                 XCTAssertTrue(button.exists); XCTAssertFalse(button.isEnabled)
             }
             app.terminate()
-            app.launchArguments = arguments // Cold recovery must not rearm the filled-stage hook.
+            app.launchArguments = arguments
             app.launch()
             pending()
             XCTAssertFalse(app.buttons["tab-menu"].exists)
@@ -1726,13 +2772,13 @@ final class FoundationUITests: XCTestCase {
             checkpoint.lifetime = .keepAlways; add(checkpoint)
             boardTap(app, stop ? "project-file-download-stop" : "project-file-download-retry")
             XCTAssertTrue(panel.waitForNonExistence(timeout: 60))
-            // This cold phase performs no Save, Sync or Download; root verifies zero GETs.
+
             openActiveProject(); ready()
             if stop {
                 let missing = app.buttons["project-attachment-download-" + fileID]
                 revealPagedElement(app, missing, in: scroll, outerEdge: true)
                 boardEnabled(missing, timeout: 30); XCTAssertEqual(missing.label, "Download")
-                noViewer() // Stop preserves the original missing attachment; no follow-up download.
+                noViewer()
             } else {
                 XCTAssertFalse(app.buttons["project-attachment-download-" + fileID].exists)
                 let file = app.buttons["project-attachment-open-" + fileID]
@@ -1760,7 +2806,7 @@ final class FoundationUITests: XCTestCase {
             boardEnabled(app.textFields["projects-create-title"], timeout: 30)
             app.terminate()
         }
-        // Root independently requires exactly two filled-source GETs and zero cold GETs.
+
     }
 
     private func task416OpenProject404(_ app: XCUIApplication, expectFile: Bool) {
@@ -1783,7 +2829,7 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(app.buttons["project-actions-menu"], timeout: 30)
         boardEnabled(app.buttons["project-attachment-add-link"], timeout: 30)
         let fileID = "40600000-1111-4111-8111-111111111111"
-        // RN terminal 404 soft-deletes this broken reference; it stays in SQLite.
+
         for action in ["open", "download", "remove"] {
             XCTAssertFalse(app.buttons["project-attachment-" + action + "-" + fileID].exists)
         }
@@ -1807,9 +2853,8 @@ final class FoundationUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchEnvironment = [:]
         defer { app.terminate() }
-        // Root stages only the 406 active Project and saved synthetic WebDAV;
-        // its cloudKey names an absent remote file, with no local bytes/journal.
-        // The unchanged filled hook selects Projects and cannot fire for a 404.
+
+
         app.launchArguments = task350Arguments(normal, hook: "--native-project-download-stop-after-filled-once")
         app.launch(); task416OpenProject404(app, expectFile: true)
         task350TapProject(app, "project-attachment-download-40600000-1111-4111-8111-111111111111")
@@ -1820,7 +2865,7 @@ final class FoundationUITests: XCTestCase {
         let dismiss = alert.buttons["project-attachment-open-dismiss"]
         boardEnabled(dismiss); dismiss.tap(); XCTAssertTrue(alert.waitForNonExistence(timeout: 15))
         task416TerminalProject404(app)
-        app.terminate(); app.launch() // Same normal library; no remote-capable file remains.
+        app.terminate(); app.launch()
         task416OpenProject404(app, expectFile: false); task416TerminalProject404(app)
         app.terminate()
 
@@ -1836,15 +2881,15 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["project-back"].exists); XCTAssertFalse(app.buttons["project-back"].isEnabled)
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "sync-restart-gate").firstMatch.exists)
         XCTAssertFalse(app.alerts.firstMatch.exists); task350NoFilePresentation(app)
-        // End before Retry so root can capture the actual device-created,
-        // version2 metadata-only intent and exact unchanged before rows/files.
+
+
     }
 
     func testNativeWebDAVProject404ColdRetryAcknowledgesTerminalResult() throws {
         let library = try task371Library("COLD", prefix: "MINDWTR_PROJECT_404_PHONE_")
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchEnvironment = [:]
-        app.launchArguments = task350Arguments(library) // Do not rearm afterIntent.
+        app.launchArguments = task350Arguments(library)
         app.launch(); defer { app.terminate() }
         let panel = app.descendants(matching: .any).matching(identifier: "project-file-download-recovery").firstMatch
         XCTAssertTrue(panel.waitForExistence(timeout: 60))
@@ -1856,17 +2901,17 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(panel.waitForNonExistence(timeout: 60))
         task416OpenProject404(app, expectFile: false); task416TerminalProject404(app)
         app.terminate()
-        // Only the old filled selector is used to reopen at Projects. No source
-        // exists and no Download is issued, so neither fault can fire here.
+
+
         app.launchArguments = task350Arguments(library, hook: "--native-project-download-stop-after-filled-once")
         app.launch(); task416OpenProject404(app, expectFile: false); task416TerminalProject404(app)
-        // Root independently verifies exactly one 404 per library, zero cold
-        // requests, exact RN tombstone effects, and no files or retained journal.
+
+
     }
 
     func testNativeWebDAVProject404CompletesAndColdRetriesInOneInvocation() throws {
-        // Separate XCTest invocations can reinstall the app and change its
-        // container identity. Keep the real terminate/relaunch in one invocation.
+
+
         try testNativeWebDAVProject404CompletesAndCreatesColdRetryIntent()
         try testNativeWebDAVProject404ColdRetryAcknowledgesTerminalResult()
     }
@@ -1882,8 +2927,8 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(app.buttons["sync-back"], timeout: 30)
         task322Type(app, "sync-username", "fixture-322")
         task322Type(app, "sync-password", "synthetic-invalid-draft-322", secure: true)
-        // The shared reveal helper requires an enabled target. Use Reload as
-        // the anchor, then inspect disabled actions without trying to tap them.
+
+
         revealPagedElement(app, app.buttons["sync-reload"], in: app.scrollViews["sync-screen"])
         for id in ["sync-save", "sync-now", "sync-test"] {
             let action = app.buttons[id]
@@ -1906,8 +2951,8 @@ final class FoundationUITests: XCTestCase {
         #if targetEnvironment(simulator)
         XCUIDevice.shared.press(.home)
         #else
-        // On the iPhone 12, the synthetic Home button leaves this form foreground.
-        // Use its actual Home gesture, then require observed background state.
+
+
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.995))
             .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
         #endif
@@ -1944,8 +2989,8 @@ final class FoundationUITests: XCTestCase {
         let app = XCUIApplication(), library = UUID().uuidString.lowercased()
         app.launchArguments = ["--native-ui-test-library", library, "--native-sync-command-throw-once", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         #if targetEnvironment(simulator)
-        // Existing simulator authentication hook only; physical devices retain
-        // their real security state and run this test with the fresh AppLock off.
+
+
         app.launchArguments += ["--native-app-lock-auth", "success,cancel,success"]
         #endif
         app.launch(); defer { app.terminate() }
@@ -1960,7 +3005,7 @@ final class FoundationUITests: XCTestCase {
         task322Type(app, "sync-username", "fixture-322")
         task322Type(app, "sync-password", "synthetic-unknown-draft-322", secure: true)
         revealPagedElement(app, app.buttons["sync-test"], in: app.scrollViews["sync-screen"])
-        boardTap(app, "sync-test") // DEBUG throws before any actual HTTP call.
+        boardTap(app, "sync-test")
         task322RestartGate(app)
         #if targetEnvironment(simulator)
         XCUIDevice.shared.press(.home); app.activate(); task102Gate(app)
@@ -1989,17 +3034,17 @@ final class FoundationUITests: XCTestCase {
         print("Task337 cold startup gate isolated library: " + library)
         app.launchArguments = arguments + ["--native-startup-sync-command-throw-once"]
         app.launch(); defer { app.terminate() }
-        // The startup-only hook fires before the stored native command. No
-        // Settings action, form input, credential, or network is involved.
+
+
         task322RestartGate(app)
         app.terminate()
-        app.launchArguments = arguments // The same library, without the hook.
+        app.launchArguments = arguments
         app.launch()
         boardEnabled(app.buttons["tab-inbox"], timeout: 30)
         boardEnabled(app.buttons["capture-open"], timeout: 30)
         task337NoRestartGate(app, timeout: 5)
 
-        // Prove that ordinary Inbox editing is available after cold settlement.
+
         boardTap(app, "capture-open")
         let capture = app.textViews["capture-input"]
         boardEnabled(capture); capture.tap(); capture.typeText("Task337 cold editable")
@@ -2012,7 +3057,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(title.value as? String, "Task337 cold editable saved")
         boardTap(app, "task-editor-save")
         boardEnabled(app.buttons["Task337 cold editable saved"], timeout: 30)
-        task322OpenSync(app) // A fresh library still presents stored Off.
+        task322OpenSync(app)
         XCTAssertTrue(app.buttons["sync-option-off"].isSelected)
     }
 
@@ -2039,8 +3084,8 @@ final class FoundationUITests: XCTestCase {
 
         app.launchArguments = arguments + ["--native-startup-sync-command-throw-once"]
         app.launch()
-        // Existing recovery auto-resumes a valid protected draft. Its exact
-        // editor state is the positive proof; the gate need not stay onscreen.
+
+
         boardEnabled(title, timeout: 30)
         XCTAssertEqual(title.value as? String, draft)
         boardEnabled(app.staticTexts["task-recovery-protected"], timeout: 30)
@@ -2050,15 +3095,14 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(app.buttons["task-recovery-open"], timeout: 30)
         task337NoRestartGate(app)
 
-        // Keep for later hides the editor, not its durable ownership. Ordinary
-        // Inbox/read actions and idle completion must not mint a new intent.
+
         boardTap(app, "tab-inbox")
         boardTap(app, "search-open"); boardEnabled(app.textFields["search-input"], timeout: 30)
         boardTap(app, "search-close")
         boardEnabled(app.buttons[original], timeout: 30)
         boardEnabled(app.buttons["task-recovery-open"], timeout: 30)
         task337NoRestartGate(app, timeout: 5)
-        app.terminate(); app.launch() // The startup hook remains armed on this cold launch.
+        app.terminate(); app.launch()
         boardEnabled(title, timeout: 30)
         XCTAssertEqual(title.value as? String, draft, "Keep for later must preserve the exact unsaved title on disk")
         boardEnabled(app.staticTexts["task-recovery-protected"], timeout: 30)
@@ -2069,8 +3113,8 @@ final class FoundationUITests: XCTestCase {
         #if targetEnvironment(simulator)
         XCUIDevice.shared.press(.home)
         #else
-        // The actual Home gesture is required on the iPhone 12; the synthetic
-        // Home button does not reliably leave the current app foreground.
+
+
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.995))
             .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
         #endif
@@ -2091,14 +3135,14 @@ final class FoundationUITests: XCTestCase {
         app.launch(); defer { app.terminate() }
         boardEnabled(app.buttons["tab-inbox"], timeout: 30)
         boardEnabled(app.buttons["capture-open"], timeout: 30)
-        // A clean cold launch invokes only startup. The resume-only hook must
-        // remain armed until a real background-to-foreground episode occurs.
+
+
         task337NoRestartGate(app, timeout: 5)
         task344BackgroundAndActivate(app)
-        task322RestartGate(app) // No Settings visit, credentials, or HTTP.
+        task322RestartGate(app)
 
         app.terminate()
-        app.launchArguments = arguments // Same storage, without the hook.
+        app.launchArguments = arguments
         app.launch()
         boardEnabled(app.buttons["tab-inbox"], timeout: 30)
         boardEnabled(app.buttons["capture-open"], timeout: 30)
@@ -2149,8 +3193,7 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(app.buttons[original], timeout: 30)
         boardEnabled(app.buttons["task-recovery-open"], timeout: 30)
 
-        // A hidden kept draft retains its disk ownership. Actual resume and
-        // ordinary reads cannot create a delayed Sync after the editor closes.
+
         task344BackgroundAndActivate(app)
         boardEnabled(app.buttons[original], timeout: 30)
         boardEnabled(app.buttons["task-recovery-open"], timeout: 30)
@@ -2162,7 +3205,7 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(app.buttons["task-recovery-open"], timeout: 30)
         task337NoRestartGate(app, timeout: 5)
 
-        app.terminate(); app.launch() // Same storage; the resume-only hook remains armed.
+        app.terminate(); app.launch()
         boardEnabled(title, timeout: 30)
         XCTAssertEqual(title.value as? String, draft, "The exact unsaved title must survive kept-draft cold recovery")
         boardEnabled(app.staticTexts["task-recovery-protected"], timeout: 30)
@@ -2251,16 +3294,16 @@ final class FoundationUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication(), library = "474dc5da-dc25-476a-a08b-2a151facc3b1"
         let first = "Task350 Notes before known Off refusal", final = first + " and still editable"
-        // Root stages the existing Task121 missing-cloud-file fixture in this
-        // fresh isolated library with stored Off, no credential or local bytes.
+
+
         app.launchArguments = task350Arguments(library)
         app.launch(); defer { app.terminate() }
         task350OpenProject(app); task350EditNotes(app, first)
         task350TapProject(app, "project-attachment-download-task121-file")
         task350KnownOffRefusal(app)
         XCTAssertEqual(app.textViews["project-notes-input"].value as? String, first)
-        // Notes changed the Project revision before dispatch. The known reply
-        // must leave the current Notes options usable, without an auto Open.
+
+
         task350EditNotes(app, final)
         task350TapProject(app, "project-attachment-download-task121-file")
         task350KnownOffRefusal(app)
@@ -2289,8 +3332,8 @@ final class FoundationUITests: XCTestCase {
             app.launch(); defer { app.terminate() }
             task350OpenProject(app); task350EditNotes(app, notes)
             task350TapProject(app, "project-attachment-download-task121-file")
-            // Throw is before dispatch; malformed substitutes non-null Project
-            // update only after the actual native Off refusal has returned.
+
+
             task322RestartGate(app)
             for id in ["project-back", "project-attachment-download-task121-file", "project-attachment-open-task121-file",
                        "project-attachment-add-file", "project-notes-mode-edit"] {
@@ -2325,9 +3368,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["project-attachment-open-task121-file"].isEnabled)
         XCTAssertFalse(app.textViews["project-notes-input"].isEnabled)
 
-        // The hook delays App delivery after a real native Off reply; it is
-        // not a held network transfer. Require actual background/activation
-        // inside its eight-second window rather than accept vacuous coverage.
+
         task344BackgroundAndActivate(app)
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - began, 8,
             "Automation must background and reactivate before the delayed reply can settle")
@@ -2344,7 +3385,7 @@ final class FoundationUITests: XCTestCase {
         task350NoFilePresentation(app)
         task350EditNotes(app, final)
         task350TapProject(app, "project-attachment-download-task121-file")
-        task350KnownOffRefusal(app) // Explicit new dispatch works after drainage.
+        task350KnownOffRefusal(app)
         task350ColdNotes(app, library: library, text: final)
     }
 
@@ -2356,8 +3397,8 @@ final class FoundationUITests: XCTestCase {
 
     private func task364RevealTitle(_ app: XCUIApplication) {
         let title = task364Title(app), scroll = app.scrollViews["task-editor-scroll"]
-        // Reuse the existing topward gutter gesture, with the editor's actual
-        // type-agnostic title lookup (the control may be a multiline text view).
+
+
         for _ in 0..<8 {
             if title.exists && title.isHittable && scroll.frame.contains(title.frame) { return }
             let frame = scroll.frame.intersection(app.frame)
@@ -2405,8 +3446,8 @@ final class FoundationUITests: XCTestCase {
     private func task364NoFilePresentation(_ app: XCUIApplication) {
         XCTAssertFalse(app.buttons["task-attachment-preview-done"].exists)
         XCTAssertFalse(app.otherElements["task-audio-player"].exists)
-        // The Task editor itself has a Close label, with task-view-close ID.
-        // Check the system viewer identifier rather than that shared label.
+
+
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier == %@", "Close")).firstMatch.exists)
     }
 
@@ -2449,8 +3490,8 @@ final class FoundationUITests: XCTestCase {
         continueAfterFailure = false
         let app = XCUIApplication(), library = "bfa04966-0c33-4c1a-bd13-6f29f47e79a7"
         let title = "Task364 Off draft saved", notes = "Task364 Notes before Off refusal", checklist = "Task364 checklist before Download"
-        // Root stages a saved mutable Task with one real RN remote-only file,
-        // stored Off, no credential, local bytes, or owned attachment history.
+
+
         app.launchArguments = task350Arguments(library); app.launch(); defer { app.terminate() }
         task364OpenEditor(app)
         task364EditDraft(app, title: title, notes: notes, checklist: checklist)
@@ -2474,7 +3515,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(note.value as? String, notes)
         revealPagedElement(app, item, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
         XCTAssertEqual(item.value as? String, checklist)
-        _ = task364Download(app) // Off refusal never claims installed availability.
+        _ = task364Download(app)
         task364NoFilePresentation(app)
     }
 
@@ -2489,8 +3530,8 @@ final class FoundationUITests: XCTestCase {
             task364OpenEditor(app)
             task364EditDraft(app, title: title, notes: notes, checklist: checklist)
             task364Download(app).tap()
-            // Throw runs before native dispatch; malformed substitutes only
-            // after the real Off refusal. Neither path may retry a fresh UUID.
+
+
             task322RestartGate(app)
             for id in ["task-view-close", "task-editor-save", "task-attachment-download-" + task364AttachmentID,
                        "task-attachment-open-" + task364AttachmentID, "task-attachment-add-file", "task-attachment-add-link"] {
@@ -2527,7 +3568,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["task-attachment-open-" + task364AttachmentID].isEnabled)
         XCTAssertFalse(app.buttons["task-editor-save"].isEnabled)
         XCTAssertFalse(app.buttons["task-view-close"].isEnabled)
-        // This holds App delivery after a real Off reply, not a network task.
+
         task344BackgroundAndActivate(app)
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - began, 8,
             "Actual background and reactivation must occur inside the reply-delay window")
@@ -2759,13 +3800,19 @@ final class FoundationUITests: XCTestCase {
         app.terminate(); app.launch(); task140Focus(app, includesStarts: false); app.terminate()
     }
 
-    func testTaskPromotionNormal() { taskPromotionFlow(library: "c3e4e434-b76b-48f6-9b3f-5eee04b6a4ef", editNotes: true) }
-    func testTaskPromotionLargestText() { taskPromotionFlow(library: "57c17ca9-6bb1-432a-96f8-ebb9090d3d75", editNotes: false) }
-    func testTaskPromotionReusesProject() { taskPromotionFlow(library: "0291b8b1-265a-43b2-9838-c2e885d5b346", editNotes: true) }
+    func testTaskPromotionNormal() throws { try taskPromotionFlow(role: "NORMAL", editNotes: true) }
+    func testTaskPromotionLargestText() throws { try taskPromotionFlow(role: "LARGEST", editNotes: false, largest: true) }
+    func testTaskPromotionReusesProject() throws { try taskPromotionFlow(role: "REUSE", editNotes: true) }
+
+    private func taskPromotionApp(_ role: String, largest: Bool = false) throws -> XCUIApplication {
+        let library = try task371Library(role, prefix: "MINDWTR_TASK_PROMOTION_UI_")
+        let app = XCUIApplication(); app.launchArguments = task192Arguments(library, largest: largest)
+        return app
+    }
 
     private func beginTaskPromotion(_ app: XCUIApplication, editNotes: Bool) {
         boardEnabled(app.buttons["search-open"], timeout: 30); boardTap(app, "search-open")
-        let query = app.textFields["search-input"]; boardEnabled(query); query.tap(); query.typeText("Task139 saved task")
+        let query = app.textFields["search-input"]; boardEnabled(query); query.tap(); query.typeText("id:task139-task\n")
         boardTap(app, "search-task-task139-task"); boardTap(app, "task-mode-edit")
         let title = app.textFields["task-editor-title"]; boardEnabled(title)
         title.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap(); title.typeText(" project")
@@ -2786,6 +3833,48 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(action.label, "Create project from task")
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Create project from task"; shot.lifetime = .keepAlways; add(shot)
         action.tap()
+        let name = app.textFields["task-promote-name"]; boardEnabled(name)
+        XCTAssertEqual(name.value as? String, "Task139 saved task project")
+        XCTAssertEqual(app.switches["task-promote-expand"].value as? String, "0")
+        let confirmShot = XCTAttachment(screenshot: app.screenshot()); confirmShot.name = "Create project confirmation"; confirmShot.lifetime = .keepAlways; add(confirmShot)
+        boardTap(app, "task-promote-confirm")
+    }
+
+    func testTaskPromotionDialogCancelKeepsDraftAndChecklistOptOut() throws {
+        let app = try taskPromotionApp("CANCEL")
+        app.launch()
+        boardEnabled(app.buttons["search-open"], timeout: 30); boardTap(app, "search-open")
+        let query = app.textFields["search-input"]; boardEnabled(query); query.tap(); query.typeText("id:task139-task\n")
+        boardTap(app, "search-task-task139-task"); boardTap(app, "task-mode-edit")
+        let title = app.textFields["task-editor-title"]; boardEnabled(title)
+        title.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap(); title.typeText(" draft")
+        boardTap(app, "task-more"); boardTap(app, "task-promote")
+        boardEnabled(app.textFields["task-promote-name"])
+        XCTAssertTrue(app.staticTexts["task-promote-description"].exists)
+        let expand = app.switches["task-promote-expand"]
+        XCTAssertTrue(expand.waitForExistence(timeout: 10))
+        if !expand.isEnabled { XCTAssertTrue(app.staticTexts["task-promote-blocked"].waitForExistence(timeout: 10)) }
+        boardTap(app, "task-promote-cancel")
+        XCTAssertTrue(app.textFields["task-promote-name"].waitForNonExistence(timeout: 10))
+        XCTAssertEqual(app.textFields["task-editor-title"].value as? String, "Task139 saved task draft")
+        XCTAssertFalse(app.buttons["project-back"].exists)
+        app.terminate()
+    }
+
+    func testProjectConvertToSectionDialogPreviewWritesNothing() throws {
+        let app = try taskPromotionApp("CONVERT")
+        app.launch(); beginTaskPromotion(app, editNotes: false)
+        boardEnabled(app.buttons["project-back"], timeout: 30)
+        boardTap(app, "project-actions-menu")
+        let convert = app.buttons["project-convert-to-section-button"]; boardEnabled(convert)
+        XCTAssertEqual(convert.label, "Convert to section…")
+        convert.tap()
+        XCTAssertTrue(app.staticTexts["project-convert-title"].waitForExistence(timeout: 10))
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Convert to section"; shot.lifetime = .keepAlways; add(shot)
+        boardTap(app, "project-convert-cancel")
+        XCTAssertTrue(app.staticTexts["project-convert-title"].waitForNonExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["project-detail-title"].label, "Task139 saved task project")
+        app.terminate()
     }
 
     private func assertPromotedProject(_ app: XCUIApplication) {
@@ -2799,20 +3888,45 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "task-view-close"); boardEnabled(app.buttons["project-back"])
     }
 
-    private func taskPromotionFlow(library: String, editNotes: Bool) {
-        let app = XCUIApplication(); app.launchArguments = ["--native-ui-test-library", library]
+    func testProjectConvertToSectionConfirmAndUndo() throws {
+        let app = try taskPromotionApp("SECTION")
+        app.launch(); beginTaskPromotion(app, editNotes: false)
+        boardEnabled(app.buttons["project-back"], timeout: 30)
+        boardTap(app, "project-actions-menu"); boardTap(app, "project-convert-to-section-button")
+        let destination = app.buttons["project-convert-destination-task139-destination"]; boardEnabled(destination)
+        XCTAssertTrue(app.frame.contains(destination.frame))
+        destination.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "selected == true"), object: destination)], timeout: 10), .completed)
+        boardTap(app, "project-convert-next")
+        XCTAssertTrue(app.staticTexts["project-convert-section-name"].waitForExistence(timeout: 10))
+        boardTap(app, "project-convert-confirm")
+        XCTAssertTrue(app.staticTexts["project-convert-title"].waitForNonExistence(timeout: 30))
+        let title = app.staticTexts["project-detail-title"]
+        expectation(for: NSPredicate(format: "label == 'Task139 destination project'"), evaluatedWith: title)
+        waitForExpectations(timeout: 30)
+        let undo = app.buttons["task-projectToSection-undo"]; boardEnabled(undo, timeout: 30)
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Convert to section notice"; shot.lifetime = .keepAlways; add(shot)
+        undo.tap()
+        expectation(for: NSPredicate(format: "label == 'Task139 saved task project'"), evaluatedWith: title)
+        waitForExpectations(timeout: 30)
+        XCTAssertTrue(undo.waitForNonExistence(timeout: 20))
+        app.terminate()
+    }
+
+    private func taskPromotionFlow(role: String, editNotes: Bool, largest: Bool = false) throws {
+        let app = try taskPromotionApp(role, largest: largest)
         app.launch(); beginTaskPromotion(app, editNotes: editNotes); assertPromotedProject(app)
         app.terminate(); app.launch(); boardEnabled(app.buttons["search-open"], timeout: 30)
         XCTAssertFalse(app.buttons["task-recovery-open"].exists)
         boardTap(app, "search-open"); let query = app.textFields["search-input"]; boardEnabled(query)
-        query.tap(); query.typeText("Task139 saved task")
+        query.tap(); query.typeText("id:task139-task\n")
         boardTap(app, "search-task-task139-task"); boardTap(app, "task-mode-edit")
         XCTAssertEqual(app.textFields["task-editor-title"].value as? String, "Task139 saved task")
         boardTap(app, "task-view-close"); boardEnabled(app.textFields["search-input"]); app.terminate()
     }
 
-    func testTaskPromotionFailureRetainsDraft() {
-        let app = XCUIApplication(); app.launchArguments = ["--native-ui-test-library", "ff64e96f-c8ed-47db-90d7-ffc923381957"]
+    func testTaskPromotionFailureRetainsDraft() throws {
+        let app = try taskPromotionApp("FAILURE")
         app.launch(); beginTaskPromotion(app, editNotes: true)
         boardEnabled(app.buttons["task-view-retry"], timeout: 30)
         XCTAssertEqual(app.textFields["task-editor-title"].value as? String, "Task139 saved task project")
@@ -2823,8 +3937,8 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    func testTaskPromotionColdRecovery() {
-        let app = XCUIApplication(); app.launchArguments = ["--native-ui-test-library", "ff64e96f-c8ed-47db-90d7-ffc923381957"]
+    func testTaskPromotionColdRecovery() throws {
+        let app = try taskPromotionApp("FAILURE")
         app.launch(); assertPromotedProject(app)
         XCTAssertFalse(app.buttons["task-recovery-open"].exists)
         app.terminate(); app.launch(); boardEnabled(app.buttons["search-open"], timeout: 30); app.terminate()
@@ -3149,7 +4263,7 @@ final class FoundationUITests: XCTestCase {
         else {
             boardTap(app, "tab-menu")
             let calendar = app.buttons["menu-calendar"]
-            if !calendar.isHittable {
+            if !calendar.isHittable, app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch.exists {
                 revealPagedElement(app, calendar, in: app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch)
             }
             boardTap(app, "menu-calendar")
@@ -3250,7 +4364,7 @@ final class FoundationUITests: XCTestCase {
     private func assertCalendarDeletedTaskInTrash(_ app: XCUIApplication) {
         boardTap(app, "tab-menu")
         let trash = app.buttons["menu-trash"]
-        if !trash.isHittable {
+        if !trash.isHittable, app.scrollViews.containing(.button, identifier: "menu-trash").firstMatch.exists {
             revealPagedElement(app, trash, in: app.scrollViews.containing(.button, identifier: "menu-trash").firstMatch)
         }
         boardTap(app, "menu-trash")
@@ -3258,11 +4372,37 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "trash-back")
     }
 
+    func testSavedSearchSortPickerNormal() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", "200e5e94-1e41-4b90-a43f-190ae4d55bdc"]
+        app.launch(); boardEnabled(app.buttons["search-open"], timeout: 30)
+        boardTap(app, "search-open")
+        let query = app.textFields["search-input"]; boardEnabled(query); query.tap(); query.typeText("status:next")
+        boardTap(app, "search-save-open")
+        let field = app.textFields["saved-search-write-name"]; boardEnabled(field)
+        replaceSavedSearchName(field, with: "Native Sort Check"); field.typeText("\n")
+        boardEnabled(app.buttons["saved-search-sort"])
+        boardTap(app, "saved-search-sort"); boardTap(app, "saved-search-sort-title")
+        boardEnabled(app.buttons["saved-search-sort"])
+        XCTAssertEqual(app.staticTexts["saved-search-title"].label, "Native Sort Check")
+        app.terminate(); app.launch(); boardEnabled(app.buttons["tab-menu"], timeout: 30)
+        boardTap(app, "tab-menu")
+        let saved = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "menu-", "Native Sort Check")).firstMatch
+        boardEnabled(saved); saved.tap(); boardTap(app, "saved-search-sort")
+        XCTAssertTrue(app.buttons["saved-search-sort-title"].isSelected)
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Saved search sort persisted"; shot.lifetime = .keepAlways; add(shot)
+        boardTap(app, "saved-search-sort-global"); boardEnabled(app.buttons["saved-search-sort"])
+        boardTap(app, "saved-search-sort"); XCTAssertTrue(app.buttons["saved-search-sort-global"].isSelected)
+        boardTap(app, "saved-search-write-cancel")
+        boardTap(app, "saved-search-delete"); boardTap(app, "saved-search-write-confirm")
+        app.terminate()
+    }
+
     func testSavedSearchWriteNormal() { savedSearchWriteFlow(library: "0178bb87-1319-49f1-afec-40c38368d28d") }
     func testSavedSearchWriteLargestText() { savedSearchWriteFlow(library: "b43325de-3d8f-432f-bb65-607ae71f5f7e") }
 
     private func replaceSavedSearchName(_ field: XCUIElement, with name: String) {
-        // The dialog focuses its newly initialized field at the end. Avoid the OS's large-text selection menu.
+
         let count = (field.value as? String ?? "").count
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: count) + name)
         XCTAssertEqual(field.value as? String, name)
@@ -3283,6 +4423,13 @@ final class FoundationUITests: XCTestCase {
         beginSavedSearchWrite(app, name: "Task128 Saved")
         boardEnabled(app.buttons["saved-search-back"])
         XCTAssertEqual(app.staticTexts["saved-search-title"].label, "Task128 Saved")
+        boardTap(app, "saved-search-sort")
+        boardTap(app, "saved-search-sort-title")
+        boardEnabled(app.buttons["saved-search-sort"])
+        XCTAssertEqual(app.staticTexts["saved-search-title"].label, "Task128 Saved")
+        boardTap(app, "saved-search-sort")
+        XCTAssertTrue(app.buttons["saved-search-sort-title"].isSelected)
+        boardTap(app, "saved-search-write-cancel")
         for (query, title) in [("Task128 000", "Task128 Nested B"), ("Task128 001", "Task128 Nested C")] {
             boardTap(app, "search-open")
             let input = app.textFields["search-input"]; boardEnabled(input); input.tap(); input.typeText(query)
@@ -3312,6 +4459,13 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "tab-menu")
         let saved = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "menu-", "Task128 Saved")).firstMatch
         boardEnabled(saved); saved.tap(); boardEnabled(app.buttons["saved-search-delete"])
+        boardTap(app, "saved-search-sort")
+        XCTAssertTrue(app.buttons["saved-search-sort-title"].isSelected)
+        boardTap(app, "saved-search-sort-global")
+        boardEnabled(app.buttons["saved-search-sort"])
+        boardTap(app, "saved-search-sort")
+        XCTAssertTrue(app.buttons["saved-search-sort-global"].isSelected)
+        boardTap(app, "saved-search-write-cancel")
         boardTap(app, "saved-search-delete"); boardTap(app, "saved-search-write-cancel")
         boardEnabled(app.buttons["saved-search-delete"]); boardTap(app, "saved-search-delete")
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Saved search deletion"; shot.lifetime = .keepAlways; add(shot)
@@ -3542,7 +4696,7 @@ final class FoundationUITests: XCTestCase {
             let link = app.links.matching(NSPredicate(format: "label == %@", title)).firstMatch
             revealPagedElement(app, link, in: app.scrollViews["task-editor-scroll"])
             XCTAssertTrue(link.exists); link.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
-            // A minute boundary can invalidate the rendered view while scrolling.
+
             let retry = app.buttons["task-reference-retry"]
             if retry.waitForExistence(timeout: 1) {
                 revealPagedElement(app, retry, in: app.scrollViews["task-editor-scroll"])
@@ -3878,8 +5032,8 @@ final class FoundationUITests: XCTestCase {
             tap("project-attachment-open-task121-web"); browser()
             tap("project-attachment-open-task121-desktop"); dismiss("another device")
             tap("project-attachment-open-task121-unsupported"); dismiss("Could not open")
-            // This retained fixture URI is foreign: the new file button must
-            // refuse safely and release its Open claim, including when archived.
+
+
             tap("project-attachment-open-task121-file"); dismiss("This file could not be opened")
             boardEnabled(app.buttons["project-attachment-open-task121-file"])
             let shot = XCTAttachment(screenshot: app.screenshot())
@@ -3897,8 +5051,8 @@ final class FoundationUITests: XCTestCase {
     func testTask285ArchivedProjectFilesOpenInSystemViewersAndReleaseClaims() {
         continueAfterFailure = false
         let app = XCUIApplication()
-        // Root seeds real, hash-bound files externally. Run the same test with
-        // current URIs and again after installation without rebinding old URIs.
+
+
         app.launchArguments = ["--native-ui-test-library", "fd3b763c-9eca-4018-ba4f-753e58d7ad04"]
         let audio = "812b5574-f88a-412e-90d1-f53e0cc51f5e"
         let image = "5084fe92-57aa-4a08-a3c7-9224f1d20f1d"
@@ -3916,8 +5070,8 @@ final class FoundationUITests: XCTestCase {
             XCTAssertFalse(app.otherElements["task-audio-player"].exists)
             XCTAssertFalse(app.buttons["project-attachment-preview-done"].exists)
             XCTAssertFalse(app.alerts.firstMatch.exists)
-            // The scroll helper requires enabled controls. Reveal the nearby
-            // Notes anchor, then inspect archived Add controls without tapping.
+
+
             revealPagedElement(app, app.buttons["project-notes-toggle"], in: scroll, outerEdge: true)
             let viewport = scroll.frame.intersection(app.frame)
             for id in ["project-attachment-add-file", "project-attachment-add-link"] {
@@ -3938,8 +5092,8 @@ final class FoundationUITests: XCTestCase {
             file(id).tap()
             let close = app.buttons["Close"].firstMatch
             boardEnabled(close, timeout: 20)
-            // UIKit can expose Share's Close before its presentation settles.
-            // Require observed readiness before the single dismissal tap.
+
+
             var previousFrame: CGRect?
             var stableSince: TimeInterval?
             let closeReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -3956,8 +5110,8 @@ final class FoundationUITests: XCTestCase {
                 return false
             }, object: close)
             XCTAssertEqual(XCTWaiter.wait(for: [closeReady], timeout: 10), .completed)
-            // Project audio follows its existing system Share plan, rather
-            // than the Task-only player introduced by Task284.
+
+
             XCTAssertFalse(app.otherElements["task-audio-player"].exists)
             XCTAssertFalse(app.buttons["project-attachment-preview-done"].exists)
             XCTAssertFalse(app.alerts.firstMatch.exists)
@@ -4083,8 +5237,8 @@ final class FoundationUITests: XCTestCase {
         if app.buttons["project-notes-mode-edit"].isEnabled { tap("project-notes-mode-edit") }
         let input = app.textViews["project-notes-input"]
         boardEnabled(input); input.tap(); input.typeText(notes)
-        // The retained Task121 file is missing and foreign. Metadata Remove
-        // must complete after Notes flush without requiring local byte access.
+
+
         tap("project-attachment-remove-task121-file")
         let file = app.buttons["project-attachment-open-task121-file"]
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: file)
@@ -4164,8 +5318,8 @@ final class FoundationUITests: XCTestCase {
         tap("project-attachment-add-file")
         let cancel = app.navigationBars.buttons["Cancel"].firstMatch
         boardEnabled(cancel, timeout: 20)
-        // Kill while the real picker is still presented: Notes must already be
-        // durable, and no Project/Task attachment owner exists before selection.
+
+
         app.terminate(); app.launch(); projects(); open("task121-active")
         unchangedAttachments()
         tap("project-notes-toggle")
@@ -4295,7 +5449,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "task-audio-toggle")
         task284Wait { app.buttons["task-audio-toggle"].label == "Pause"
             && (self.task284Clock(app)?.elapsed ?? -1) > pausedElapsed }
-        // Wait for this real12-second clip's end, not a simulated callback.
+
         task284Wait(timeout: 16) { app.buttons["task-audio-toggle"].label == "Play"
             && self.task284Clock(app)?.elapsed == 12 }
         boardTap(app, "task-audio-toggle")
@@ -4342,7 +5496,7 @@ final class FoundationUITests: XCTestCase {
         revealAttachmentTestTitle(app)
         boardEnabled(app.textFields["task-editor-title"])
         XCTAssertEqual(app.textFields["task-editor-title"].value as? String, "Task284 audio")
-        // A successful Open after the error also proves the busy/claim was released.
+
         task284OpenAudio(app); task284AssertPlaying(app); task284ClosePlayer(app)
         boardTap(app, "task-view-close")
         boardEnabled(app.buttons["task-title-task284-audio"], timeout: 30)
@@ -4463,7 +5617,7 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(add); XCTAssertEqual(add.label, "Add file")
         XCTAssertGreaterThanOrEqual(add.frame.height, 44)
         add.tap()
-        // The system document picker owns this Cancel, not editor Discard.
+
         let cancel = app.navigationBars.buttons["Cancel"].firstMatch
         boardEnabled(cancel, timeout: 30); cancel.tap()
         revealAttachmentTestTitle(app)
@@ -4503,7 +5657,7 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(add); XCTAssertEqual(add.label, "Add photo")
         XCTAssertGreaterThanOrEqual(add.frame.height, 44)
         add.tap()
-        // This is the actual selected-access Photos picker, not editor Discard.
+
         let cancel = app.navigationBars.buttons["Cancel"].firstMatch
         boardEnabled(cancel, timeout: 30); cancel.tap()
         revealAttachmentTestTitle(app)
@@ -4543,7 +5697,7 @@ final class FoundationUITests: XCTestCase {
         let add = app.buttons["task-attachment-add-file"]
         revealPagedElement(app, add, in: scroll, outerEdge: true)
         boardEnabled(add); add.tap()
-        // Begin owns an empty owned draft before the picker; Cancel submits no Add.
+
         let cancel = app.navigationBars.buttons["Cancel"].firstMatch
         boardEnabled(cancel, timeout: 30); cancel.tap()
         revealAttachmentTestTitle(app)
@@ -4629,8 +5783,8 @@ final class FoundationUITests: XCTestCase {
     private func revealAttachmentTestTitle(_ app: XCUIApplication) {
         let title = app.textFields["task-editor-title"]
         let scroll = app.scrollViews["task-editor-scroll"]
-        // The lazy stack omits the title after scrolling to Attachments;
-        // return toward the known top instead of searching further down.
+
+
         for _ in 0..<8 {
             if title.exists && title.isHittable && scroll.frame.contains(title.frame) { return }
             let frame = scroll.frame.intersection(app.frame)
@@ -4774,7 +5928,7 @@ final class FoundationUITests: XCTestCase {
         let title = app.textFields["task-editor-title"]
         let note = app.textViews["task-editor-note"]
         func reveal(_ field: XCUIElement) {
-            // Off-screen SwiftUI input frames may be infinite. The title precedes Notes.
+
             for _ in 0..<25 {
                 let viewport = scroll.frame.intersection(app.frame)
                 let bottom = app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : viewport.maxY
@@ -4895,8 +6049,8 @@ final class FoundationUITests: XCTestCase {
         waitForExpectations(timeout: 20)
         boardEnabled(app.staticTexts["task-recovery-protected"], timeout: 15)
         XCTAssertFalse(app.staticTexts["task-assignedTo-error"].exists)
-        // RN still offers creation for an exact name omitted from suggestions;
-        // the shared Person writer must reuse it without another row or revision.
+
+
         boardEnabled(create)
         revealPagedElement(app, create, in: scroll, outerEdge: true)
         create.tap()
@@ -4919,7 +6073,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate(); app.launch()
         boardEnabled(app.buttons[savedTitle], timeout: 30)
         XCTAssertFalse(app.buttons["task-recovery-open"].exists)
-        app.terminate() // The external oracle compares all nine saved tables and the created Person.
+        app.terminate()
     }
 
     func testTaskDraftRecoveryExternalUnrelatedSeed() {
@@ -4943,7 +6097,7 @@ final class FoundationUITests: XCTestCase {
         title.typeText(" draft")
         XCTAssertEqual(title.value as? String, "Task116 Recovery draft")
         boardEnabled(app.staticTexts["task-recovery-protected"], timeout: 15)
-        app.terminate() // Root changes the isolated saved task before the finish test.
+        app.terminate()
     }
 
     func testTaskDraftRecoveryExternalUnrelatedFinish() {
@@ -4959,7 +6113,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate(); app.launch()
         boardEnabled(app.buttons["Task116 Recovery draft"], timeout: 30)
         XCTAssertFalse(app.buttons["task-recovery-open"].exists)
-        app.terminate() // Root checks the external description and all nine tables.
+        app.terminate()
     }
 
     func testTaskDraftRecoveryExternalOwnedFinish() {
@@ -5179,7 +6333,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root stages this isolated 103-item fixture; the first and last legacy IDs repeat.
+
     func testPagedChecklistGlobalIndexesSaveAndRestart() throws {
         let app = XCUIApplication()
         let library = "df4c1bdd-13ca-44e7-b660-e510bb5d0732"
@@ -5242,8 +6396,8 @@ final class FoundationUITests: XCTestCase {
             boardEnabled(app.buttons["Reference checklist"])
             app.buttons["Reference checklist"].tap()
         }
-        // RN reveals Reference checklists only when they already contain items.
-        // Create the checklist in Inbox, then file that task as Reference.
+
+
         boardEnabled(app.buttons["Reference checklist"])
         app.buttons["Reference checklist"].tap()
         boardTap(app, "task-mode-edit")
@@ -5356,8 +6510,8 @@ final class FoundationUITests: XCTestCase {
         }
         func setItem(_ index: Int, _ title: String) {
             revealPagedElement(app, input(index), in: scroll)
-            // Add focuses this blank single-line field; type without tapping
-            // its far-right edge beside the Remove button.
+
+
             app.typeText(title)
             XCTAssertEqual(input(index).value as? String, title)
         }
@@ -5372,7 +6526,7 @@ final class FoundationUITests: XCTestCase {
         input(0).typeText("\n")
         boardEnabled(input(1))
         assertFocusedRowVisible(1)
-        // Return inserts and focuses the new row; typing needs no second tap.
+
         input(1).typeText("Second action")
         XCTAssertEqual(input(1).value as? String, "Second action")
         editorTap("task-checklist-toggle-0")
@@ -5389,7 +6543,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "task-mode-edit")
         let title = app.descendants(matching: .any).matching(identifier: "task-editor-title").firstMatch
         func revealTitle() {
-            // Lazy form rows above the viewport can be absent from the AX tree.
+
             for _ in 0..<12 {
                 if title.exists && title.isHittable && title.frame.minY >= scroll.frame.minY
                     && title.frame.maxY <= scroll.frame.maxY { break }
@@ -5432,7 +6586,7 @@ final class FoundationUITests: XCTestCase {
         for index in 0..<3 {
             XCTAssertNotEqual(app.buttons["task-checklist-toggle-\(index)"].value as? String, "Done")
         }
-        // Checklist-only edits must prompt on Close and disappear on Discard.
+
         editorTap("task-checklist-toggle-0")
         boardTap(app, "task-view-close")
         boardTap(app, "task-editor-discard")
@@ -5446,7 +6600,7 @@ final class FoundationUITests: XCTestCase {
         app.buttons["Checklist saved"].tap()
         boardTap(app, "task-mode-edit")
         showChecklist()
-        // Reset also clears a completed task's stored date and rebases its draft.
+
         editorTap("task-checklist-reset")
         boardEnabled(app.buttons["task-view-close"])
         XCTAssertFalse(app.staticTexts["task-view-error"].exists)
@@ -5565,7 +6719,7 @@ final class FoundationUITests: XCTestCase {
         processText("process-inbox-title", "Process edited final")
         processTap("process-inbox-notes-toggle")
         processText("process-inbox-notes", "Saved notes final")
-        // Skip must flush the last keystroke before advancing the original queue.
+
         boardTap(app, "process-inbox-skip")
         expectation(for: NSPredicate(format: "value == %@", second), evaluatedWith: title)
         waitForExpectations(timeout: 15)
@@ -5681,7 +6835,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "mind-sweep-close")
         XCTAssertEqual(guideStep(), firstStep)
         XCTAssertNotEqual(countLabel.label, countBefore)
-        // Closing and reopening the nested sheet leaves the guide checkpoint intact.
+
         openSweep(at: "inbox")
         XCTAssertTrue(app.buttons["mind-sweep-scope-all"].isSelected)
         boardTap(app, "mind-sweep-close")
@@ -5853,7 +7007,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["task-mode-view"].isSelected)
         boardTap(app, "task-view-close")
         revealPagedElement(app, original, in: scroll)
-        // A taller viewport can fit all five columns without any scroll range.
+
         if app.staticTexts["board-column-done"].frame.maxY > scroll.frame.maxY {
             let originalY = original.frame.minY
             original.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.05,
@@ -5863,7 +7017,7 @@ final class FoundationUITests: XCTestCase {
             XCTAssertEqual(cards.count, 1)
             revealPagedElement(app, original, in: scroll)
         }
-        // A short horizontal drag must not duplicate, trash, or open the editor.
+
         let shortStart = original.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
         shortStart.press(forDuration: 0.05, thenDragTo: shortStart.withOffset(CGVector(dx: 45, dy: 0)))
         XCTAssertFalse(app.buttons["task-view-close"].exists)
@@ -5952,21 +7106,38 @@ final class FoundationUITests: XCTestCase {
             let inset = min(CGFloat(24), target.height / 2)
             return CGPoint(x: target.midX, y: sourceFrame.midY < target.midY ? target.minY + inset : target.maxY - inset)
         }
-        // Scroll before admission only. Changing the viewport during a drag cancels it.
+        var geometryTrace: [String] = []
+        func rect(_ frame: CGRect) -> String {
+            [frame.origin.x, frame.origin.y, frame.width, frame.height].map { String(Double($0)) }.joined(separator: ",")
+        }
+        func record(_ line: String) {
+            if geometryTrace.count == 24 { geometryTrace.remove(at: 8) }
+            geometryTrace.append(line)
+        }
+        func attachTrace() {
+            let attachment = XCTAttachment(string: geometryTrace.joined(separator: "\n"))
+            attachment.name = "Board cross-drag numeric geometry"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
         for _ in 0..<8 {
             let viewport = app.frame.intersection(scroll.frame), sourceFrame = handle.frame, target = body.frame
             guard finite(viewport), finite(sourceFrame), finite(target) else {
+                record("preposition invalid rawViewport=\(rect(viewport)) effectiveViewport=\(rect(viewport)) sourceHandle=\(rect(sourceFrame)) target=\(rect(target))")
+                attachTrace()
                 XCTFail("Cross-column drag requires finite measured source, body and viewport")
                 throw CocoaError(.coderReadCorrupt)
             }
             let point = targetPoint(sourceFrame, target)
             let required = sourceFrame.union(CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2))
+            let shift = viewport.midY - required.midY, distance = min(abs(shift), viewport.height * 0.4)
+            record("preposition rawViewport=\(rect(viewport)) effectiveViewport=\(rect(viewport)) sourceHandle=\(rect(sourceFrame)) target=\(rect(target)) point=\(Double(point.x)),\(Double(point.y)) span=\(rect(required)) shift=\(Double(shift)) distance=\(Double(distance))")
             guard required.height < viewport.height, required.minX >= viewport.minX, required.maxX <= viewport.maxX else {
+                attachTrace()
                 XCTFail("The externally seeded adjacent source and destination must fit at this text size")
                 throw CocoaError(.coderReadCorrupt)
             }
             if viewport.contains(sourceFrame), viewport.contains(point) { break }
-            let shift = viewport.midY - required.midY, distance = min(abs(shift), viewport.height * 0.4)
             let start = CGPoint(x: viewport.minX + 4, y: viewport.minY + viewport.height * (shift > 0 ? 0.3 : 0.7))
             let end = CGPoint(x: start.x, y: start.y + (shift > 0 ? distance : -distance))
             try task735Coordinate(app, start).press(forDuration: 0.05, thenDragTo: task735Coordinate(app, end),
@@ -5974,12 +7145,19 @@ final class FoundationUITests: XCTestCase {
         }
         var prior: [CGRect] = []
         let stable = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            let viewport = app.frame.intersection(scroll.frame), frames = [handle.frame, body.frame, viewport]
+            let viewport = app.frame.intersection(scroll.frame), sourceFrame = handle.frame, target = body.frame
+            let frames = [sourceFrame, target, viewport], point = targetPoint(sourceFrame, target)
             let settled = prior == frames; prior = frames
-            return settled && frames.allSatisfy(finite) && viewport.contains(handle.frame)
-                && viewport.contains(targetPoint(handle.frame, body.frame)) && handle.isHittable
+            let finiteFrames: Bool? = settled ? frames.allSatisfy(finite) : nil
+            let sourceContained: Bool? = finiteFrames == true ? viewport.contains(sourceFrame) : nil
+            let pointContained: Bool? = sourceContained == true ? viewport.contains(point) : nil
+            let hittable: Bool? = pointContained == true ? handle.isHittable : nil
+            func clause(_ value: Bool?) -> String { value.map { $0 ? "true" : "false" } ?? "not-evaluated" }
+            record("settle rawViewport=\(rect(viewport)) effectiveViewport=\(rect(viewport)) sourceHandle=\(rect(sourceFrame)) target=\(rect(target)) point=\(Double(point.x)),\(Double(point.y)) settled=\(settled) finite=\(clause(finiteFrames)) sourceContained=\(clause(sourceContained)) pointContained=\(clause(pointContained)) hittable=\(clause(hittable))")
+            return hittable == true
         }, object: nil)
         guard XCTWaiter.wait(for: [stable], timeout: 10) == .completed else {
+            attachTrace()
             XCTFail("Cross-column source and destination must settle before admission")
             throw CocoaError(.coderReadCorrupt)
         }
@@ -5991,7 +7169,9 @@ final class FoundationUITests: XCTestCase {
                 && self.boardCrossBody(app, destination).buttons["board-task-" + self.boardCrossSource].exists
                 && app.buttons["board-filter-open"].isEnabled
         }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 20), .completed)
+        let movedResult = XCTWaiter.wait(for: [moved], timeout: 20)
+        if movedResult != .completed { attachTrace() }
+        XCTAssertEqual(movedResult, .completed)
         boardCrossAssert(app, status: destination, completionOffer: completionOffer)
     }
 
@@ -6047,7 +7227,7 @@ final class FoundationUITests: XCTestCase {
         if largest { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
         app.launch(); boardEnabled(app.buttons["tab-menu"], timeout: 40)
         boardSelectAllAreas(app); boardOpen(app); boardCrossAssert(app, status: "next")
-        // Next starts with one card; Waiting has a protected peer; Inbox/Someday are empty.
+
         var source = "next"
         for destination in ["waiting", "someday", "waiting", "next", "inbox", "next"] {
             try boardCrossDrag(app, from: source, to: destination); source = destination
@@ -6113,7 +7293,7 @@ final class FoundationUITests: XCTestCase {
         let first = try XCTUnwrap(ids.first), last = try XCTUnwrap(ids.last)
         XCTAssertEqual(Set(ids).count, ids.count)
         let scroll = app.scrollViews["board-scroll"]
-        // Revealing one card does not establish visibility of its whole group.
+
         for id in [first, last] {
             revealPagedElement(app, app.buttons["board-task-" + id], in: scroll, outerEdge: true)
         }
@@ -6135,7 +7315,7 @@ final class FoundationUITests: XCTestCase {
             }
             if viewport.contains(group) { break }
             let shift = viewport.midY - group.midY, distance = min(abs(shift), viewport.height * 0.4)
-            // The leading gutter is outside the card and drag-handle recognizers.
+
             let start = CGPoint(x: viewport.minX + 4, y: viewport.minY + viewport.height * (shift > 0 ? 0.3 : 0.7))
             let end = CGPoint(x: start.x, y: start.y + (shift > 0 ? distance : -distance))
             let origin = try task735Coordinate(app, start), destination = try task735Coordinate(app, end)
@@ -6416,7 +7596,7 @@ final class FoundationUITests: XCTestCase {
         for (taskID, direction) in [(first, "up"), (last, "down")] {
             let boundary = task733OrderMenu(app, taskID: taskID, direction: direction, enabled: false)
             XCTAssertFalse(boundary.isEnabled, "A boundary action must not issue an ordering request")
-            // Dismiss the system context menu outside its choices without tapping an action.
+
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
             expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: boundary)
             waitForExpectations(timeout: 10)
@@ -6474,7 +7654,7 @@ final class FoundationUITests: XCTestCase {
         revealPagedElement(app, card, in: app.scrollViews["board-scroll"]); boardEnabled(card)
         XCTAssertGreaterThanOrEqual(card.frame.height, 44 - 0.001)
         card.press(forDuration: 1)
-        // SwiftUI context-menu buttons expose their localized labels on this phone.
+
         let choices = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Done"))
         let complete = choices.firstMatch
         boardEnabled(complete); XCTAssertEqual(choices.count, 1)
@@ -6555,7 +7735,7 @@ final class FoundationUITests: XCTestCase {
     func testBoardMoveToFailedCommitExactRetry() throws { try task730MoveRetry(cold: false) }
     func testBoardMoveToFailedCommitColdRecovery() throws { try task730MoveRetry(cold: true) }
 
-    // Fresh libraries reuse the ordinary n-draft Board recorder row and a saved deviceId.
+
     private func task730App(_ role: String, largest: Bool = false, flags: [String] = []) throws -> XCUIApplication {
         let name = "MINDWTR_BOARD_MOVE_UI_" + role + "_LIBRARY"
         guard let library = ProcessInfo.processInfo.environment[name] else {
@@ -6739,7 +7919,7 @@ final class FoundationUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["board-column-" + status].exists)
             XCTAssertEqual(app.staticTexts["board-count-" + status].label, count)
         }
-        // Exercise search recovery through transient Area/Menu presentation.
+
         query.tap(); query.typeText(" next")
         app.buttons["area-open"].tap()
         boardEnabled(app.buttons["area-option-__all__"])
@@ -6839,8 +8019,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["board-count-next"].label, "1")
     }
 
-    /// Root stages the existing, read-only 103-task Contexts fixture on the simulator.
-    /// No fixture data is created or edited by this paging regression.
+
     func testBoardExistingContextsFixturePagesAndReturn() throws {
         let app = XCUIApplication()
         app.launch()
@@ -6859,7 +8038,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "board-picker-tokens")
         let fixtureToken = app.buttons["board-filter-token-@native-contexts-page"]
         let picker = app.scrollViews["board-filter-scroll"]
-        // The fixture supplies 104 context choices, so More must cross page zero.
+
         let more = app.buttons["board-more-tokens"]
         revealPagedElement(app, more, in: picker)
         XCTAssertTrue(more.exists)
@@ -6900,7 +8079,8 @@ final class FoundationUITests: XCTestCase {
         waitForExpectations(timeout: 10)
     }
 
-    private func boardEnabled(_ element: XCUIElement, timeout: TimeInterval = 10) {
+    private func boardEnabled(_ query: XCUIElement, timeout: TimeInterval = 10) {
+        let element = query.firstMatch
         if !element.exists { XCTAssertTrue(element.waitForExistence(timeout: timeout)) }
         if !element.isEnabled {
             expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: element)
@@ -6911,6 +8091,11 @@ final class FoundationUITests: XCTestCase {
     private func boardTap(_ app: XCUIApplication, _ id: String) {
         let element = app.buttons.matching(identifier: id).firstMatch
         boardEnabled(element)
+        if id.hasPrefix("menu-"), !element.isHittable,
+           !element.frame.isEmpty, app.frame.contains(element.frame) {
+            element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            return
+        }
         if !element.isHittable {
             expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: element)
             waitForExpectations(timeout: 10)
@@ -6942,12 +8127,15 @@ final class FoundationUITests: XCTestCase {
             if keyboard.exists && keyboard.frame.intersects(frame) {
                 frame.size.height = max(0, keyboard.frame.minY - frame.minY)
             }
+            if scroll.identifier == "process-inbox-scroll" {
+                frame.size.height = max(0, frame.height - 20)
+            }
             return frame
         }
         func fullyVisible(_ item: XCUIElement) -> Bool {
             guard item.exists else { return false }
             let frame = visibleViewport()
-            // Accessibility frames can differ by floating-point rounding at a shared edge.
+
             return item.frame.minY >= frame.minY - 0.001 && item.frame.maxY <= frame.maxY + 0.001
         }
         for _ in 0..<120 {
@@ -6973,7 +8161,7 @@ final class FoundationUITests: XCTestCase {
             let distance = min(max(44, needed + 24), frame.height * (exists ? 0.4 : 0.7))
             let endY = startY + (above ? distance : -distance)
             let origin = app.coordinate(withNormalizedOffset: .zero)
-            // The leading gutter avoids both controls and the trailing scroll indicator hit area.
+
             let x = outerEdge ? frame.minX + 4 : frame.midX
             origin.withOffset(CGVector(dx: x, dy: startY)).press(forDuration: 0.05,
                 thenDragTo: origin.withOffset(CGVector(dx: x, dy: endY)),
@@ -7138,7 +8326,7 @@ final class FoundationUITests: XCTestCase {
         composerTap("calendar-composer-save")
         XCTAssertTrue(app.staticTexts["calendar-composer-error"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["calendar-composer-title"].exists)
-        // Shared RN composer rounds a 45-minute typed interval to its supported 60-minute estimate.
+
         composerText(end, "10:45", normalizedValue: "11:00")
         composerTap("calendar-composer-duration-30")
         composerTap("calendar-composer-duration-60")
@@ -7163,7 +8351,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(viewTitle.waitForExistence(timeout: 10)); XCTAssertTrue(viewTitle.label.hasSuffix(title))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Start Date", "10:00")).firstMatch.exists)
         boardTap(app, "task-view-close")
-        // Finish this test's own task so repeat runs do not reserve the same Calendar slot.
+
         boardTap(app, "search-complete-" + taskID)
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["search-complete-" + taskID])
         waitForExpectations(timeout: 10)
@@ -7210,7 +8398,7 @@ final class FoundationUITests: XCTestCase {
         let choices = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "calendar-week-add-")).allElementsBoundByIndex
         let itemFrames = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "calendar-item-"))
             .allElementsBoundByIndex.filter(\.exists).map(\.frame)
-        // The pinned hour gutter covers part of a horizontally clipped day column.
+
         let gutterRight = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "calendar-hour-label-"))
             .allElementsBoundByIndex.filter(\.exists).map { $0.frame.maxX }.max() ?? week.frame.minX
         let columnsViewport = CGRect(x: max(week.frame.minX, gutterRight), y: week.frame.minY,
@@ -7347,7 +8535,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Start Date", "2:00 PM")).firstMatch.exists)
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Due Date")).firstMatch.exists)
         boardTap(app, "task-view-close")
-        // Finish this test's own task so repeat runs do not reserve the same Calendar slot.
+
         boardTap(app, "search-complete-" + taskID)
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["search-complete-" + taskID])
         waitForExpectations(timeout: 10)
@@ -7431,7 +8619,7 @@ final class FoundationUITests: XCTestCase {
         tap("calendar-details-close")
         let monthGrid = app.scrollViews["calendar-month-grid"]
         var checkedLeadingBlanks = false
-        // Use a rendered core date key and native cell geometry; no fixture date or weekday assumption.
+
         for _ in 0..<3 {
             let renderedDay = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "calendar-day-")).firstMatch
             XCTAssertTrue(renderedDay.waitForExistence(timeout: 10))
@@ -8179,8 +9367,8 @@ final class FoundationUITests: XCTestCase {
         }
         for kind in ["daily", "weekly"] {
             startGuide(kind)
-            // Existing device-local sessions may be on any step. Navigate using
-            // only exposed Back/Finish controls, then test a fresh first step.
+
+
             if app.buttons["review-guide-finish"].exists {
                 tap("review-guide-finish")
                 enabled(app.buttons["review-start"])
@@ -8218,7 +9406,7 @@ final class FoundationUITests: XCTestCase {
             app.terminate()
             app.launch()
             openReview()
-            // Overview state is session-only, while the opaque guide resumes.
+
             selected("review-scope-due")
             XCTAssertEqual(app.buttons["review-expand-cycle"].label, initialCycle)
             startGuide(kind)
@@ -8234,7 +9422,7 @@ final class FoundationUITests: XCTestCase {
             tap("review-guide-close")
             enabled(app.buttons["review-start"])
         }
-        // Complete only the task this test created, then check the due row is gone.
+
         tap("review-expand-cycle")
         tap("review-expand-cycle")
         _ = revealTask(title + " changed")
@@ -8279,6 +9467,39 @@ final class FoundationUITests: XCTestCase {
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Focus persisted section folds"
         shot.lifetime = .keepAlways; add(shot); app.terminate()
     }
+
+    func testRNCandidateFailedAdmissionKeepsReadyControlsUnavailable() {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--native-rn-rehearsal"]
+        for _ in 0..<2 {
+            app.launch()
+            XCTAssertTrue(app.staticTexts["app-lock-read-error"].waitForExistence(timeout: 30))
+            XCTAssertTrue(app.buttons["app-lock-read-retry"].isEnabled)
+            for identifier in ["capture-open", "tab-focus", "tab-menu", "project-attachment-add", "capture-voice-record"] {
+                let control = app.buttons[identifier]
+                XCTAssertFalse(control.exists && control.isEnabled, identifier)
+            }
+            app.terminate()
+        }
+    }
+
+    func testRNCandidateMalformedNativeAddAnotherOverridesLegacyAcrossColdLaunch() {
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments = ["--native-rn-rehearsal"]
+        for _ in 0..<2 {
+            app.launch()
+            boardEnabled(app.buttons["capture-open"], timeout: 30); boardTap(app, "capture-open")
+            let another = app.switches["capture-add-another"]
+            revealPagedElement(app, another, in: app.scrollViews["capture-scroll"], outerEdge: true)
+            boardEnabled(another)
+            XCTAssertEqual(another.value as? String, "0")
+            boardTap(app, "capture-close"); app.terminate()
+        }
+    }
+
+    func testRNCandidateImportedDetailsAndColdNativeFalseOverride() { focusLegacyDetails(expected: true) }
+    func testRNCandidateNativeEmptyFocusFoldsOverrideLegacy() { focusLegacyFolds(focusOpen: true, nextOpen: true) }
+    func testRNCandidateMalformedNativeFocusFoldsOverrideLegacy() { focusLegacyFolds(focusOpen: true, nextOpen: true) }
 
     func testFocusLegacyFoldAliasAndStrictBooleans() { focusLegacyFolds(focusOpen: false, nextOpen: false) }
     func testFocusLegacyFoldNativeOverrideAndNextPrecedence() { focusLegacyFolds(focusOpen: true, nextOpen: true) }
@@ -8371,7 +9592,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    // Root stages and restores a copied RN library and the app preference domain.
+
     func testFocusLegacyDetailsTrueAndLocalFalseOverride() { focusLegacyDetails(expected: true) }
     func testFocusLegacyDetailsInvalidDefaultsFalse() { focusLegacyDetails(expected: false) }
 
@@ -8469,8 +9690,8 @@ final class FoundationUITests: XCTestCase {
             let element = app.buttons.matching(identifier: id).firstMatch
             enabled(element)
             if id.hasPrefix("focus-filter-token-") {
-                // XCTest misreports selected picker rows with the keyboard open.
-                // Use a real onscreen tap; every following assertion checks the state transition.
+
+
                 let center = CGPoint(x: element.frame.midX, y: element.frame.midY)
                 XCTAssertTrue(app.scrollViews["focus-filter-picker-list"].frame.contains(center))
                 XCTAssertTrue(app.frame.contains(center))
@@ -8507,7 +9728,7 @@ final class FoundationUITests: XCTestCase {
         tap("focus-filter-token-" + first)
         expectation(for: NSPredicate(format: "selected == false AND value == %@", ""), evaluatedWith: app.buttons["focus-filter-token-" + first])
         waitForExpectations(timeout: 10)
-        // Consecutive accepted taps are applied against successive core states.
+
         tap("focus-filter-token-" + first)
         tap("focus-filter-token-" + second)
         selected("focus-filter-token-" + first)
@@ -8595,7 +9816,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["focus-error"].exists)
         for id in ["tab-focus", "tab-inbox", "tab-review", "tab-projects", "tab-menu", "capture-open"] {
             let background = app.buttons[id]
-            // XCTest can retain hidden SwiftUI descendants in its query tree.
+
             XCTAssertFalse(background.exists && background.isEnabled, "Background action enabled under Focus panel: " + id)
             XCTAssertFalse(background.isHittable, "Background action hittable under Focus panel: " + id)
         }
@@ -8622,8 +9843,8 @@ final class FoundationUITests: XCTestCase {
         }
         func reveal(_ element: XCUIElement) {
             enabled(element)
-            // Only scroll the filter body for its offscreen location/priority
-            // fields. Fixed header/footer actions must already be hittable.
+
+
             let body = app.scrollViews.firstMatch
             for _ in 0..<4 where !element.isHittable {
                 if element.frame.minY < body.frame.minY { body.swipeDown() }
@@ -8654,8 +9875,8 @@ final class FoundationUITests: XCTestCase {
         location.typeText(refused)
         waitForFailure()
         XCTAssertTrue(app.buttons["focus-filter-clear"].exists)
-        // Keep a different accepted edit behind the refused location. Its
-        // selected state must survive the explicit location correction.
+
+
         let low = app.buttons["focus-filter-priority-low"]
         reveal(low)
         low.tap()
@@ -8666,8 +9887,7 @@ final class FoundationUITests: XCTestCase {
         waitForRecovery()
         XCTAssertEqual(location.value as? String, "Home")
 
-        // Clear must also supersede a definite refusal, and remain reachable
-        // even when a failed first location has no published active chip.
+
         replace(location, with: refused)
         waitForFailure()
         let high = app.buttons["focus-filter-priority-high"]
@@ -8725,12 +9945,12 @@ final class FoundationUITests: XCTestCase {
         enabled(app.buttons[title])
         let id = String(app.buttons[title].identifier.dropFirst("task-title-".count))
         searchChips("missing-" + suffix)
-        // Contexts search filters chips only; a selected task is still visible, and so is its selected chip (#1301).
+
         enabled(app.buttons[title])
         XCTAssertTrue(app.buttons["contexts-chip-" + first].exists)
         XCTAssertFalse(app.buttons["contexts-chip-" + second].exists)
         searchChips(second)
-        // A long-press adds a token; a tap would switch to it alone (#1427).
+
         enabled(app.buttons["contexts-chip-" + second])
         app.buttons["contexts-chip-" + second].press(forDuration: 1)
         selected("contexts-chip-" + second)
@@ -8741,7 +9961,7 @@ final class FoundationUITests: XCTestCase {
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["contexts-match-any"])
         waitForExpectations(timeout: 10)
         searchChips(first)
-        // Accept a control immediately after text input, including focus resignation.
+
         tap("contexts-chip-all")
         selected("contexts-chip-all")
         tap("contexts-chip-" + first)
@@ -8870,7 +10090,7 @@ final class FoundationUITests: XCTestCase {
         enabled(app.buttons[title + " changed"])
         tap("history-tab-archived")
         let archiveQuery = app.textFields["archive-search"]
-        // Core hides Archive search for an empty library until a filter is active.
+
         let archiveHasSearch = archiveQuery.waitForExistence(timeout: 5)
         if archiveHasSearch {
             archiveQuery.tap()
@@ -8964,7 +10184,7 @@ final class FoundationUITests: XCTestCase {
         enabled(app.buttons["tab-menu"], timeout: 30)
         tap("tab-menu")
         tap("menu-reference")
-        // A large Reference library may place the new task beyond the first window.
+
         tap("reference-overflow-button")
         tap("reference-filter-action")
         XCTAssertTrue(filter.waitForExistence(timeout: 5))
@@ -9054,7 +10274,7 @@ final class FoundationUITests: XCTestCase {
             boardEnabled(app.buttons["tab-menu"], timeout: 30)
             boardTap(app, "tab-menu")
             let item = app.buttons["menu-someday"]
-            if !item.isHittable {
+            if !item.isHittable, app.scrollViews.containing(.button, identifier: "menu-projects").firstMatch.exists {
                 revealPagedElement(app, item, in: app.scrollViews.containing(.button, identifier: "menu-projects").firstMatch)
             }
             boardTap(app, "menu-someday")
@@ -9121,7 +10341,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the cold-recovery test on the same staged library.
+
     func testSomedaySectionCreateSaveFailureKeepsExactRequest() {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", "bef50510-7440-4897-8be6-6056fddf6182"]
@@ -9148,7 +10368,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms the fixture's SQLite failure trigger while retaining its pending journal.
+
     func testSomedaySectionCreateColdRecovery() {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", "bef50510-7440-4897-8be6-6056fddf6182"]
@@ -9248,7 +10468,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before cold recovery; root disarms the SQLite trigger but retains the exact pending journal.
+
     func testSomedaySectionTaskSaveFailureKeepsExactRequest() {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", "8db707bb-ee0b-4e46-92d0-f74f3fe90e83"]
@@ -9352,7 +10572,7 @@ final class FoundationUITests: XCTestCase {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "Someday moved with Undo"; shot.lifetime = .keepAlways; add(shot)
         task81NoticeGone(app)
-        // Selecting the existing assignment must not write or offer another Undo.
+
         task81OpenMove(app); task81Choose(app, title: "No section")
         boardEnabled(app.buttons["someday-overflow-button"])
         XCTAssertFalse(app.buttons["someday-section-move-undo"].exists)
@@ -9383,7 +10603,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "task-status-task81-move")
         XCTAssertTrue(app.buttons["task-complete"].waitForExistence(timeout: 5))
         let moveAction = app.buttons["task-move-section-task81-move"]
-        // Some iOS versions omit disabled confirmation-dialog actions entirely.
+
         XCTAssertTrue(!moveAction.exists || !moveAction.isEnabled)
         if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
         else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap() }
@@ -9608,7 +10828,7 @@ final class FoundationUITests: XCTestCase {
         boardEnabled(app.buttons["someday-section-move-undo"], timeout: 30)
         task81NoticeGone(app)
         XCTAssertFalse(app.staticTexts["someday-section-move-error"].exists)
-        // Root's full-table fixture check proves the returned ID beyond page 100 was assigned.
+
         app.terminate(); app.launch(); task79OpenSomeday(app)
         XCTAssertFalse(app.buttons["someday-section-move-undo"].exists)
         app.terminate()
@@ -9634,7 +10854,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the paired cold test; root's fixture rejects Create SQLite writes until disarmed.
+
     func testSomedayNestedCreateSaveFailureKeepsExactRequest() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -9656,7 +10876,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms the Create trigger while retaining its pending journal.
+
     func testSomedayNestedCreateColdRecoveryLeavesTaskUnmoved() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -9672,7 +10892,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the paired cold test; root's fixture permits Create then rejects Move SQLite writes.
+
     func testSomedayNestedMoveSaveFailureKeepsExactRequest() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -9693,7 +10913,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms the Move trigger while retaining its pending journal.
+
     func testSomedayNestedMoveColdRecoveryDoesNotRepeatCreate() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -9829,7 +11049,7 @@ final class FoundationUITests: XCTestCase {
     }
 
     private func task84AlertButton(_ alert: XCUIElement, id: String, label: String) -> XCUIElement {
-        // Native alerts can expose nested buttons with the same identifier.
+
         let identified = alert.buttons.matching(identifier: id).firstMatch
         return identified.exists ? identified : alert.buttons.matching(identifier: label).firstMatch
     }
@@ -10029,7 +11249,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the paired cold test while the fixture rejects the intended settings update.
+
     func testSomedayManageRenameFailedSaveKeepsExactRequest() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10053,7 +11273,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms the failure trigger but retains the same pending journal.
+
     func testSomedayManageRenameColdRecovery() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10163,7 +11383,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the paired cold test while the isolated fixture rejects target removal.
+
     func testSomedayManageDeleteFailedSaveKeepsExactRequest() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10185,7 +11405,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms only the failure trigger and retains this library's pending journal.
+
     func testSomedayManageDeleteColdRecovery() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10361,7 +11581,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the paired cold test while the isolated SQLite trigger rejects Area removal.
+
     func testManageAreaDeleteFailedSaveKeepsExactRequest() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10381,7 +11601,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms only the failure trigger, preserving this library's pending journal.
+
     func testManageAreaDeleteColdRecovery() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10581,7 +11801,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the paired cold test while the isolated SQLite trigger rejects Person deletion.
+
     func testManagePersonDeleteFailedSaveKeepsExactRequest() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10601,7 +11821,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms only the failure trigger, preserving this library's pending journal.
+
     func testManagePersonDeleteColdRecovery() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -10814,8 +12034,10 @@ final class FoundationUITests: XCTestCase {
             if !app.buttons["settings-back"].exists {
                 boardTap(app, "tab-menu")
                 let settings = app.buttons["menu-settings"]
-                if !settings.isHittable {
-                    revealPagedElement(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
+                boardEnabled(settings)
+                let menuScroll = app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch
+                if !settings.isHittable && menuScroll.exists {
+                    revealPagedElement(app, settings, in: menuScroll)
                 }
                 boardTap(app, "menu-settings")
             }
@@ -10837,7 +12059,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["general-picker-cancel"].waitForExistence(timeout: 10))
         XCTAssertGreaterThanOrEqual(app.buttons["general-picker-cancel"].frame.height, 44 - 0.001)
         if ["theme", "language"].contains(type) {
-            // A full swipe expands the native sheet before precise row-sized scrolls.
+
             app.scrollViews.containing(.button, identifier: "general-option-" + (type == "language" ? "en" : "system")).firstMatch.swipeUp()
         }
     }
@@ -10854,7 +12076,7 @@ final class FoundationUITests: XCTestCase {
         }
     }
 
-    // This regression must also reveal disabled dependency rows without waiting for enabled state.
+
     private func task442Reveal(_ app: XCUIApplication, _ element: XCUIElement, in scroll: XCUIElement, requireEnabled: Bool = true) {
         XCTAssertTrue(scroll.waitForExistence(timeout: 10))
         func viewport() -> CGRect { scroll.frame.intersection(app.frame) }
@@ -10876,7 +12098,7 @@ final class FoundationUITests: XCTestCase {
             let needed = exists ? (above ? visible.minY - element.frame.minY : element.frame.maxY - visible.maxY) + 4 : visible.height * 0.7
             let distance = min(max(44, needed + 24), visible.height * (exists ? 0.4 : 0.7))
             let origin = app.coordinate(withNormalizedOffset: .zero)
-            // Keep drags off the switches and away from the trailing scroll indicator.
+
             let start = origin.withOffset(CGVector(dx: visible.minX + visible.width * 0.2, dy: startY))
             start.press(forDuration: 0.05,
                 thenDragTo: origin.withOffset(CGVector(dx: visible.minX + visible.width * 0.2, dy: startY + (above ? distance : -distance))),
@@ -10887,8 +12109,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(fullyVisible(), "\(element.identifier): row \(element.frame), viewport \(scroll.frame)")
     }
 
-    // Externally stage an isolated library: task master OFF, weekly ON/day Sunday,
-    // morning/evening digest ON, App Lock OFF. These cases never enable a toggle or request permission.
+
     private func task442Notifications(_ suffix: String, largest: Bool) throws {
         let library = try task371Library(suffix, prefix: "MINDWTR_NOTIFICATIONS_UI_")
         continueAfterFailure = false
@@ -10898,7 +12119,7 @@ final class FoundationUITests: XCTestCase {
         app.launch(); defer { app.terminate() }
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
         let settings = app.buttons["menu-settings"]
-        if !settings.isHittable {
+        if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
             task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
         }
         boardTap(app, "menu-settings")
@@ -10912,6 +12133,12 @@ final class FoundationUITests: XCTestCase {
             task442Reveal(app, toggle, in: scroll, requireEnabled: false); XCTAssertFalse(toggle.isEnabled)
             XCTAssertEqual(toggle.value as? String, "0")
         }
+        let badge = app.switches["notifications-app-icon-badge"]
+        task442Reveal(app, badge, in: scroll); boardEnabled(badge)
+        XCTAssertEqual(badge.value as? String, "0")
+        XCTAssertLessThan(app.switches["notifications-dueDateNotificationsEnabled"].frame.maxY, badge.frame.minY + 0.001)
+        XCTAssertLessThan(badge.frame.maxY, app.switches["notifications-weeklyReviewEnabled"].frame.minY + 0.001)
+        XCTAssertFalse(XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.firstMatch.exists)
         for type in ["weeklyReviewEnabled", "dailyDigestMorningEnabled", "dailyDigestEveningEnabled"] {
             let toggle = app.switches["notifications-" + type]
             task442Reveal(app, toggle, in: scroll); boardEnabled(toggle)
@@ -10947,8 +12174,7 @@ final class FoundationUITests: XCTestCase {
     func testNativeNotificationsSettingsNormalDrafts() throws { try task442Notifications("NORMAL", largest: false) }
     func testNativeNotificationsSettingsLargestDrafts() throws { try task442Notifications("LARGEST", largest: true) }
 
-    // Root stages an isolated library with device calendars OFF and App Lock OFF.
-    // Opening and reopening stay passive; these cases never request OS access.
+
     private func task464CalendarSettings(_ suffix: String, largest: Bool) throws {
         let library = try task371Library(suffix, prefix: "MINDWTR_CALENDAR_SETTINGS_UI_")
         continueAfterFailure = false
@@ -10958,7 +12184,7 @@ final class FoundationUITests: XCTestCase {
         app.launch(); defer { app.terminate() }
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
         let settings = app.buttons["menu-settings"]
-        if !settings.isHittable {
+        if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
             task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
         }
         boardTap(app, "menu-settings")
@@ -10994,12 +12220,11 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["tab-menu"].exists)
     }
 
-    // Task594 uses externally staged, offline libraries. The only AI call is the real
-    // private projection reader until Advanced is opened; delay/failure seams run after that reader returns.
+
     private func task594OpenAI(_ app: XCUIApplication, overlapSearch: Bool = false) {
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
         let settings = app.buttons["menu-settings"]
-        if !settings.isHittable {
+        if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
             task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
         }
         boardTap(app, "menu-settings")
@@ -11086,12 +12311,12 @@ final class FoundationUITests: XCTestCase {
             XCTAssertFalse(app.staticTexts["ai-summary-provider"].exists)
             XCTAssertFalse(app.staticTexts["ai-summary-error"].exists)
             if retirement == "lock" {
-                // Recover the fixture's saved disabled lock before judging page retirement.
+
                 boardEnabled(app.buttons["app-lock-read-retry"], timeout: 20)
                 boardTap(app, "app-lock-read-retry")
             }
             if retirement == "host" {
-                // Host identity retirement returns to the root Settings menu.
+
                 let advanced = app.buttons["settings-advanced"]
                 task442Reveal(app, advanced, in: app.scrollViews["settings-scroll"])
                 boardEnabled(advanced, timeout: 30); advanced.tap()
@@ -11126,7 +12351,7 @@ final class FoundationUITests: XCTestCase {
         }
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "AI saved settings \(role)"; shot.lifetime = .keepAlways; add(shot)
         task603Final(app)
-        // Cold reopen reads saved settings again rather than restoring a UI cache.
+
         app.terminate(); app.launch(); task594OpenAI(app, overlapSearch: overlapSearch)
         if fail {
             XCTAssertTrue(app.staticTexts["ai-summary-error"].waitForExistence(timeout: 10))
@@ -11155,7 +12380,7 @@ final class FoundationUITests: XCTestCase {
     func testNativeCalendarSettingsNormalPassiveOpen() throws { try task464CalendarSettings("NORMAL", largest: false) }
     func testNativeCalendarSettingsLargestPassiveOpen() throws { try task464CalendarSettings("LARGEST", largest: true) }
 
-    // Existing subscriptions only; device access stays off and no URL is fetched.
+
     private func task470CalendarSubscriptions(_ suffix: String, largest: Bool, recovery: Bool = false) throws {
         let library = try task371Library(suffix, prefix: "MINDWTR_CALENDAR_SUBSCRIPTION_UI_")
         continueAfterFailure = false
@@ -11167,7 +12392,7 @@ final class FoundationUITests: XCTestCase {
         func openSettings() {
             boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
             let settings = app.buttons["menu-settings"]
-            if !settings.isHittable {
+            if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
                 task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
             }
             boardTap(app, "menu-settings")
@@ -11269,7 +12494,7 @@ final class FoundationUITests: XCTestCase {
         func openSettings() {
             boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
             let settings = app.buttons["menu-settings"]
-            if !settings.isHittable {
+            if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
                 task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
             }
             boardTap(app, "menu-settings")
@@ -11345,7 +12570,7 @@ final class FoundationUITests: XCTestCase {
         let library = try task371Library(suffix, prefix: "MINDWTR_CALENDAR_LOCAL_FILE_UI_")
         continueAfterFailure = false
         let app = XCUIApplication()
-        // Isolated seeded selection exercises the real callback/capture/Add, not the system Files picker.
+
         app.launchArguments = ["--native-ui-test-library", library, "--native-calendar-local-file-picker-fixture",
             "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         if cancel { app.launchArguments += ["--native-calendar-local-file-picker-cancel-once"] }
@@ -11361,7 +12586,7 @@ final class FoundationUITests: XCTestCase {
         func openSettings() {
             boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
             let settings = app.buttons["menu-settings"]
-            if !settings.isHittable {
+            if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
                 task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
             }
             boardTap(app, "menu-settings")
@@ -11484,7 +12709,7 @@ final class FoundationUITests: XCTestCase {
         func openSettings() {
             boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
             let settings = app.buttons["menu-settings"]
-            if !settings.isHittable {
+            if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
                 task442Reveal(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
             }
             boardTap(app, "menu-settings")
@@ -11536,7 +12761,7 @@ final class FoundationUITests: XCTestCase {
     func testNativeCalendarSettingsTestCancel() throws { try task471CalendarSettingsTest("CANCEL") }
     func testNativeCalendarSettingsTestBackground() throws { try task471CalendarSettingsTest("BACKGROUND") }
 
-    // Root stages an actual prepared turn-on journal in this isolated library; no prompt is requested.
+
     func testNativeCalendarSettingsStartupRecoveryPassiveOpen() throws {
         let library = try task371Library("RECOVERY", prefix: "MINDWTR_CALENDAR_SETTINGS_UI_")
         continueAfterFailure = false
@@ -11598,8 +12823,7 @@ final class FoundationUITests: XCTestCase {
         return frame
     }
 
-    // Geometry-only reveal also works for intentionally disabled external rows. It never
-    // taps/enables them, and keeps the established keyboard-aware viewport calculation.
+
     private func task467Reveal(_ app: XCUIApplication, _ element: XCUIElement, in scroll: XCUIElement,
                                horizontal: Bool = false, requireHittable: Bool = true) {
         XCTAssertTrue(scroll.waitForExistence(timeout: 10))
@@ -11633,8 +12857,8 @@ final class FoundationUITests: XCTestCase {
                     XCTFail(state)
                     return
                 }
-                // Geometry already fits. Wait for settling without repeatedly dragging a
-                // different owner; the real focus/edit assertions remain required below.
+
+
                 let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: element)
                 _ = XCTWaiter.wait(for: [hittable], timeout: 1)
                 continue
@@ -11649,8 +12873,8 @@ final class FoundationUITests: XCTestCase {
                 : before ? viewport.minY - row.minY : row.maxY - viewport.maxY) + 4 : extent * 0.7
             var gestureViewport = viewport
             if scroll.identifier == "calendar-layout-scroll" {
-                // A drag that starts in a nested grid/list belongs to that child. The
-                // exposed header gutter is owned by the outer layout, even after it moves.
+
+
                 let childIDs = ["calendar-month-grid", "calendar-month-columns", "calendar-details",
                     "calendar-week-columns", "calendar-week-timeline", "calendar-day-timeline", "calendar-schedule"]
                 let starts = childIDs.compactMap { id -> CGFloat? in
@@ -11716,7 +12940,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(second.frame.midX - first.frame.midX, first.frame.width, accuracy: 1)
     }
 
-    // Root stages isolated shared storage and actual HTTPS ICS fixtures; device calendars stay OFF.
+
     private func task465CalendarFeed(_ suffix: String, largest: Bool, partial: Bool, eventCount: Int = 1) throws {
         let library = try task371Library(suffix, prefix: "MINDWTR_CALENDAR_FEED_UI_")
         continueAfterFailure = false
@@ -11726,7 +12950,7 @@ final class FoundationUITests: XCTestCase {
         app.launch(); defer { app.terminate() }
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
         let calendar = app.buttons["menu-calendar"]
-        if !calendar.isHittable {
+        if !calendar.isHittable, app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch.exists {
             task442Reveal(app, calendar, in: app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch)
         }
         boardTap(app, "menu-calendar")
@@ -11751,7 +12975,7 @@ final class FoundationUITests: XCTestCase {
             } else { XCTAssertFalse(app.staticTexts["calendar-feed-message"].exists) }
         }
         expectEvent("month")
-        // Exercise the event action before the longer mode survey reaches the periodic refresh.
+
         let details = app.scrollViews["calendar-details"], layout = app.scrollViews["calendar-layout-scroll"]
         if layout.exists { task467Reveal(app, details, in: layout, requireHittable: false) }
         task467Reveal(app, event, in: details, requireHittable: false)
@@ -11774,14 +12998,14 @@ final class FoundationUITests: XCTestCase {
             boardTap(app, "calendar-feed-retry")
             expectEvent("month after partial-feed retry")
         }
-        // The rejected preparation checks the actual external busy interval without writing a task.
+
         let query = app.textFields["calendar-query"]
         task467Reveal(app, query, in: details, requireHittable: false)
         task467Contained(app, query, in: details)
         boardEnabled(query)
         if !query.isHittable {
-            // On an isolated synthetic library, retain the actual hierarchy before a
-            // standard element tap. Typed value and real filtering prove interaction.
+
+
             print("Calendar query interaction probe: enabled=\(query.isEnabled), hittable=\(query.isHittable), frame=\(query.frame), viewport=\(task467Viewport(app, details))")
             print(app.debugDescription)
         }
@@ -11841,7 +13065,7 @@ final class FoundationUITests: XCTestCase {
         func read() -> Result<Data, NSError>? { lock.lock(); defer { lock.unlock() }; return result }
     }
 
-    // Test-runner HTTP controls only the synthetic fixture server; it never reaches App configuration.
+
     private func task465Control(_ base: URL, _ operation: String, method: String = "GET") throws -> [String: Any] {
         var request = URLRequest(url: base.appendingPathComponent(operation), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 4)
         request.httpMethod = method
@@ -11850,7 +13074,7 @@ final class FoundationUITests: XCTestCase {
             if error == nil, let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), let data {
                 box.store(.success(data))
             } else {
-                // Keep the random fixture token and endpoint out of test diagnostics.
+
                 box.store(.failure(NSError(domain: "Task465Fixture", code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "Synthetic calendar fixture control failed"])))
             }
@@ -11871,7 +13095,7 @@ final class FoundationUITests: XCTestCase {
             let count = (status["requests"] as? NSNumber)?.intValue ?? 0
             if count > requests, (status["waiting"] as? NSNumber)?.intValue ?? 0 > 0,
                status["released"] as? Bool == false { return count }
-            // A cancelled range may finish inside the shared throttle; Retry deliberately restarts it.
+
             let retry = app.buttons["calendar-feed-retry"]
             if retry.exists && retry.isEnabled && retry.isHittable { retry.tap() }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
@@ -11896,7 +13120,7 @@ final class FoundationUITests: XCTestCase {
         defer { app.terminate(); _ = try? task465Control(control, "release", method: "POST") }
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
         let calendar = app.buttons["menu-calendar"]
-        if !calendar.isHittable {
+        if !calendar.isHittable, app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch.exists {
             task442Reveal(app, calendar, in: app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch)
         }
         boardTap(app, "menu-calendar"); task465Tap(app, "calendar-mode-month")
@@ -12013,18 +13237,18 @@ final class FoundationUITests: XCTestCase {
     private func task468OpenCalendar(_ app: XCUIApplication, day: String, mode: String) {
         boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
         let calendar = app.buttons["menu-calendar"]
-        if !calendar.isHittable {
+        if !calendar.isHittable, app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch.exists {
             task442Reveal(app, calendar, in: app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch)
         }
         boardTap(app, "menu-calendar"); task465Tap(app, "calendar-mode-month")
-        // Copy-owner fixtures select a settled ready feed; held-feed navigation has its separate regression.
+
         task468Ready(app)
         let targetDay = app.buttons["calendar-day-" + day]
         print("Calendar settled-day selection probe: \(targetDay.debugDescription)")
         let before = XCTAttachment(screenshot: app.screenshot())
         before.name = "Calendar settled Month before selecting " + day; before.lifetime = .keepAlways; add(before)
         task465Tap(app, "calendar-day-" + day)
-        // The first selection also changes grid geometry. Await the shared selected trait before changing mode.
+
         expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: targetDay)
         waitForExpectations(timeout: 15)
         let selected = XCTAttachment(screenshot: app.screenshot())
@@ -12066,7 +13290,7 @@ final class FoundationUITests: XCTestCase {
             task467Reveal(app, event, in: timeline, requireHittable: false)
         }
         if allDay && (mode == "day" || mode == "week") && !event.isHittable {
-            // The existing all-day band has a distinct per-day vertical owner.
+
             let owners = app.scrollViews.containing(.button, identifier: event.identifier).allElementsBoundByIndex
                 .filter { $0.frame.width > 0 && $0.frame.height > 0 }
             guard let owner = owners.min(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else {
@@ -12078,8 +13302,8 @@ final class FoundationUITests: XCTestCase {
     }
 
     private func task468CopiedRows(_ app: XCUIApplication, title: String, count: Int) {
-        // Month/timed Day use task UUIDs directly. CalendarDayItem-backed lanes retain their shared kind prefix.
-        // Fixture tasks have stable non-UUID IDs; count distinct copy UUIDs, even across repeated rendered lanes.
+
+
         let copies = app.buttons.matching(NSPredicate(format: "identifier MATCHES %@ AND label CONTAINS %@",
             "calendar-item-(?:scheduled-|deadline-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", title))
         func copyIDs() -> Set<String> { Set(copies.allElementsBoundByIndex.map { String($0.identifier.suffix(36)) }) }
@@ -12120,7 +13344,7 @@ final class FoundationUITests: XCTestCase {
                 "Two Week columns render the same immutable event tuple")
             XCTAssertTrue(app.buttons["calendar-week-day-2026-10-05"].exists, "The canonical Monday week start is used")
         }
-        // Sunday is a later displayed day of the Saturday-starting event. Shared acknowledgment owns its original date.
+
         let event = repeatedWeek ? events.element(boundBy: 1) : events.firstMatch
         let eventID = event.identifier
         task468RevealEvent(app, event: event, mode: mode, allDay: allDay)
@@ -12176,11 +13400,11 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
         let withdrawn = try task465Control(control, "recovery-withdraw", method: "POST")
         XCTAssertEqual(withdrawn["withdrawn"] as? Bool, true)
-        // Real startup consumes the accepted journal before the one-shot App inventory read fails.
+
         app.launchArguments = arguments + ["--native-startup-inventory-read-failure-once"]
         app.launch()
-        // Normal activation/notification lifecycle may retry startup automatically on this same host.
-        // Root's offline audit requires the isolated post-start failure marker before this acknowledgment.
+
+
         task468Created(app, title: "Task465 timed event", mode: "schedule", count: 1, expectFeedFailure: true)
         XCTAssertFalse(app.buttons.matching(identifier: sourceEventID).firstMatch.exists,
             "Accepted recovery must not require the withdrawn original provider event")
@@ -12204,7 +13428,7 @@ final class FoundationUITests: XCTestCase {
         task468OpenEventSheet(app, event: event, title: "Task465 spanning event")
         task468EventAction(app, "createTask")
         if predispatch {
-            // This state is reached only after the real feed drain, immediately before host dispatch.
+
             expectation(for: NSPredicate(format: "value == %@", "held"), evaluatedWith: app.staticTexts["calendar-item-title"])
             waitForExpectations(timeout: 20)
             XCTAssertFalse(app.buttons["persistence-retry"].exists)
@@ -12230,8 +13454,8 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["calendar-action-createTask"].exists)
         XCTAssertFalse(app.staticTexts["calendar-item-error"].exists)
         task468Ready(app)
-        // The accepted warm copy is due Oct10 and is intentionally absent from preserved DayOct11.
-        // Root's exact offline audit requires one row for warm Retry and zero for pre-dispatch cancellation.
+
+
         task468CopiedRows(app, title: "Task465 spanning event", count: 0)
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = predispatch ? "Calendar retired pre-dispatch copy leaves the current day" : "Calendar retired warm acknowledgment leaves the current day"
@@ -12891,7 +14115,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
         if selectAll { replaceProjectNotesText(input, with: text) }
         else {
-            // These short fixtures fit the field; tap past the text inside its padding.
+
             replaceTextView(input, with: text, tapOffset: CGVector(dx: 0.9, dy: 0.5))
         }
         XCTAssertEqual(input.value as? String, text)
@@ -12989,7 +14213,7 @@ final class FoundationUITests: XCTestCase {
         let input = task90OpenEdit(largest, index: 0, name: "Task90 Area largest")
         task90ReplaceName(largest, input, with: "Task90 Edited largest", selectAll: true)
         task90SelectBlue(largest)
-        // A full native swipe brings the sheet’s bottom controls into view.
+
         largest.scrollViews["manage-area-edit-scroll"].swipeUp(velocity: .slow)
         let shot = XCTAttachment(screenshot: largest.screenshot())
         shot.name = "Largest Manage Area editor"; shot.lifetime = .keepAlways; add(shot)
@@ -13058,7 +14282,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Run before the paired cold test while the isolated SQLite trigger rejects this edit.
+
     func testManageAreaEditFailedSaveKeepsExactRequest() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -13079,7 +14303,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms only the failure trigger, preserving this library's pending journal.
+
     func testManageAreaEditColdRecovery() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -13115,7 +14339,7 @@ final class FoundationUITests: XCTestCase {
 
     private func task85Arrow(_ app: XCUIApplication, index: Int, up: Bool) -> XCUIElement {
         let arrow = app.buttons.matching(identifier: "manage-someday-\(up ? "up" : "down")-\(index)").firstMatch
-        // A boundary arrow is intentionally disabled; reveal its row via an enabled sibling.
+
         let rename = app.buttons.matching(identifier: "manage-someday-rename-\(index)").firstMatch
         revealPagedElement(app, rename, in: app.scrollViews["manage-someday-scroll"],
             more: "manage-someday-more", ready: app.buttons["manage-back"])
@@ -13221,7 +14445,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root disarms the fixture's failed-save trigger before the paired cold test.
+
     func testSomedayManageOrderFailedSaveKeepsExactRequest() {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", "fcf4a43e-02c8-41fd-9766-279c9a4c197d"]
@@ -13515,6 +14739,194 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "area-manager-close")
     }
 
+    func testArchiveRetentionReviewCancelSaveNeverAndRestart() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", "200e5e94-1e41-4b90-a43f-190ae4d55bdc"]
+        func open() {
+            app.launch(); boardEnabled(app.buttons["tab-menu"], timeout: 30)
+            boardTap(app, "tab-menu")
+            let settings = app.buttons["menu-settings"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 10))
+            settings.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            task192Reveal(app, "settings-data", buttons: true, scrollID: "settings-scroll")
+            boardTap(app, "settings-data")
+            XCTAssertTrue(app.textFields["archive-retention-days"].waitForExistence(timeout: 15))
+        }
+        func tap(_ id: String) {
+            let button = app.buttons[id]
+            XCTAssertTrue(button.waitForExistence(timeout: 10), app.debugDescription)
+            revealPagedElement(app, button, in: app.scrollViews.firstMatch)
+            boardEnabled(button); button.tap()
+        }
+        func draft(_ days: String) {
+            let field = app.textFields["archive-retention-days"]
+            revealPagedElement(app, field, in: app.scrollViews.firstMatch)
+            field.tap(); field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (field.value as? String ?? "").count) + days)
+            boardTap(app, "archive-retention-keyboard-done")
+        }
+        open()
+        XCTAssertEqual(app.textFields["archive-retention-days"].value as? String, "0")
+        draft("30"); tap("archive-retention-save")
+        tap("archive-retention-cancel")
+        XCTAssertTrue(app.staticTexts["archive-retention-current"].label.contains("Never"))
+        tap("archive-retention-save"); tap("archive-retention-confirm")
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS '30'"),
+            object: app.staticTexts["archive-retention-current"])
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 15), .completed)
+        task337NoRestartGate(app, timeout: 1)
+        app.terminate(); open()
+        XCTAssertEqual(app.textFields["archive-retention-days"].value as? String, "30")
+        tap("archive-retention-never")
+        let never = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS 'Never'"),
+            object: app.staticTexts["archive-retention-current"])
+        XCTAssertEqual(XCTWaiter.wait(for: [never], timeout: 15), .completed)
+        task337NoRestartGate(app, timeout: 1)
+        app.terminate()
+    }
+
+    func testProjectFlowThreeChoicesAndColdRelaunch() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", "200e5e94-1e41-4b90-a43f-190ae4d55bdc"]
+        func open() {
+            app.launch(); boardEnabled(app.buttons["tab-menu"], timeout: 30)
+            boardTap(app, "tab-menu")
+            let projects = app.buttons["menu-projects"]
+            XCTAssertTrue(projects.waitForExistence(timeout: 10))
+            projects.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let row = app.buttons["project-open-task71-project-next"]
+            revealPagedElement(app, row, in: app.scrollViews["projects-scroll"])
+            boardEnabled(row); row.tap(); boardTap(app, "project-details-toggle")
+        }
+        func picker() {
+            let button = app.buttons["project-flow-type"]
+            revealPagedElement(app, button, in: app.scrollViews["project-detail-scroll"])
+            boardEnabled(button); button.tap()
+            for mode in ["parallel", "sequential", "perSection"] {
+                boardEnabled(app.buttons["project-flow-mode-" + mode])
+            }
+        }
+        func choose(_ mode: String, label: String) {
+            picker(); boardTap(app, "project-flow-mode-" + mode)
+            let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label),
+                object: app.staticTexts["project-detail-meta-type"])
+            XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 15), .completed)
+            task337NoRestartGate(app, timeout: 1)
+        }
+        open()
+        let original = app.staticTexts["project-detail-meta-type"].label
+        choose("parallel", label: "Parallel")
+        choose("sequential", label: "Sequential")
+        choose("perSection", label: "Per section")
+        picker()
+        XCTAssertTrue(app.buttons["project-flow-mode-perSection"].isSelected)
+        boardTap(app, "project-flow-mode-close")
+        XCTAssertEqual(app.staticTexts["project-detail-meta-type"].label, "Per section")
+        app.terminate(); open(); picker()
+        XCTAssertTrue(app.buttons["project-flow-mode-perSection"].isSelected)
+        boardTap(app, "project-flow-mode-close")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Per section survives cold launch"; shot.lifetime = .keepAlways; add(shot)
+        let originalMode = original == "Sequential" ? "sequential" : original == "Per section" ? "perSection" : "parallel"
+        choose(originalMode, label: original)
+        app.terminate()
+    }
+
+    func testProjectSectionFlowAndColdRelaunch() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", "200e5e94-1e41-4b90-a43f-190ae4d55bdc"]
+        let sectionTitle = "Section flow UI " + UUID().uuidString.lowercased()
+        let rowPrefix = "project-section-row-"
+        let rows = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", rowPrefix))
+        var sectionID = ""
+        func open() {
+            app.launch(); boardEnabled(app.buttons["tab-menu"], timeout: 30)
+            boardTap(app, "tab-menu")
+            let projects = app.buttons["menu-projects"]
+            XCTAssertTrue(projects.waitForExistence(timeout: 10))
+            projects.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let project = app.buttons["project-open-task71-project-next"]
+            revealPagedElement(app, project, in: app.scrollViews["projects-scroll"])
+            boardEnabled(project); project.tap(); boardTap(app, "project-details-toggle")
+        }
+        func tap(_ id: String) {
+            let sheet = app.scrollViews["project-sections-scroll"]
+            let scroll = sheet.exists ? sheet : app.scrollViews["project-detail-scroll"]
+            let button = app.buttons[id]
+            revealPagedElement(app, button, in: scroll)
+            boardEnabled(button); button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        func parentMode(_ mode: String, label: String) {
+            tap("project-flow-type")
+            boardTap(app, "project-flow-mode-" + mode)
+            let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label),
+                object: app.staticTexts["project-detail-meta-type"])
+            XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 15), .completed)
+            task337NoRestartGate(app, timeout: 1)
+        }
+        func openSections() {
+            tap("project-sections-open")
+            boardEnabled(app.buttons["project-section-add"], timeout: 15)
+        }
+        func sectionChoice(_ label: String, change: Bool = true) {
+            let control = app.segmentedControls["project-section-flow-" + sectionID]
+            revealPagedElement(app, control, in: app.scrollViews["project-sections-scroll"])
+            XCTAssertTrue(control.waitForExistence(timeout: 15))
+            let choice = control.buttons[label]
+            boardEnabled(choice)
+            if change { choice.tap() }
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "selected == true AND enabled == true"), object: choice)
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 15), .completed)
+            XCTAssertFalse(app.staticTexts["project-section-flow-error"].exists)
+            task337NoRestartGate(app, timeout: 1)
+        }
+        open()
+        XCTAssertTrue(app.staticTexts["project-detail-meta-type"].waitForExistence(timeout: 15))
+        let original = app.staticTexts["project-detail-meta-type"].label
+        XCTAssertTrue(["Parallel", "Sequential", "Per section"].contains(original))
+        let originalMode = original == "Sequential" ? "sequential" : original == "Per section" ? "perSection" : "parallel"
+        parentMode("perSection", label: "Per section")
+        openSections()
+        let existingRows = Set(rows.allElementsBoundByIndex.map(\.identifier))
+        tap("project-section-add")
+        let title = app.textFields["project-section-title"]
+        revealPagedElement(app, title, in: app.scrollViews["project-sections-scroll"])
+        boardEnabled(title); title.tap(); title.typeText(sectionTitle)
+        tap("project-section-save")
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: title)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 15), .completed)
+        let ownedRow = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", rowPrefix, sectionTitle)).firstMatch
+        XCTAssertTrue(ownedRow.waitForExistence(timeout: 15))
+        sectionID = String(ownedRow.identifier.dropFirst(rowPrefix.count))
+        XCTAssertFalse(sectionID.isEmpty)
+        XCTAssertFalse(existingRows.contains(rowPrefix + sectionID))
+        let ownership = XCTAttachment(string: "library=200e5e94-1e41-4b90-a43f-190ae4d55bdc\nproject=task71-project-next\nsection=\(sectionID)\ntitle=\(sectionTitle)\noriginalParent=\(original)")
+        ownership.name = "Section flow UI owned fixture"; ownership.lifetime = .keepAlways; add(ownership)
+        sectionChoice("Parallel", change: false)
+        sectionChoice("Sequential")
+        sectionChoice("Parallel")
+        sectionChoice("Sequential")
+        boardTap(app, "project-sections-close")
+        app.terminate(); open()
+        XCTAssertEqual(app.staticTexts["project-detail-meta-type"].label, "Per section")
+        openSections()
+        XCTAssertEqual(app.staticTexts[rowPrefix + sectionID].label, sectionTitle)
+        sectionChoice("Sequential", change: false)
+        let retained = XCTAttachment(screenshot: app.screenshot())
+        retained.name = "Section Sequential survives cold launch"; retained.lifetime = .keepAlways; add(retained)
+        tap("project-section-delete-" + sectionID)
+        let confirm = app.alerts.buttons.matching(identifier: "Delete").firstMatch
+        boardEnabled(confirm); confirm.tap()
+        let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.staticTexts[rowPrefix + sectionID])
+        XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 15), .completed)
+        XCTAssertEqual(Set(rows.allElementsBoundByIndex.map(\.identifier)), existingRows)
+        boardTap(app, "project-sections-close")
+        parentMode(originalMode, label: original)
+        app.terminate()
+    }
+
     func testProjectFlowControlsAndRelaunch() throws {
         try projectFlowControls(library: "d69109d6-f924-47ba-9c02-e1394b1cf895")
     }
@@ -13595,17 +15007,17 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(app.buttons["project-details-toggle"].value as? String, "Expand")
         tap("project-details-toggle"); type("Parallel")
         XCTAssertFalse(app.buttons["project-flow-scope-project"].exists)
-        tap("project-flow-type"); type("Sequential")
+        tap("project-flow-type"); boardTap(app, "project-flow-mode-sequential"); type("Sequential")
         selected("project")
-        tap("project-flow-scope-project") // Materialize the missing raw scope once.
+        tap("project-flow-scope-project")
         boardTap(app, "project-back"); open(targetID); tap("project-details-toggle"); selected("project")
-        tap("project-flow-scope-project") // The repeated exact scope is a no-op.
+        tap("project-flow-scope-project")
         boardTap(app, "project-back"); open(targetID); tap("project-details-toggle"); selected("project")
         tap("project-flow-scope-section")
         selected("section")
-        tap("project-flow-type"); type("Parallel")
+        tap("project-flow-type"); boardTap(app, "project-flow-mode-parallel"); type("Parallel")
         XCTAssertFalse(app.buttons["project-flow-scope-section"].exists)
-        tap("project-flow-type"); type("Sequential")
+        tap("project-flow-type"); boardTap(app, "project-flow-mode-sequential"); type("Sequential")
         selected("section")
         tap("project-flow-scope-project")
         selected("project")
@@ -13961,7 +15373,7 @@ final class FoundationUITests: XCTestCase {
         let notes = app.textViews["project-notes-input"]
         revealPagedElement(app, notes, in: app.scrollViews["project-sections-scroll"].exists ? app.scrollViews["project-sections-scroll"] : app.scrollViews.firstMatch)
         replaceProjectNotesText(notes, with: "Notes before Sections\n")
-        tap("project-sections-open") // First tap must join the dirty Notes save.
+        tap("project-sections-open")
         boardEnabled(app.buttons["project-section-add"])
         XCTAssertFalse(app.buttons["project-back"].isHittable)
         XCTAssertEqual(rows.count, 0)
@@ -13978,7 +15390,7 @@ final class FoundationUITests: XCTestCase {
         tap("project-section-add")
         revealPagedElement(app, title, in: app.scrollViews["project-sections-scroll"].exists ? app.scrollViews["project-sections-scroll"] : app.scrollViews.firstMatch)
         title.tap(); title.typeText("Native Section")
-        tap("project-section-save") // Duplicate titles are allowed by RN.
+        tap("project-section-save")
         saved(2)
         let identifiers = rows.allElementsBoundByIndex.map(\.identifier).sorted()
         XCTAssertEqual(Set(identifiers).count, 2)
@@ -14468,7 +15880,7 @@ final class FoundationUITests: XCTestCase {
             tapButton(app.buttons[id], towardTop: ["project-tags-add", "project-tags-close"].contains(id))
         }
         func tag(_ value: String) -> XCUIElement {
-            // Lazy rows enter the accessibility tree when scrolled into view.
+
             let candidate = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@",
                 "project-tags-choice-", value)).firstMatch
             revealProjectTagControl(app, candidate)
@@ -14520,7 +15932,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(tag("bare").isSelected)
         tap("project-tags-add"); XCTAssertFalse(app.buttons["project-tags-create-save"].isEnabled)
         tap("project-tags-create-cancel")
-        addTag("   ") // RN blank input is a no-op; do not rewrite duplicate legacy tags.
+        addTag("   ")
         tap("project-tags-open"); XCTAssertTrue(tag("#Keep").isSelected)
         addTag("  Added Tag  ")
         tap("project-tags-open"); XCTAssertTrue(tag("#Added Tag").isSelected)
@@ -14529,7 +15941,7 @@ final class FoundationUITests: XCTestCase {
         tap("project-tags-open"); XCTAssertTrue(tag("#Option-29").isSelected)
         tap("project-tags-clear"); closed()
         tap("project-tags-open"); XCTAssertFalse(tag("#Option-29").isSelected)
-        tap("project-tags-clear"); closed() // Already empty must not add a revision.
+        tap("project-tags-clear"); closed()
         tap("project-tags-open"); addTag("Final Tag")
         XCTAssertEqual(app.staticTexts["project-detail-meta-tags"].label, "#Final Tag")
         let capture = XCTAttachment(screenshot: app.screenshot())
@@ -14857,13 +16269,13 @@ final class FoundationUITests: XCTestCase {
         app.activate()
         boardEnabled(app.buttons["project-area-none"])
         XCTAssertTrue(app.buttons["project-area-none"].isSelected)
-        select("project-area-none") // Same canonical selection does not write.
+        select("project-area-none")
         revealPagedElement(app, app.buttons["project-notes-toggle"], in: app.scrollViews.firstMatch, outerEdge: true)
         boardTap(app, "project-notes-toggle"); boardEnabled(notes)
         revealPagedElement(app, notes, in: app.scrollViews.firstMatch)
         notes.tap(); revealPagedElement(app, notes, in: app.scrollViews.firstMatch, outerEdge: true)
         replaceProjectNotesText(notes, with: "Notes before Area opens\n")
-        tap("project-area-open"); select(choice) // First tap flushes Notes before opening.
+        tap("project-area-open"); select(choice)
         XCTAssertEqual(app.staticTexts["project-detail-meta-area"].label, "Metadata Area")
         tap("project-area-open"); XCTAssertTrue(app.buttons[choice].isSelected); select(choice)
         tap("project-area-open"); select("project-area-none")
@@ -15013,7 +16425,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "project-notes-toggle"); boardEnabled(notes)
         revealPagedElement(app, notes, in: app.scrollViews.firstMatch)
         notes.tap()
-        // Reveal the editor above the keyboard without scrolling inside its text.
+
         revealPagedElement(app, notes, in: app.scrollViews.firstMatch, outerEdge: true)
         replaceProjectNotesText(notes, with: "Notes before Review Date opens\n")
         tap("project-review-date-open"); day("28"); close("project-date-done")
@@ -15166,18 +16578,18 @@ final class FoundationUITests: XCTestCase {
         let draft = app.textFields["projects-create-title"]
         draft.tap(); draft.typeText("Retained date Project draft")
         open()
-        // Opening/cancelling must preserve the fixture's legacy timed start date.
+
         tap("project-start-date-open"); changeDay(); sheetTap("project-date-cancel"); closed()
         tap("project-notes-toggle"); boardEnabled(notes)
         replaceProjectNotesText(notes, with: "Notes before date opens\n")
-        tap("project-start-date-open") // One tap joins Notes persistence and presents the wheel.
+        tap("project-start-date-open")
         changeDay(); sheetTap("project-date-done"); closed()
         boardEnabled(app.buttons["project-start-date-open"])
         XCTAssertTrue(app.buttons["project-start-date-open"].isHittable,
                       "Saving a date must retain the scrolled Project Details position")
         tap("project-start-date-open")
         let selected = picker.pickerWheels.allElementsBoundByIndex.map { $0.value as? String ?? "" }
-        sheetTap("project-date-done"); closed() // Same literal day is a no-op.
+        sheetTap("project-date-done"); closed()
         tap("project-start-date-open"); changeDay(); sheetTap("project-date-cancel"); closed()
         tap("project-start-date-open")
         XCTAssertEqual(picker.pickerWheels.allElementsBoundByIndex.map { $0.value as? String ?? "" }, selected)
@@ -15185,7 +16597,7 @@ final class FoundationUITests: XCTestCase {
         tap("project-due-date-open"); sheetTap("project-date-done"); closed()
         revealPagedElement(app, notes, in: app.scrollViews.firstMatch)
         replaceProjectNotesText(notes, with: "Notes before date clears\n")
-        tap("project-start-date-clear") // Dirty Notes must not swallow the first Clear action.
+        tap("project-start-date-clear")
         XCTAssertFalse(app.buttons["project-start-date-clear"].exists)
         tap("project-due-date-clear")
         XCTAssertFalse(app.buttons["project-due-date-clear"].exists)
@@ -15258,11 +16670,11 @@ final class FoundationUITests: XCTestCase {
         open(); status("Active"); tap("project-notes-toggle")
         boardEnabled(notes)
         replaceProjectNotesText(notes, with: "Notes before status opens\n")
-        tap("project-status-open") // One tap joins the Notes save and opens the selector.
+        tap("project-status-open")
         boardEnabled(app.buttons["project-status-waiting"])
         revealPagedElement(app, notes, in: app.scrollViews.firstMatch)
         replaceProjectNotesText(notes, with: "Notes before status changes\n")
-        tap("project-status-waiting") // A second Notes save must retain this requested choice.
+        tap("project-status-waiting")
         status("Waiting")
         XCTAssertFalse(app.buttons["project-status-someday"].exists)
         XCTAssertEqual(notes.value as? String, "Notes before status changes\n")
@@ -15274,9 +16686,9 @@ final class FoundationUITests: XCTestCase {
         open(); status("Waiting")
         tap("project-status-open"); tap("project-status-someday"); status("Someday")
         tap("project-status-open"); tap("project-status-active"); status("Active")
-        tap("project-status-open"); tap("project-status-active") // Exact same-status no-op.
+        tap("project-status-open"); tap("project-status-active")
         XCTAssertFalse(app.buttons["project-status-waiting"].exists)
-        tap("project-status-open"); tap("project-status-open") // RN header re-tap closes without a write.
+        tap("project-status-open"); tap("project-status-open")
         XCTAssertFalse(app.buttons["project-status-waiting"].exists)
         tap("project-notes-toggle")
         XCTAssertEqual(notes.value as? String, "Notes before status changes\n")
@@ -15332,7 +16744,7 @@ final class FoundationUITests: XCTestCase {
             selectAll.tap()
             input.typeText(XCUIKeyboardKey.delete.rawValue)
         }
-        // Text fields expose their placeholder as the value after clearing.
+
         XCTAssertTrue((input.value as? String ?? "").isEmpty || input.value as? String == input.placeholderValue)
         if !text.isEmpty { input.typeText(text) }
         XCTAssertTrue(input.value as? String == text || (text.isEmpty && input.value as? String == input.placeholderValue))
@@ -15382,7 +16794,7 @@ final class FoundationUITests: XCTestCase {
         revealPagedElement(app, heading, in: app.scrollViews.firstMatch)
         XCTAssertTrue(heading.exists)
         tap("project-notes-mode-edit"); raw(first)
-        boardTap(app, "project-back") // Unchanged raw Notes must not write.
+        boardTap(app, "project-back")
         open(); raw(first)
         edit("Back saves once\n"); boardTap(app, "project-back")
         boardEnabled(app.textFields["projects-create-title"])
@@ -15394,7 +16806,7 @@ final class FoundationUITests: XCTestCase {
         edit("Details collapse saves\n"); tap("project-details-toggle")
         XCTAssertEqual(app.buttons["project-details-toggle"].value as? String, "Expand")
         tap("project-details-toggle"); raw("Details collapse saves\n")
-        edit("Type changes once\n"); tap("project-flow-type")
+        edit("Type changes once\n"); tap("project-flow-type"); boardTap(app, "project-flow-mode-sequential")
         let sequential = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Sequential"),
             object: app.staticTexts["project-detail-meta-type"])
         XCTAssertEqual(XCTWaiter.wait(for: [sequential], timeout: 15), .completed)
@@ -15593,7 +17005,7 @@ final class FoundationUITests: XCTestCase {
         toggle(); value("tags", "#home, #project-details-long-tag")
     }
 
-    /// Root stages two deferred Projects in this isolated simulator library.
+
     func testDeferredProjectRenameOpensOnFirstTap() throws {
         let app = XCUIApplication()
         let library = "83bae1d1-a6d7-450f-ae93-3f3bd398338d"
@@ -15781,7 +17193,7 @@ final class FoundationUITests: XCTestCase {
                 && element.frame.maxY <= viewport.maxY { return }
             let downward = element.exists && element.frame.minY < viewport.minY
             if keyboard.exists && keyboard.frame.intersects(scroll.frame) {
-                // Swipe inside the visible content, not the keyboard covering the scroll view.
+
                 let top = app.coordinate(withNormalizedOffset: .zero).withOffset(
                     CGVector(dx: viewport.midX, dy: viewport.minY + viewport.height * 0.2))
                 let bottom = app.coordinate(withNormalizedOffset: .zero).withOffset(
@@ -15810,7 +17222,7 @@ final class FoundationUITests: XCTestCase {
     private func projectManagerTap(_ app: XCUIApplication, _ id: String) {
         let button = app.buttons[id]
         if id == "area-manager-close" {
-            // The fixed header is outside the manager's scrollable content.
+
             XCTAssertTrue(button.waitForExistence(timeout: 10))
         } else if app.scrollViews["area-manager-scroll"].exists {
             revealAreaRenameControl(app, button)
@@ -15820,7 +17232,7 @@ final class FoundationUITests: XCTestCase {
                                outerEdge: !app.scrollViews["projects-scroll"].exists)
         }
         boardEnabled(button)
-        // AX converts frame coordinates through CGFloat; allow rounding noise only.
+
         XCTAssertGreaterThanOrEqual(button.frame.height, 44 - 0.001)
         XCTAssertGreaterThanOrEqual(button.frame.width, 44 - 0.001)
         button.coordinate(withNormalizedOffset: .zero)
@@ -16034,7 +17446,7 @@ final class FoundationUITests: XCTestCase {
     private func projectFilterTap(_ app: XCUIApplication, _ id: String) {
         let button = app.buttons[id]
         if id.hasPrefix("project-filter-token-") {
-            // This flow searches for a single token; XCTest performs its own scroll-to-hit.
+
             boardEnabled(button)
             print("Filtered token: " + button.debugDescription)
             XCTAssertGreaterThanOrEqual(button.frame.height, 44 - 0.001)
@@ -16136,7 +17548,7 @@ final class FoundationUITests: XCTestCase {
         revealPagedElement(app, input, in: app.scrollViews["project-filter-overview-scroll"])
         boardEnabled(input); input.tap(); input.typeText(String(repeating: "x", count: 501))
         boardEnabled(app.buttons["project-filter-retry"])
-        // Keep the caret at the end while correcting the rejected value.
+
         input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 501) + "Office\n")
         XCTAssertEqual(input.value as? String, "Office")
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["project-filter-retry"])
@@ -16215,7 +17627,7 @@ final class FoundationUITests: XCTestCase {
                 }
                 if selectAll.exists { selectAll.tap() }
                 else {
-                    // A long single word may already be fully selected by the press.
+
                     XCTAssertTrue(app.menuItems["Cut"].exists || app.buttons["Cut"].exists)
                 }
                 query.typeText(XCUIKeyboardKey.delete.rawValue)
@@ -16261,7 +17673,7 @@ final class FoundationUITests: XCTestCase {
         project.tap(); boardEnabled(project); XCTAssertTrue(project.isSelected)
         search(String(repeating: "x", count: 501), submit: false)
         XCTAssertTrue(app.staticTexts["board-error"].waitForExistence(timeout: 10))
-        // Correct the rejected query while its caret is still at the end.
+
         query.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 501) + "task78 project 102\n"); boardEnabled(project); XCTAssertTrue(project.isSelected)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Board searched Project picker"; shot.lifetime = .keepAlways; add(shot)
         boardTap(app, "board-filter-close"); boardEnabled(app.buttons["board-filter-open"])
@@ -16502,7 +17914,7 @@ final class FoundationUITests: XCTestCase {
     private func referenceFold(_ app: XCUIApplication, _ id: String, open: Bool, toggle: Bool = false) {
         let identifier = "reference-section-" + id
         let matches = app.buttons.matching(identifier: identifier)
-        // XCTest's identifier matcher uses Unicode equivalence; core IDs do not.
+
         let button = matches.allElementsBoundByIndex.first { $0.identifier.utf8.elementsEqual(identifier.utf8) } ?? matches.firstMatch
         revealPagedElement(app, button, in: app.descendants(matching: .any).matching(identifier: "reference-scroll").firstMatch)
         boardEnabled(button); XCTAssertEqual(button.value as? String, open ? "Collapse" : "Expand")
@@ -16574,7 +17986,7 @@ final class FoundationUITests: XCTestCase {
             boardEnabled(app.buttons["tab-menu"], timeout: 30)
             boardTap(app, "tab-menu")
             let reference = app.buttons["menu-reference"]
-            if !reference.isHittable {
+            if !reference.isHittable, app.scrollViews.containing(.button, identifier: "menu-projects").firstMatch.exists {
                 revealPagedElement(app, reference, in: app.scrollViews.containing(.button, identifier: "menu-projects").firstMatch)
             }
             boardTap(app, "menu-reference")
@@ -16817,6 +18229,23 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "focus-reorder-done"); app.terminate()
     }
 
+    func testPullToSyncKeepsFocusScreen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", "200e5e94-1e41-4b90-a43f-190ae4d55bdc"]
+        app.launch(); boardEnabled(app.buttons["tab-focus"], timeout: 30)
+        boardTap(app, "tab-focus"); boardEnabled(app.buttons["focus-view-options"])
+        let scroll = app.scrollViews.containing(.button, identifier: "focus-view-options").firstMatch
+        XCTAssertTrue(scroll.waitForExistence(timeout: 10))
+        scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            .press(forDuration: 0.1, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
+        boardEnabled(app.buttons["focus-view-options"], timeout: 20)
+        XCTAssertTrue(app.buttons["tab-focus"].isSelected)
+        task337NoRestartGate(app, timeout: 3)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Focus after pull to sync"; shot.lifetime = .keepAlways; add(shot)
+        app.terminate()
+    }
+
     func testFocusGroupingNormal() { focusGroupingFlow(library: "200e5e94-1e41-4b90-a43f-190ae4d55bdc", largest: false) }
     func testFocusGroupingLargestText() { focusGroupingFlow(library: "b7dc20b6-14a0-4240-b9cb-bee8dbf63c10", largest: true) }
 
@@ -16837,7 +18266,7 @@ final class FoundationUITests: XCTestCase {
         if !largest { boardTap(app, "focus-saved-task71-filter") }
         boardTap(app, "focus-view-options")
         if !largest {
-            focusGroupChoice(app, "area") // Same effective grouping still detaches the saved filter.
+            focusGroupChoice(app, "area")
             boardTap(app, "focus-controls-close")
             XCTAssertFalse(app.buttons["focus-saved-task71-filter"].isSelected)
             boardTap(app, "focus-view-options")
@@ -16846,7 +18275,7 @@ final class FoundationUITests: XCTestCase {
         for value in largest ? ["project", "tag", "none", "project"] : ["context", "energy", "priority", "person", "tag", "none", "project"] {
             focusGroupChoice(app, value)
         }
-        focusGroupChoice(app, "project") // Repeating the selected value must not write.
+        focusGroupChoice(app, "project")
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = largest ? "Largest Focus grouping" : "Focus grouping choices"
         shot.lifetime = .keepAlways; add(shot)
@@ -16854,6 +18283,28 @@ final class FoundationUITests: XCTestCase {
         let headers = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "focus-group-header-"))
         revealPagedElement(app, headers.firstMatch, in: app.scrollViews.containing(.button, identifier: "focus-view-options").firstMatch)
         XCTAssertGreaterThan(headers.count, 0)
+        let group = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "focus-group-header-")).firstMatch
+        boardEnabled(group)
+        let groupID = group.identifier
+        let expandedValue = group.value as? String
+        let itemPrefix = "focus-group-item-" + String(groupID.dropFirst("focus-group-header-".count)) + "-"
+        let groupItems = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", itemPrefix))
+        XCTAssertTrue(groupItems.firstMatch.exists)
+        group.tap()
+        XCTAssertNotEqual(group.value as? String, expandedValue)
+        let foldedValue = group.value as? String
+        XCTAssertFalse(groupItems.firstMatch.exists)
+        group.tap()
+        XCTAssertEqual(group.value as? String, expandedValue)
+        XCTAssertTrue(groupItems.firstMatch.exists)
+        group.tap()
+        app.terminate(); app.launch(); boardEnabled(app.buttons["tab-focus"], timeout: 30)
+        boardTap(app, "tab-focus")
+        let restoredGroup = app.buttons[groupID]
+        revealPagedElement(app, restoredGroup, in: app.scrollViews.containing(.button, identifier: "focus-view-options").firstMatch)
+        XCTAssertEqual(restoredGroup.value as? String, foldedValue)
+        restoredGroup.tap()
+        XCTAssertEqual(restoredGroup.value as? String, expandedValue)
         boardTap(app, "tab-inbox"); boardTap(app, "tab-focus")
         boardTap(app, "focus-view-options"); XCTAssertTrue(app.buttons["focus-group-project"].isSelected)
         boardTap(app, "focus-controls-close")
@@ -17228,7 +18679,7 @@ final class FoundationUITests: XCTestCase {
         revealPagedElement(app, reopened, in: app.scrollViews["projects-scroll"])
         reopened.tap(); boardEnabled(app.buttons["project-details-toggle"])
         first("d55f6859-cf8e-4643-a1ad-eff6db59262e")
-        sort("title", choose: "title") // Same choice must not add a revision.
+        sort("title", choose: "title")
         tap("project-task-view-options-button"); tap("project-view-completed-option")
         boardEnabled(app.buttons["project-completed-toggle"])
         tap("project-completed-toggle")
@@ -17323,12 +18774,12 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(input.value as? String, "Saved before completed view\n")
         tap("project-notes-toggle"); tap("project-completed-toggle")
         XCTAssertEqual(app.buttons["project-completed-toggle"].value as? String, "Collapse")
-        tap("project-flow-type")
+        tap("project-flow-type"); boardTap(app, "project-flow-mode-sequential")
         let sequential = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Sequential"),
             object: app.staticTexts["project-detail-meta-type"])
         XCTAssertEqual(XCTWaiter.wait(for: [sequential], timeout: 15), .completed)
         XCTAssertFalse(app.buttons["project-completed-toggle"].exists)
-        tap("project-flow-type")
+        tap("project-flow-type"); boardTap(app, "project-flow-mode-parallel")
         let parallel = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Parallel"),
             object: app.staticTexts["project-detail-meta-type"])
         XCTAssertEqual(XCTWaiter.wait(for: [parallel], timeout: 15), .completed)
@@ -17558,7 +19009,7 @@ final class FoundationUITests: XCTestCase {
         draft.tap(); draft.typeText("Retained tag filter Project draft")
         choose("projects-create-area-" + home)
         tap(toggle); selected("projects-tag-filter-all")
-        choose("projects-tag-filter-4") // #work, inventory sorted by shared JS policy.
+        choose("projects-tag-filter-4")
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         XCTAssertEqual(draft.value as? String, "Retained tag filter Project draft")
         XCTAssertTrue(app.buttons["projects-create-area-" + home].isSelected)
@@ -17571,22 +19022,22 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.buttons[toggle].label.contains("#work"))
         tap(toggle); selected("projects-tag-filter-4")
 
-        choose("projects-tag-filter-2") // composed Unicode
+        choose("projects-tag-filter-2")
         _ = row(target)
         XCTAssertFalse(app.buttons["project-open-" + destination].exists)
-        choose("projects-tag-filter-1") // canonically equivalent, distinct raw tag
+        choose("projects-tag-filter-1")
         _ = row(destination)
         XCTAssertFalse(app.buttons["project-open-" + target].exists)
         choose("projects-tag-filter-none")
         _ = row("120596fd-e02e-4187-8403-c70bcd0fb35a")
         XCTAssertEqual(app.buttons["projects-tag-filter-0"].label, "Empty tag")
-        choose("projects-tag-filter-0") // existing empty raw tag is not No tags.
+        choose("projects-tag-filter-0")
         _ = row("60b46b37-77c2-40c0-b3ce-17faf3217f1e")
         XCTAssertFalse(app.buttons["project-open-120596fd-e02e-4187-8403-c70bcd0fb35a"].exists)
         choose("projects-tag-filter-4")
         area(source)
         selected("projects-tag-filter-4")
-        XCTAssertTrue(app.buttons["projects-tag-filter-3"].exists) // global #home inventory survives Area filtering.
+        XCTAssertTrue(app.buttons["projects-tag-filter-3"].exists)
         choose("projects-tag-filter-3")
         XCTAssertTrue(app.staticTexts["projects-empty"].waitForExistence(timeout: 10))
         choose("projects-tag-filter-4"); _ = row(target)
@@ -17656,7 +19107,7 @@ final class FoundationUITests: XCTestCase {
             XCTAssertEqual(createdChoice.count, 1)
             XCTAssertFalse(createdChoice.firstMatch.isSelected)
             XCTAssertTrue(app.buttons["project-area-choice-170c1eab-65ec-4a38-931d-3f03399b7d17"].isSelected)
-            // Refresh offers the durable Area without silently changing the Project.
+
             boardTap(app, "project-area-close")
         } else {
             XCTAssertTrue(app.staticTexts["project-area-read-error"].exists)
@@ -17751,7 +19202,7 @@ final class FoundationUITests: XCTestCase {
             let button = app.buttons[id]
             revealAreaRenameControl(app, button); boardEnabled(button)
             if id.hasPrefix("area-rename-") {
-                // The native medium sheet scales its 48pt layout; check the screen-space hit region.
+
                 XCTAssertGreaterThanOrEqual(button.frame.height, 44)
                 XCTAssertGreaterThanOrEqual(button.frame.width, 44)
             }
@@ -18312,8 +19763,8 @@ final class FoundationUITests: XCTestCase {
         enabled(app.buttons["capture-save"])
         app.buttons["capture-save"].tap()
         openOwnedTask()
-        // Tomorrow and Next week coincide on Sundays; tapping a selected
-        // quick chip clears it. Choose an unselected chip from the current UI.
+
+
         let quickDateID = ["today", "next_week", "next_month"].map { "task-date-dueDate-quick-" + $0 }
             .first { !app.buttons[$0].isSelected }!
         tap(quickDateID)
@@ -18333,7 +19784,7 @@ final class FoundationUITests: XCTestCase {
         amount.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         amount.typeText(XCUIKeyboardKey.delete.rawValue + "5")
-        // A unit change must read the pending amount, not the previous core reply.
+
         tap("task-start-relative-unit-week")
         assertValue(amount, "5")
         if !app.buttons["task-editor-priority-urgent"].exists { tap("task-editor-section-organization") }
@@ -18344,9 +19795,8 @@ final class FoundationUITests: XCTestCase {
         reveal(amount)
         amount.tap()
         amount.typeText(XCUIKeyboardKey.delete.rawValue)
-        // A zero-offset start label proves the blank edit's core reply arrived.
-        // Keep the raw field empty while focused instead of feeding normalized 0
-        // back into UIKit between Delete and the next digit.
+
+
         assertValue(app.buttons["task-editor-startTime"], dueLabel)
         let rawAmount = amount.value as? String ?? ""
         XCTAssertTrue(rawAmount.isEmpty || rawAmount == amount.placeholderValue,
@@ -18357,7 +19807,7 @@ final class FoundationUITests: XCTestCase {
         openOwnedTask()
         showScheduling()
         assertValue(amount, "2")
-        // Retain the original same-call Delete + digit + immediate Save path too.
+
         amount.tap()
         amount.typeText(XCUIKeyboardKey.delete.rawValue + "2")
         app.buttons["task-editor-save"].tap()
@@ -18374,7 +19824,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(startLabel.isEmpty)
         if !app.buttons["task-editor-priority-urgent"].exists { tap("task-editor-section-organization") }
         XCTAssertTrue(app.buttons["task-editor-priority-urgent"].isSelected)
-        // Date-only, review date and clear remain unsaved through Preview/discard.
+
         tap("task-date-dueDate-date-only", upward: false)
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["task-date-dueDate-date-only"])
         waitForExpectations(timeout: 10)
@@ -18390,6 +19840,101 @@ final class FoundationUITests: XCTestCase {
         assertValue(app.buttons["task-editor-startTime"], startLabel)
         assertValue(app.textFields["task-start-relative-amount"], "2")
         assertValue(app.buttons["task-editor-reviewAt"], initialReviewLabel)
+        tap("task-view-close")
+    }
+
+    func testTaskReminderPolicyAndAdvanceRemindersSaveOnOneTask() throws {
+        let library = try task371Library("TASK", prefix: "MINDWTR_REMINDER_UI_")
+        let app = XCUIApplication()
+        app.launchArguments = task192Arguments(library)
+        app.launch()
+        func enabled(_ element: XCUIElement, timeout: TimeInterval = 10) {
+            XCTAssertTrue(element.waitForExistence(timeout: timeout))
+            expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: element)
+            waitForExpectations(timeout: timeout)
+        }
+        func reveal(_ element: XCUIElement, upward: Bool = true) {
+            for _ in 0..<10 where !element.isHittable {
+                if upward { app.swipeUp() } else { app.swipeDown() }
+            }
+            XCTAssertTrue(element.waitForExistence(timeout: 10))
+        }
+        func tap(_ id: String, upward: Bool = true) {
+            let element = app.buttons.matching(identifier: id).firstMatch
+            reveal(element, upward: upward)
+            enabled(element)
+            element.tap()
+        }
+        func assertValue(_ element: XCUIElement, _ value: String) {
+            expectation(for: NSPredicate(format: "value == %@", value), evaluatedWith: element)
+            waitForExpectations(timeout: 10)
+        }
+        func assertSelected(_ id: String, _ selected: Bool = true) {
+            let element = app.buttons[id]
+            reveal(element)
+            expectation(for: NSPredicate(format: "selected == %@", NSNumber(value: selected)), evaluatedWith: element)
+            waitForExpectations(timeout: 10)
+        }
+        let suffix = String(UUID().uuidString.prefix(8))
+        let edited = "iOS reminders " + suffix
+        let other = "iOS reminders other " + suffix
+        func capture(_ title: String) {
+            enabled(app.buttons["capture-open"], timeout: 30)
+            app.buttons["capture-open"].tap()
+            app.textViews["capture-input"].typeText(title + " /start:tomorrow 4pm /due:tomorrow 5pm")
+            enabled(app.buttons["capture-save"])
+            app.buttons["capture-save"].tap()
+        }
+        func open(_ title: String) {
+            if !app.textFields["search-input"].exists {
+                enabled(app.buttons["search-open"], timeout: 30)
+                app.buttons["search-open"].tap()
+            }
+            let query = app.textFields["search-input"]
+            enabled(query)
+            query.tap()
+            query.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 80) + title)
+            let result = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "search-task-", title)).firstMatch
+            enabled(result)
+            result.tap()
+            tap("task-mode-edit")
+        }
+        capture(edited)
+        capture(other)
+        open(edited)
+        assertSelected("task-reminder-policy-inherit")
+        tap("task-reminder-policy-send")
+        assertSelected("task-reminder-policy-send")
+        tap("task-due-advance")
+        tap("task-due-advance-1440")
+        assertValue(app.buttons["task-due-advance"], "1 day before")
+        tap("task-start-advance", upward: false)
+        tap("task-start-advance-15")
+        assertValue(app.buttons["task-start-advance"], "15 min before")
+        app.buttons["task-editor-save"].tap()
+        XCTAssertTrue(app.textFields["search-input"].waitForExistence(timeout: 15))
+        app.terminate()
+        app.launch()
+        open(edited)
+        assertSelected("task-reminder-policy-send")
+        assertValue(app.buttons["task-due-advance"], "1 day before")
+        assertValue(app.buttons["task-start-advance"], "15 min before")
+        tap("task-reminder-policy-skip")
+        expectation(for: NSPredicate(format: "enabled == false"), evaluatedWith: app.buttons["task-due-advance"])
+        waitForExpectations(timeout: 10)
+        XCTAssertTrue(app.staticTexts["task-due-advance-hint"].waitForExistence(timeout: 10))
+        tap("task-reminder-policy-send")
+        tap("task-date-dueDate-date-only", upward: false)
+        expectation(for: NSPredicate(format: "enabled == false"), evaluatedWith: app.buttons["task-due-advance"])
+        waitForExpectations(timeout: 10)
+        XCTAssertTrue(app.staticTexts["task-due-advance-hint"].waitForExistence(timeout: 10))
+        tap("task-mode-view")
+        tap("task-view-close")
+        tap("task-editor-discard")
+        open(other)
+        assertSelected("task-reminder-policy-inherit")
+        XCTAssertNotEqual(app.buttons["task-due-advance"].value as? String, "1 day before")
+        XCTAssertNotEqual(app.buttons["task-start-advance"].value as? String, "15 min before")
         tap("task-view-close")
     }
 
@@ -18459,8 +20004,8 @@ final class FoundationUITests: XCTestCase {
         interval.typeText(XCUIKeyboardKey.delete.rawValue + "5")
         assertValue(interval, "5")
         interval.typeText(XCUIKeyboardKey.delete.rawValue)
-        // The existing title field is disabled while the shared draft queue
-        // runs. Its re-enable observes the normalized blank reply without blur.
+
+
         enabled(app.descendants(matching: .any).matching(identifier: "task-editor-title").firstMatch)
         XCTAssertTrue(app.keyboards.firstMatch.exists)
         let blank = interval.value as? String ?? ""
@@ -18477,7 +20022,7 @@ final class FoundationUITests: XCTestCase {
         reveal(app.buttons[monday])
         let initialMonday = app.buttons[monday].isSelected
         let initialTuesday = app.buttons[tuesday].isSelected
-        // Three ordered toggles must not collapse into one stale draft snapshot.
+
         app.buttons[monday].tap()
         app.buttons[tuesday].tap()
         app.buttons[monday].tap()
@@ -18504,7 +20049,7 @@ final class FoundationUITests: XCTestCase {
         selected("task-recurrence-strategy")
         assertValue(future, "1")
 
-        // Preview and discard must leave the complete saved recurrence tuple.
+
         tap("task-recurrence-ends-never", upward: false)
         tap("task-recurrence-strategy")
         reveal(future)
@@ -18575,8 +20120,8 @@ final class FoundationUITests: XCTestCase {
         selected("task-recurrence-rule-none")
         XCTAssertFalse(interval.exists)
         XCTAssertFalse(future.exists)
-        // The real draft boundary refuses numeric input over 200 characters.
-        // A failed pure edit must remain discardable without a successful read.
+
+
         tap("task-recurrence-rule-daily")
         reveal(interval)
         interval.tap()
@@ -18666,7 +20211,7 @@ final class FoundationUITests: XCTestCase {
         tags.typeText("tag" + suffix)
         tap("task-tags-suggestion-" + tag)
         XCTAssertTrue(app.keyboards.firstMatch.exists)
-        // Save directly from a focused raw buffer, with no Done/blur normalization wait.
+
         tags.typeText(String(lastTag.dropFirst()))
         tap("task-editor-save")
         _ = inboxTask(title)
@@ -18679,7 +20224,7 @@ final class FoundationUITests: XCTestCase {
         if !app.buttons["task-editor-priority-urgent"].exists { tap("task-editor-section-organization") }
         XCTAssertTrue(app.buttons["task-editor-priority-urgent"].isSelected)
         assertValue(app.textFields["task-editor-tags"], tag + ", " + lastTag)
-        // Preview resolves both buffers but does not persist them; discard restores saved tokens.
+
         let editContexts = app.textFields["task-editor-contexts"]
         for _ in 0..<8 where !editContexts.isHittable { app.swipeDown() }
         enabled(editContexts)
@@ -19033,13 +20578,13 @@ final class FoundationUITests: XCTestCase {
             let untouched = openBackdate()!
             XCTAssertEqual(untouched.value as? String, "17")
             finishBackdate(confirm: false)
-            close() // Opening and cancelling the dialog did not dirty the draft.
+            close()
 
             open("task115-done", title: "Task115 Done")
             _ = openBackdate()
             finishBackdate(confirm: true)
             XCTAssertTrue(app.buttons["task-editor-status-done"].isSelected)
-            boardTap(app, "task-editor-save") // Root's persisted oracle checks the original .678 milliseconds.
+            boardTap(app, "task-editor-save")
             boardEnabled(app.textFields["search-input"])
             boardTap(app, "search-close")
             restart()
@@ -19112,7 +20657,7 @@ final class FoundationUITests: XCTestCase {
         func convert() {
             boardTap(app, "task-more")
             let action = app.buttons["task-reference-action-menu"]; boardEnabled(action)
-            XCTAssertTrue(action.isHittable) // Native Menu owns its row metrics.
+            XCTAssertTrue(action.isHittable)
             let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Reference action menu"; shot.lifetime = .keepAlways; add(shot)
             action.tap()
             boardTap(app, "task-mode-edit")
@@ -19122,7 +20667,7 @@ final class FoundationUITests: XCTestCase {
         open(); convert()
         boardTap(app, "task-view-close"); boardTap(app, "task-editor-discard")
         app.terminate(); app.launch()
-        open(); convert() // Discard retained Reference, so the menu action exists again.
+        open(); convert()
         boardTap(app, "task-editor-save")
         boardEnabled(app.textFields["search-input"])
         app.terminate(); app.launch(); open()
@@ -19183,7 +20728,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(status("next").isHittable, "Parent editor is excluded while the prompt is open")
         boardTap(app, "task-waiting-cancel")
         XCTAssertTrue(status("next").isSelected)
-        close() // Cancel leaves no dirty draft or discard confirmation.
+        close()
 
         open("Focus"); choose("waiting")
         boardEnabled(input); input.tap(); input.typeText("Person113 A")
@@ -19271,7 +20816,7 @@ final class FoundationUITests: XCTestCase {
             let input = assignment(); input.tap()
             boardEnabled(app.keyboards.firstMatch)
             reveal(input)
-            // One text-field paragraph: triple-tap selects all without a floating menu.
+
             input.tap(withNumberOfTaps: 3, numberOfTouches: 1)
             input.typeText(XCUIKeyboardKey.delete.rawValue)
             XCTAssertTrue((input.value as? String ?? "").isEmpty || input.value as? String == input.placeholderValue)
@@ -19306,7 +20851,7 @@ final class FoundationUITests: XCTestCase {
         restart(); openTask("task112-waiting", title: "Task112 Waiting")
         let cleared = assignment(); XCTAssertEqual(cleared.value as? String, cleared.placeholderValue)
         boardTap(app, "task-view-close"); boardTap(app, "search-close")
-        // A bounded suggestions query must not truncate a longer free-text assignment.
+
         openTask("task112-next", title: "Task112 Next")
         let long = String(repeating: "Q", count: 2001)
         let next = assignment(); next.tap(); next.typeText(long)
@@ -19456,7 +21001,7 @@ final class FoundationUITests: XCTestCase {
         titleInput.typeText(" changed")
         tap("task-mode-view")
         tap("task-mode-edit")
-        // Metadata is revealed by its captured value, preserving the default hidden-field preference.
+
         if !app.buttons["task-editor-priority-urgent"].exists { tap("task-editor-section-organization") }
         tap("task-editor-priority-urgent")
         tap("task-editor-energyLevel-high")
@@ -19621,7 +21166,7 @@ final class FoundationUITests: XCTestCase {
             waitForExpectations(timeout: timeout)
         }
         func closeArea() {
-            // The RN-style dismissal target is the backdrop above the sheet.
+
             app.buttons["area-dismiss"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).tap()
             expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.staticTexts["area-title"])
             waitForExpectations(timeout: 10)
@@ -19689,7 +21234,7 @@ final class FoundationUITests: XCTestCase {
         waitEnabled(noArea)
         XCTAssertEqual(noArea.value as? String, excluded)
 
-        // Finish the core cycle, then exercise All from a non-default selection.
+
         noArea.tap()
         expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: all)
         waitForExpectations(timeout: 10)
@@ -19709,7 +21254,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertEqual(area.value as? String, allLabel)
         XCTAssertTrue(task.waitForExistence(timeout: 10))
 
-        // Remove only this test's own task. Leave scope at All for the other tests.
+
         let titleID = task.identifier
         XCTAssertTrue(titleID.hasPrefix("task-title-"))
         let status = app.buttons["task-status-" + String(titleID.dropFirst("task-title-".count))]
@@ -19733,7 +21278,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(input.waitForExistence(timeout: 5))
         let title = "iOS Focus " + UUID().uuidString
         input.typeText(title + " /next")
-        // Keep this task visible independently of the existing Next list's size.
+
         let star = app.buttons["capture-focus"]
         expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: star)
         waitForExpectations(timeout: 10)
@@ -19751,7 +21296,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(task.waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["focus-date"].exists)
 
-        // A tab change refreshes its own surface without changing the default launch tab.
+
         let inbox = app.buttons["tab-inbox"]
         expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: inbox)
         waitForExpectations(timeout: 10)
@@ -19848,8 +21393,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 30))
         XCTAssertTrue(app.staticTexts["@" + token].exists)
 
-        // The saved context is now a core suggestion: selecting and clearing it
-        // uses the same picker edits without persisting a second task.
+
         capture.tap()
         app.buttons["capture-contexts"].tap()
         XCTAssertTrue(query.waitForExistence(timeout: 5))
@@ -19897,8 +21441,8 @@ final class FoundationUITests: XCTestCase {
         let status = app.buttons["task-status-" + String(titleID.dropFirst("task-title-".count))]
         XCTAssertTrue(status.exists)
         status.tap()
-        // SwiftUI's confirmation dialog also exposes a nested button with the
-        // same identifier on iOS 27. Tap its first (accessible) outer control.
+
+
         app.buttons.matching(identifier: "task-complete").firstMatch.tap()
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons[title])
         waitForExpectations(timeout: 10)
@@ -19959,7 +21503,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "manage-unassigned-color-cancel")
         task86OpenColorEditor(app)
         XCTAssertFalse(app.buttons["manage-unassigned-color-option-1"].isSelected)
-        boardTap(app, "manage-unassigned-color-save") // Exact imported custom color: no-op.
+        boardTap(app, "manage-unassigned-color-save")
         task86WaitForColorEditorClose(app)
         task86OpenColorEditor(app)
         task86SelectGreen(app)
@@ -20026,7 +21570,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "manage-unassigned-color-cancel"); app.terminate()
     }
 
-    /// Root checks the same pending journal bytes after each retry and disarms its failure trigger before the cold test.
+
     func testManageUnassignedAreaColorSaveFailure() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -20293,7 +21837,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["manage-area-create-error"].waitForExistence(timeout: 20))
         let save = app.buttons["manage-area-create-save"]
         let scroll = app.scrollViews.containing(.textField, identifier: "manage-area-create-name").firstMatch
-        // Use a full upward swipe to reveal the longer error state.
+
         scroll.swipeUp()
         revealPagedElement(app, save, in: scroll)
         boardEnabled(save)
@@ -20427,7 +21971,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root checks the restored metadata and the entire Tasks table, including the deleted assigned Task.
+
     func testManagePersonCreateRestore() {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", "399138de-da0a-465d-a619-aafe4fa200b5"]
@@ -20485,7 +22029,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Root arms the existing save-failure hook and verifies both retries retain the original journal UUID.
+
     func testManagePersonCreateSaveFailure() {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", "fd51b5a3-23f3-4d7b-8805-ecb79d8f183b"]
@@ -20508,7 +22052,7 @@ final class FoundationUITests: XCTestCase {
         app.terminate()
     }
 
-    /// Paired with SaveFailure: root disarms the hook while retaining the same library and journal.
+
     func testManagePersonCreateColdRecovery() {
         let app = XCUIApplication()
         app.launchArguments = ["--native-ui-test-library", "fd51b5a3-23f3-4d7b-8805-ecb79d8f183b"]
@@ -20570,7 +22114,7 @@ final class FoundationUITests: XCTestCase {
         reference.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
         revealPagedElement(app, reference, in: scroll)
-        // Select the whole single-line paragraph, including the horizontally scrolled suffix.
+
         reference.tap(withNumberOfTaps: 3, numberOfTouches: 1)
         reference.typeText("obsidian://task94/reference")
         XCTAssertEqual(reference.value as? String, "obsidian://task94/reference")
@@ -20766,7 +22310,7 @@ final class FoundationUITests: XCTestCase {
         XCTAssertFalse(app.buttons["app-lock-unlock"].exists, "Successful enable keeps this session unlocked")
         XCUIDevice.shared.press(.home); app.activate()
         task102Gate(app)
-        // Once the automatic attempt was cancelled, it stays concealed until explicit retry.
+
         XCTAssertTrue(app.staticTexts["Mindwtr is still locked."].exists)
         boardTap(app, "app-lock-unlock")
         boardEnabled(app.buttons["general-back"], timeout: 20)
@@ -20780,6 +22324,48 @@ final class FoundationUITests: XCTestCase {
         app.terminate(); app.launchArguments = ["--native-ui-test-library", library]
         app.launch(); task97Open(app)
         XCTAssertEqual(task102LockToggle(app).value as? String, "0")
+        app.terminate()
+    }
+
+    func testAppLockRelockDelayWarmReturnAndColdLaunch() {
+        func openGeneral(_ app: XCUIApplication) {
+            if app.buttons["general-back"].exists { return }
+            boardEnabled(app.buttons["tab-menu"], timeout: 30)
+            boardTap(app, "tab-menu")
+            let settings = app.buttons.matching(identifier: "menu-settings").firstMatch
+            boardEnabled(settings)
+            XCTAssertFalse(settings.frame.isEmpty)
+            XCTAssertTrue(app.frame.intersects(settings.frame))
+            print("App lock settings navigation frame: \(settings.frame), hittable: \(settings.isHittable)")
+            settings.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            boardTap(app, "settings-general")
+            boardEnabled(app.buttons["general-back"])
+        }
+        let library = "200e5e94-1e41-4b90-a43f-190ae4d55bdc"
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library, "--native-app-lock-auth", "success,cancel"]
+        app.launch(); openGeneral(app)
+        if task102LockToggle(app).value as? String == "0" { task102LockToggle(app).tap() }
+        expectation(for: NSPredicate(format: "value == %@ AND enabled == true", "1"), evaluatedWith: app.switches["general-app-lock"])
+        waitForExpectations(timeout: 20)
+        let delay = app.buttons["general-app-lock-delay"]
+        revealPagedElement(app, delay, in: app.scrollViews["general-scroll"])
+        boardTap(app, "general-app-lock-delay"); boardTap(app, "general-option-1")
+        boardEnabled(app.buttons["general-back"])
+        XCUIDevice.shared.press(.home); app.activate()
+        boardEnabled(app.buttons["general-back"], timeout: 20)
+        XCTAssertFalse(app.buttons["app-lock-unlock"].exists)
+        app.terminate()
+        app.launchArguments = ["--native-ui-test-library", library, "--native-app-lock-auth", "cancel,success"]
+        app.launch(); task102Gate(app)
+        boardTap(app, "app-lock-unlock"); openGeneral(app)
+        revealPagedElement(app, delay, in: app.scrollViews["general-scroll"])
+        boardTap(app, "general-app-lock-delay")
+        XCTAssertTrue(app.buttons["general-option-1"].isSelected)
+        boardTap(app, "general-option-0"); boardEnabled(app.buttons["general-back"])
+        task102LockToggle(app).tap()
+        expectation(for: NSPredicate(format: "value == %@ AND enabled == true", "0"), evaluatedWith: app.switches["general-app-lock"])
+        waitForExpectations(timeout: 20)
         app.terminate()
     }
 
@@ -21296,13 +22882,13 @@ final class FoundationUITests: XCTestCase {
         replaceTextView(input, with: "930", tapOffset: CGVector(dx: 0.5, dy: 0.5))
         task106Open(app); task106Pick(app, "capture106-area-a")
         XCTAssertTrue(app.buttons["gtd-default-area"].label.contains("Capture area A"))
-        task106Pick(app, "capture106-area-a") // Stored same choice is a no-op.
+        task106Pick(app, "capture106-area-a")
         boardTap(app, "gtd-default-area")
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Capture default area choices"; shot.lifetime = .keepAlways; add(shot)
         boardTap(app, "gtd-area-cancel")
         app.terminate(); app.launch(); task106Capture(app, area: "Capture area A")
         task106Open(app); task106Pick(app, "")
-        task106Capture(app, area: "Capture area A") // Closing preserves the existing capture draft.
+        task106Capture(app, area: "Capture area A")
         app.terminate(); app.launch(); task106Capture(app, area: "No Area")
         task106Open(app); task106Pick(app, "__active-area__"); task106Pick(app, "")
         boardTap(app, "gtd-capture-back"); boardEnabled(app.buttons["gtd-back"])
@@ -21373,7 +22959,7 @@ final class FoundationUITests: XCTestCase {
     private func task109Pick(_ app: XCUIApplication, _ value: String) {
         let option = app.buttons["gtd-taskEditorPreset-" + value]
         let scroll = app.scrollViews["gtd-taskEditor-scroll"]
-        // LazyVGrid drops off-screen buttons; presets are above the section controls.
+
         for _ in 0..<8 where !option.exists { scroll.swipeDown() }
         revealPagedElement(app, option, in: scroll)
         boardEnabled(option); option.tap()
@@ -22142,7 +23728,7 @@ final class FoundationUITests: XCTestCase {
         boardTap(app, "capture-close"); task106Open(app)
         task107Toggle(app, "quickAddAutoClean", on: true)
         task107Toggle(app, "naturalLanguageDates", on: false)
-        capture(due: true, fill: false) // The retained draft owns its original parse settings.
+        capture(due: true, fill: false)
         boardTap(app, "capture-close"); app.terminate(); app.launch()
         capture(due: false, fill: true)
         boardTap(app, "capture-close"); task106Open(app)
@@ -23025,8 +24611,8 @@ final class FoundationUITests: XCTestCase {
         func reveal(_ id: String, survivorMovedAbove: Bool = false) {
             let title = app.buttons["task-title-" + id]
             if survivorMovedAbove {
-                // After removing the first row, a lazy survivor can be above
-                // the current viewport. Search upward before paging downward.
+
+
                 for _ in 0..<6 where !title.exists { scroll.swipeDown() }
             }
             revealPagedElement(app, title, in: scroll)
@@ -23086,8 +24672,8 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(scroll.waitForExistence(timeout: 30))
 
         func reveal(_ element: XCUIElement, movedAbove: Bool = false) -> XCUICoordinate {
-            // At largest text a group can be taller than this viewport. Its
-            // visible portion is tappable even though the full row cannot fit.
+
+
             func viewport() -> CGRect { scroll.frame.intersection(app.frame).insetBy(dx: 4, dy: 8) }
             func intersection() -> CGRect { element.frame.intersection(viewport()) }
             func enoughVisible() -> Bool {
@@ -23099,8 +24685,8 @@ final class FoundationUITests: XCTestCase {
             for _ in 0..<24 {
                 if enoughVisible() { break }
                 let frame = viewport()
-                // Lazy offscreen rows can report a stale/clipped frame while
-                // still existing. The test knows its traversal direction.
+
+
                 let above = movedAbove
                 let origin = app.coordinate(withNormalizedOffset: .zero)
                 let start = origin.withOffset(CGVector(dx: frame.minX + 8, dy: frame.minY + frame.height * (above ? 0.25 : 0.75)))
@@ -23307,8 +24893,7 @@ final class FoundationUITests: XCTestCase {
         assertTask("task162-second", title: "Task162 Second", priority: "Low")
         XCTAssertFalse(app.buttons["task-title-task162-other"].exists)
 
-        // RN token taps are additive. Clear the selected chip before choosing
-        // another token, so the default All match mode does not form an AND.
+
         tapChip("@task162-common"); selected("all")
         tapChip("@task162-other"); selected("@task162-other")
         assertTask("task162-other", title: "Task162 Other", priority: "Medium")
@@ -23647,8 +25232,8 @@ final class FoundationUITests: XCTestCase {
 
         app.launch()
         openTask()
-        // Old production identifies this saved last-weekday rule as the day-of-month choice.
-        // Stop here on the old build, before changing a draft or touching the database.
+
+
         assertMonthlyCustom()
         screenshot("Task167 saved monthly custom selection")
 
@@ -23664,7 +25249,7 @@ final class FoundationUITests: XCTestCase {
         assertCustom("2")
         boardTap(app, "task-recurrence-custom-cancel")
 
-        // Apply changed only the editor draft. Discard restores the complete saved rule.
+
         boardTap(app, "task-view-close")
         boardTap(app, "task-editor-discard")
         openTask()
@@ -24205,7 +25790,7 @@ final class FoundationUITests: XCTestCase {
             if row.isHittable { break }
         }
         XCTAssertTrue(row.isHittable); row.swipeLeft()
-        let action = app.buttons["done-delete-" + id]; boardEnabled(action, timeout: 15)
+        let action = app.buttons["task-swipe-delete-" + id]; boardEnabled(action, timeout: 15)
         return action
     }
 
@@ -24731,8 +26316,8 @@ final class FoundationUITests: XCTestCase {
         let app = XCUIApplication(); app.launchArguments = ["--native-ui-test-library", "5d8711a5-4be1-45c9-a3c2-5bb650d32bf4"]
         app.launch(); task172OpenArchive(app); boardTap(app, "archive-select-toggle")
         boardEnabled(app.buttons["archive-bulk-select-all"], timeout: 15)
-        // The displayed revision includes its clock minute. Cross that boundary
-        // deliberately; selecting rows must refresh once without writing data.
+
+
         let nextMinute = (floor(Date().timeIntervalSince1970 / 60) + 1) * 60 + 0.5
         while Date().timeIntervalSince1970 < nextMinute { Thread.sleep(forTimeInterval: 0.2) }
         boardTap(app, "archive-bulk-select-all")
@@ -24748,8 +26333,8 @@ final class FoundationUITests: XCTestCase {
     private func task182Filter(_ app: XCUIApplication, _ query: String = "Task182 batch") {
         boardTap(app, "done-overflow-button"); boardTap(app, "done-filter-action")
         let input = app.textFields["done-filter-search"]; boardEnabled(input, timeout: 15)
-        // XCTest27 reports this padded field as non-hittable although its
-        // visible center accepts an ordinary touch (captured UI1221).
+
+
         if input.value as? String != query {
             let center = input.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
             center.tap()
@@ -24815,7 +26400,7 @@ final class FoundationUITests: XCTestCase {
         let first = app.descendants(matching: .any).matching(identifier: "task-title-task182-batch-01").firstMatch
         if restored { XCTAssertTrue(first.waitForExistence(timeout: 15)) }
         else { XCTAssertTrue(first.waitForNonExistence(timeout: 15)) }
-        // RN hides Done rows under archived parents; they remain in SQLite.
+
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "task-title-task182-readonly").firstMatch.exists)
         XCTAssertFalse(app.buttons["persistence-retry"].exists)
     }
@@ -25151,8 +26736,8 @@ final class FoundationUITests: XCTestCase {
                 if more.isHittable { break }
                 scroll.swipeUp(velocity: .fast)
             }
-            // Crossing a minute can refresh a stale page back to offset zero.
-            // Keep the final-page assertion; only repeat the visible readonly More action.
+
+
             for _ in 0..<3 {
                 XCTAssertTrue(more.isHittable); boardEnabled(more); more.tap()
                 if task185Option(app, "#page129").waitForExistence(timeout: 3) { break }
@@ -25244,8 +26829,8 @@ final class FoundationUITests: XCTestCase {
         let actual = previous == input.placeholderValue ? "" : previous
         if actual != query {
             if selectAllBeforeReplacing && !actual.isEmpty {
-                // Task193 searches can overflow at XXXL. Select all instead of
-                // deleting from a caret placed in the middle of the old query.
+
+
                 input.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1)
                 let allLabels = ["Select All", "تحديد الكل"]
                 let nextLabels = ["Next Page", "الصفحة التالية", "التالي"]
@@ -25306,7 +26891,7 @@ final class FoundationUITests: XCTestCase {
         task186Reveal(app, row)
         XCTAssertFalse(app.buttons["task-status-" + id].exists)
         row.swipeLeft()
-        let action = app.buttons.matching(identifier: "reference-delete-" + id).firstMatch
+        let action = app.buttons.matching(identifier: "task-swipe-delete-" + id).firstMatch
         boardEnabled(action, timeout: 15); XCTAssertTrue(action.isHittable)
         return action
     }
@@ -25324,7 +26909,7 @@ final class FoundationUITests: XCTestCase {
     private func task186ReadOnly(_ app: XCUIApplication) {
         let row = app.descendants(matching: .any).matching(identifier: "task-title-task186-readonly").firstMatch
         task186Reveal(app, row); row.swipeLeft()
-        XCTAssertFalse(app.buttons["reference-delete-task186-readonly"].exists)
+        XCTAssertFalse(app.buttons["task-swipe-delete-task186-readonly"].exists)
         row.tap(); boardEnabled(app.buttons["task-view-close"], timeout: 15)
         let edit = app.buttons["task-mode-edit"]; XCTAssertFalse(edit.exists && edit.isEnabled)
         boardTap(app, "task-view-close")
@@ -25431,7 +27016,7 @@ final class FoundationUITests: XCTestCase {
         task186Reveal(app, row)
         XCTAssertFalse(app.buttons["task-status-" + id].exists)
         row.swipeRight()
-        let action = app.buttons.matching(identifier: "reference-next-" + id).firstMatch
+        let action = app.buttons.matching(identifier: "task-swipe-next-" + id).firstMatch
         boardEnabled(action, timeout: 15); XCTAssertTrue(action.isHittable)
         XCTAssertGreaterThanOrEqual(action.frame.height, 44 - 0.001)
         return action
@@ -25439,8 +27024,8 @@ final class FoundationUITests: XCTestCase {
     private func task187ReadOnly(_ app: XCUIApplication) {
         let row = app.descendants(matching: .any).matching(identifier: "task-title-task187-readonly").firstMatch
         task186Reveal(app, row); row.swipeRight()
-        XCTAssertFalse(app.buttons["reference-next-task187-readonly"].exists)
-        row.swipeLeft(); XCTAssertFalse(app.buttons["reference-delete-task187-readonly"].exists)
+        XCTAssertFalse(app.buttons["task-swipe-next-task187-readonly"].exists)
+        row.swipeLeft(); XCTAssertFalse(app.buttons["task-swipe-delete-task187-readonly"].exists)
         row.tap(); boardEnabled(app.buttons["task-view-close"], timeout: 15)
         let edit = app.buttons["task-mode-edit"]; XCTAssertFalse(edit.exists && edit.isEnabled)
         boardTap(app, "task-view-close")
@@ -25536,8 +27121,8 @@ final class FoundationUITests: XCTestCase {
         let cancel = app.buttons.matching(identifier: "reference-status-cancel").firstMatch
         if cancel.exists { boardEnabled(cancel); cancel.tap() }
         else {
-            // iOS 27 presents this confirmation dialog as a popover, whose
-            // standard outside-dismiss region replaces the Cancel button.
+
+
             let dismiss = app.otherElements.matching(identifier: "PopoverDismissRegion").firstMatch
             XCTAssertTrue(dismiss.waitForExistence(timeout: 10))
             dismiss.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.6)).tap()
@@ -25551,12 +27136,12 @@ final class FoundationUITests: XCTestCase {
         let row = rows.allElementsBoundByIndex.first { $0.identifier.utf8.elementsEqual(identifier.utf8) } ?? rows.firstMatch
         task186Reveal(app, row)
         XCTAssertFalse(app.buttons["task-status-" + id].exists)
-        if rtl { row.swipeLeft() } else { row.swipeRight() }
-        let action = app.buttons.matching(identifier: "reference-change-status-" + id).firstMatch
+        row.swipeLeft()
+        let action = app.buttons.matching(identifier: "task-swipe-organize-" + id).firstMatch
         boardEnabled(action, timeout: 15)
         XCTAssertTrue(action.isHittable)
         XCTAssertGreaterThanOrEqual(action.frame.height, 44 - 0.001)
-        if rtl { XCTAssertNotEqual(action.label, "Change status") }
+        if rtl { XCTAssertNotEqual(action.label, "Organize") }
         action.tap()
         for status in ["inbox", "next", "waiting", "someday", "done", "reference"] {
             boardEnabled(app.buttons.matching(identifier: "reference-status-" + status).firstMatch, timeout: 15)
@@ -25686,11 +27271,11 @@ final class FoundationUITests: XCTestCase {
         XCTAssertTrue(last.exists)
         task186Filter(app, "Task188 action")
         let readonly = app.descendants(matching: .any).matching(identifier: "task-title-task188-readonly").firstMatch
-        task186Reveal(app, readonly); readonly.swipeRight()
-        XCTAssertFalse(app.buttons["reference-change-status-task188-readonly"].exists)
-        XCTAssertFalse(app.buttons["reference-next-task188-readonly"].exists)
-        readonly.swipeLeft()
-        XCTAssertFalse(app.buttons["reference-delete-task188-readonly"].exists)
+        task186Reveal(app, readonly); readonly.swipeLeft()
+        XCTAssertFalse(app.buttons["task-swipe-organize-task188-readonly"].exists)
+        XCTAssertFalse(app.buttons["task-swipe-delete-task188-readonly"].exists)
+        readonly.swipeRight()
+        XCTAssertFalse(app.buttons["task-swipe-next-task188-readonly"].exists)
         readonly.tap(); boardEnabled(app.buttons["task-view-close"], timeout: 15)
         let edit = app.buttons["task-mode-edit"]
         XCTAssertFalse(edit.exists && edit.isEnabled)
@@ -25826,8 +27411,8 @@ extension FoundationUITests {
     private func task189ChangeMinute(_ app: XCUIApplication, _ suffix: String) {
         let picker = app.datePickers["reference-backdate-picker"]
         revealPagedElement(app, picker, in: app.scrollViews["reference-backdate-scroll"])
-        // Native wheel order is combined date, hour, minute, then optional AM/PM.
-        // Read the actual value rather than assuming a fixture's completion time.
+
+
         let minute = app.pickerWheels.element(boundBy: 2)
         guard let original = minute.value as? String,
               let match = original.range(of: "[0-9]+", options: .regularExpression),
@@ -25841,8 +27426,8 @@ extension FoundationUITests {
         let input = app.textFields["reference-backdate-time-spent"], scroll = app.scrollViews["reference-backdate-scroll"]
         boardEnabled(input)
         revealPagedElement(app, input, in: scroll, outerEdge: true)
-        // The visible field may report false isHittable while already focused;
-        // retain the measured viewport guard before tapping its trailing edge.
+
+
         XCTAssertGreaterThanOrEqual(input.frame.minY, scroll.frame.minY - 1)
         XCTAssertLessThanOrEqual(input.frame.maxY, scroll.frame.maxY + 1)
         input.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
@@ -25869,8 +27454,8 @@ extension FoundationUITests {
         if edge { button.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap() } else { button.tap() }
         XCTAssertTrue(app.datePickers["reference-backdate-picker"].waitForNonExistence(timeout: 30))
         if save && suffix == "plain" {
-            // This specific historical fixture is the sole active-project source.
-            // Task191 now offers its normal-session prompt after the backdate ACK.
+
+
             let description = app.staticTexts["reference-project-next-action-description"]
             XCTAssertTrue(description.waitForExistence(timeout: 20))
             XCTAssertTrue(description.label.contains("Task189 Active Project"))
@@ -25923,8 +27508,8 @@ extension FoundationUITests {
         app.launch(); task186Open(app); task186Filter(app, "Task189 action", rtl: true); referenceGroup(app, "none")
         task189Open(app, "focused", showMinutes: true, rtl: true)
         XCTAssertNotEqual(app.datePickers["reference-backdate-picker"].label, "Completion time")
-        // Untouched local wheel: root binds the independently recorded minute
-        // and opening/tap wall-clock window; exact milliseconds are host-tested.
+
+
         task189Minutes(app, "45"); task189Finish(app, "focused", save: true)
         app.terminate(); app.launch(); task186Open(app); task186Filter(app, "Task189 action", rtl: true)
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "task-title-task189-focused").firstMatch.exists)
@@ -25939,10 +27524,10 @@ extension FoundationUITests {
         if more.exists { task186Reveal(app, more); boardEnabled(more); more.tap() }
         task186Filter(app, "Task189 action")
         let readonly = app.descendants(matching: .any).matching(identifier: "task-title-task189-readonly").firstMatch
-        task186Reveal(app, readonly); readonly.swipeRight()
-        XCTAssertFalse(app.buttons["reference-change-status-task189-readonly"].exists)
-        XCTAssertFalse(app.buttons["reference-next-task189-readonly"].exists)
-        readonly.swipeLeft(); XCTAssertFalse(app.buttons["reference-delete-task189-readonly"].exists)
+        task186Reveal(app, readonly); readonly.swipeLeft()
+        XCTAssertFalse(app.buttons["task-swipe-organize-task189-readonly"].exists)
+        XCTAssertFalse(app.buttons["task-swipe-delete-task189-readonly"].exists)
+        readonly.swipeRight(); XCTAssertFalse(app.buttons["task-swipe-next-task189-readonly"].exists)
         readonly.tap(); boardEnabled(app.buttons["task-view-close"]); boardTap(app, "task-view-close")
         task189Open(app, "cancel", showMinutes: true); task189ChangeMinute(app, "cancel"); task189Minutes(app, "45")
         task189Finish(app, "cancel", save: false, edge: true)
@@ -25994,8 +27579,8 @@ extension FoundationUITests {
     private func task190Reveal(_ app: XCUIApplication, _ row: XCUIElement) {
         let list = app.descendants(matching: .any).matching(identifier: "reference-scroll").firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 10))
-        // List virtualizes offscreen rows. Scan both directions with measured,
-        // slow drags so a tall card is not skipped by a flick or retained index.
+
+
         for upward in [false, true] {
             for _ in 0..<12 {
                 let viewport = list.frame.intersection(app.frame)
@@ -26019,16 +27604,16 @@ extension FoundationUITests {
     private func task190StatusAction(_ app: XCUIApplication, _ id: String, rtl: Bool = false) {
         let identifier = "task-title-" + id
         let rows = app.descendants(matching: .any).matching(identifier: identifier)
-        // Keep a live query while List cells are recycled during large-text scrolling.
+
         let row = rows.firstMatch
         task190Reveal(app, row)
         XCTAssertFalse(app.buttons["task-status-" + id].exists)
-        if rtl { row.swipeLeft() } else { row.swipeRight() }
-        let action = app.buttons.matching(identifier: "reference-change-status-" + id).firstMatch
+        row.swipeLeft()
+        let action = app.buttons.matching(identifier: "task-swipe-organize-" + id).firstMatch
         boardEnabled(action, timeout: 15)
         XCTAssertTrue(action.isHittable)
         XCTAssertGreaterThanOrEqual(action.frame.height, 44 - 0.001)
-        if rtl { XCTAssertNotEqual(action.label, "Change status") }
+        if rtl { XCTAssertNotEqual(action.label, "Organize") }
         action.tap()
         for status in ["inbox", "next", "waiting", "someday", "done", "reference"] {
             boardEnabled(app.buttons.matching(identifier: "reference-status-" + status).firstMatch, timeout: 15)
@@ -26036,7 +27621,7 @@ extension FoundationUITests {
         XCTAssertTrue(app.buttons.matching(identifier: "reference-status-reference").firstMatch.label.hasPrefix("✓ "))
     }
 
-    // XCUI frames can report 43.99999999999997 for a 44-point target.
+
     private func task190Open(_ app: XCUIApplication, _ suffix: String, rtl: Bool = false) {
         task190StatusAction(app, "task190-" + suffix, rtl: rtl)
         let action = app.buttons.matching(identifier: "reference-status-destination").firstMatch
@@ -26099,8 +27684,8 @@ extension FoundationUITests {
     }
 
     private func task190Filter(_ app: XCUIApplication, _ query: String) {
-        // Clear through the real search chip: tapping a large-text field can
-        // place its insertion point mid-string, so backspaces cannot replace it.
+
+
         let searchChip = app.buttons["reference-chip-search"]
         if searchChip.exists {
             boardEnabled(searchChip); searchChip.tap()
@@ -26121,8 +27706,8 @@ extension FoundationUITests {
             ("same", "Task190 Active Project", ["kind": "project", "id": "task190-active"], "Task190 Active Project"),
             ("unicode", "Cafe", ["kind": "project", "id": "task190-cafe\u{0301}"], "Task190 Cafe\u{0301} NFD")
         ] {
-            // Search targets the row at maximum text size; the normal flow
-            // separately covers the multi-row grouped list and retained folds.
+
+
             if isolateRows { task190Filter(app, "Task190 action " + suffix) }
             task190Open(app, suffix)
             if !query.isEmpty { task190Query(app, query) }
@@ -26160,9 +27745,9 @@ extension FoundationUITests {
         let app = XCUIApplication(); app.launchArguments = ["--native-ui-test-library", "de85126e-45e2-492e-8d2d-8ce68df38427"]
         app.launch(); task186Open(app); task186Filter(app, "Task190 action"); referenceGroup(app, "none")
         let readonly = app.descendants(matching: .any).matching(identifier: "task-title-task190-readonly").firstMatch
-        task186Reveal(app, readonly); readonly.swipeRight()
-        XCTAssertFalse(app.buttons["reference-change-status-task190-readonly"].exists); XCTAssertFalse(app.buttons["reference-next-task190-readonly"].exists)
-        readonly.swipeLeft(); XCTAssertFalse(app.buttons["reference-delete-task190-readonly"].exists)
+        task186Reveal(app, readonly); readonly.swipeLeft()
+        XCTAssertFalse(app.buttons["task-swipe-organize-task190-readonly"].exists); XCTAssertFalse(app.buttons["task-swipe-delete-task190-readonly"].exists)
+        readonly.swipeRight(); XCTAssertFalse(app.buttons["task-swipe-next-task190-readonly"].exists)
         readonly.tap(); boardEnabled(app.buttons["task-view-close"]); boardTap(app, "task-view-close")
         task190Open(app, "cancel")
         let scroll = app.scrollViews["reference-destination-scroll"], more = scroll.buttons["reference-destination-more"]
@@ -26289,9 +27874,8 @@ extension FoundationUITests {
     private func task191Reveal(_ app: XCUIApplication, _ element: XCUIElement, scrollable: Bool = true) -> CGRect {
         if scrollable { XCTAssertTrue(app.scrollViews[task191Prefix + "-scroll"].waitForExistence(timeout: 20)) }
         XCTAssertTrue(element.waitForExistence(timeout: 20))
-        // XCTest can report false hittability for these visible Task191 prompt
-        // controls even when a real tap and exact outcome succeed. Reveal by
-        // measured occlusion only; this does not establish broader AX acceptance.
+
+
         for _ in 0..<(scrollable ? 32 : 0) {
             let viewport = task191Viewport(app, scrollable: scrollable), frame = element.frame
             if task191Inside(frame, viewport: viewport) { break }
@@ -26437,8 +28021,8 @@ extension FoundationUITests {
         boardEnabled(app.buttons["task-completion-undo"], timeout: 5)
         XCTAssertFalse(task191Prompt(app).exists)
         boardTap(app, "task-completion-undo")
-        // The Reference recurrence child stays Reference. RN still offers the
-        // project prompt, with the same transient completion Undo above it.
+
+
         task191OpenPrompt(app, suffix: "recurring")
         let recurringUndo = app.buttons.matching(identifier: "task-completion-undo").firstMatch
         boardEnabled(recurringUndo, timeout: 5); XCTAssertEqual(app.buttons.matching(identifier: "task-completion-undo").count, 1)
@@ -26498,12 +28082,12 @@ extension FoundationUITests {
 
 }
 
-// Task194 requires saved preview contents, not merely a sheet with no Save button.
+
 extension FoundationUITests {
     func testTask194ArchivedReferenceTaskSavedPreviewAndPaging() {
         continueAfterFailure = false
         let app = XCUIApplication()
-        // Root stages an isolated rich archived-project Reference fixture here.
+
         app.launchArguments = task192Arguments("3a67825a-e2b8-45c3-accf-02c3c6fecd70")
         app.launch()
         task186Open(app)
@@ -26583,7 +28167,7 @@ extension FoundationUITests {
     }
 }
 
-// Task192 exercises the shared Reference selection scope through real controls.
+
 extension FoundationUITests {
     private var task192Batch: [String] { (1...4).map { String(format: "task192-batch-%02d", $0) } }
 
@@ -26595,8 +28179,8 @@ extension FoundationUITests {
 
     private func task192Exact(_ app: XCUIApplication, _ id: String, buttons: Bool = false) -> XCUIElement {
         let matches = buttons ? app.buttons.matching(identifier: id) : app.descendants(matching: .any).matching(identifier: id)
-        // ASCII selectors remain live during List virtualization. Only Unicode
-        // twins need enumeration, since XCTest matches canonical equivalents.
+
+
         if id.utf8.allSatisfy({ $0 < 128 }) { return matches.firstMatch }
         return matches.allElementsBoundByIndex.first { $0.identifier.utf8.elementsEqual(id.utf8) } ?? matches.element(boundBy: matches.count)
     }
@@ -26608,14 +28192,16 @@ extension FoundationUITests {
 
     @discardableResult
     private func task192Reveal(_ app: XCUIApplication, _ id: String, buttons: Bool = false,
-                               scrollID: String = "reference-scroll", horizontal: Bool = false, scans: Int = 48, forwardOnly: Bool = false) -> XCUIElement {
+                               scrollID: String = "reference-scroll", horizontal: Bool = false, scans: Int = 48, forwardOnly: Bool = false, clippingScrollID: String? = nil) -> XCUIElement {
         let list = app.descendants(matching: .any).matching(identifier: scrollID).firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 20))
+        let clippingScroll = clippingScrollID.map { app.scrollViews[$0] }
+        if let clippingScroll { XCTAssertTrue(clippingScroll.waitForExistence(timeout: 20)) }
         var previousVisibleRows: String?
         var stalledScans = 0
         var searchUp = false
         for _ in 0..<scans {
-            let viewport = list.frame.intersection(app.frame), element = task192Exact(app, id, buttons: buttons)
+            let viewport = list.frame.intersection(app.frame).intersection(clippingScroll?.frame ?? app.frame), element = task192Exact(app, id, buttons: buttons)
             if element.exists && task192Inside(element.frame, viewport) { return element }
             guard !viewport.isEmpty else { break }
             let frame = element.exists ? element.frame : .zero
@@ -26627,8 +28213,8 @@ extension FoundationUITests {
                     thenDragTo: origin.withOffset(CGVector(dx: x + (left ? distance : -distance), dy: viewport.midY)),
                     withVelocity: .slow, thenHoldForDuration: 0.15)
             } else {
-                // Use List content, not its non-scrolling outer gutter. Slow,
-                // measured drags keep large multi-line rows from flicking past.
+
+
                 if frame.isEmpty {
                     let visibleRows = list.buttons.allElementsBoundByIndex.compactMap { row -> String? in
                         let rect = row.frame
@@ -26646,7 +28232,7 @@ extension FoundationUITests {
                     withVelocity: .slow, thenHoldForDuration: 0.15)
             }
         }
-        let element = task192Exact(app, id, buttons: buttons), viewport = list.frame.intersection(app.frame)
+        let element = task192Exact(app, id, buttons: buttons), viewport = list.frame.intersection(app.frame).intersection(clippingScroll?.frame ?? app.frame)
         if !element.exists || !task192Inside(element.frame, viewport) {
             let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Task192 measured visibility failure"; shot.lifetime = .keepAlways; add(shot)
             let tree = XCTAttachment(string: app.debugDescription); tree.name = "Task192 visibility hierarchy"; tree.lifetime = .keepAlways; add(tree)
@@ -26660,13 +28246,12 @@ extension FoundationUITests {
         let button = task192Reveal(app, id, buttons: true, scrollID: scrollID, horizontal: horizontal, scans: scans, forwardOnly: forwardOnly)
         boardEnabled(button, timeout: 20)
         XCTAssertGreaterThanOrEqual(button.frame.height, 44 - 0.01); XCTAssertGreaterThanOrEqual(button.frame.width, 44 - 0.01)
-        // Task191 demonstrated false XCTest isHittable for some fully visible
-        // custom controls. Record it, then prove the actual tap's exact outcome.
+
+
         print("Task192 tap \(id) frame=\(button.frame) enabled=\(button.isEnabled) hittable=\(button.isHittable)")
         if id == "reference-more" {
-            // SwiftUI exposes the full List cell as this Button's AX frame.
-            // UI1364's screenshot places the visible LTR capsule at x16...70;
-            // tap its center, not the empty middle of the 402-point cell.
+
+
             XCTAssertGreaterThanOrEqual(button.frame.width, 88)
             let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Task192 visible More"; shot.lifetime = .keepAlways; add(shot)
             button.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5))
@@ -26785,7 +28370,7 @@ extension FoundationUITests {
         task186Filter(app, "Task192 Page"); task192Count(app, 1)
         task192Tap(app, "reference-bulk-exit")
         referenceGroup(app, "tag"); task186Filter(app, "Task192 batch")
-        // Both groups expose the same IDs, but the shared selected count is one.
+
         task192Start(app, "task192-batch-01")
         for group in ["Task192 A", "Task192 B"] {
             let duplicate = task192Reveal(app, "reference-select-tag:#" + group + "-task192-batch-01", buttons: true)
@@ -26864,8 +28449,6 @@ extension FoundationUITests {
 }
 
 
-// Task195 stages a fresh rich Reference fixture. Root verifies raw no-op/cancel
-// equality and the actual RN changed-task result independently of this UI test.
 extension FoundationUITests {
     private var task195TagInput: String { "  ###Task195 café 🧭  " }
 
@@ -26918,7 +28501,7 @@ extension FoundationUITests {
         task195OpenTag(app)
         XCTAssertFalse((app.textFields["reference-bulk-tag-input"].value as? String ?? "").contains("canceled input"))
         XCTAssertFalse(app.buttons["reference-bulk-tag-save"].isEnabled)
-        task195TypeTag(app, "###") // Shared canSave permits it; the RN builder produces no updates.
+        task195TypeTag(app, "###")
         boardEnabled(app.buttons["reference-bulk-tag-save"], timeout: 20)
         task195Observe(app, library: library, tag: "###", operation: "addTag-noop")
         boardTap(app, "reference-bulk-tag-save")
@@ -27002,8 +28585,8 @@ extension FoundationUITests {
     func testTask195ReferenceBulkAddTagOriginalJournalColdRecovery() {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = task192Arguments("a6a0c147-cae4-4525-a4bc-4a3f94adad90")
-        // Native owner stages the actual failure DB and byte-exact original
-        // pending journal here, not a freshly synthesized target state.
+
+
         for launch in 0..<2 {
             app.launch()
             if launch == 0 { boardEnabled(app.buttons["reference-overflow-button"], timeout: 30) }
@@ -27019,8 +28602,7 @@ extension FoundationUITests {
     }
 }
 
-// Task193 keeps the Task192 measured viewport controls and exercises all shared
-// Reference status choices against fresh task-owned libraries staged by root.
+
 extension FoundationUITests {
     private var task193Statuses: [String] { ["inbox", "next", "waiting", "someday", "done"] }
     private func task193IDs(_ status: String) -> [String] { (1...4).map { String(format: "task193-%@-%02d", status, $0) } }
@@ -27033,13 +28615,13 @@ extension FoundationUITests {
         let chips = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reference-chip-"))
         func hasRequestedScope() -> Bool {
             if query.isEmpty { return !search.exists && archived.exists && chips.count == 1 }
-            // Core/native build the localized label as Remove: Search: query.
-            // Read the entire query from AX, including text outside the viewport.
+
+
             return search.exists && search.label.components(separatedBy: ": ").dropFirst(2).joined(separator: ": ").utf8.elementsEqual(query.utf8)
                 && archived.exists && chips.count == 2
         }
-        // Viewer close refreshes this same scope. Reopening its filter panel
-        // immediately adds a redundant touch during the dismissal transition.
+
+
         if !hasRequestedScope() { task186Filter(app, query, rtl: rtl, selectAllBeforeReplacing: true) }
         let ready = NSPredicate { _, _ in hasRequestedScope() && (query.isEmpty || search.isEnabled) && archived.isEnabled }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: nil)], timeout: 20), .completed)
@@ -27275,8 +28857,6 @@ extension FoundationUITests {
 }
 
 
-// Task196 Reference Remove uses fresh root-staged fixtures and exact UTF-8 AX
-// identities. Core/RN and raw snapshots independently prove persisted effects.
 extension FoundationUITests {
     private var task196Picks: [String] {
         ["#Task196 café 🧭", "#Task196 cafe\u{301} 🧭", "#Task196 CASE", "#Task196 imported " + String(repeating: "x", count: 2_001)]
@@ -27293,7 +28873,7 @@ extension FoundationUITests {
     private func task196Control(_ app: XCUIApplication, _ id: String, field: Bool = false) -> XCUIElement {
         let element = field ? app.textFields[id] : app.buttons[id]
         if field || ["reference-bulk-remove-tag-save", "reference-bulk-remove-tag-cancel"].contains(id) {
-            // Search and actions remain outside the scrolling option list.
+
             boardEnabled(element, timeout: 20)
             XCTAssertTrue(task192Inside(element.frame, app.frame))
             if app.keyboards.firstMatch.exists { XCTAssertFalse(element.frame.intersects(app.keyboards.firstMatch.frame)) }
@@ -27336,7 +28916,7 @@ extension FoundationUITests {
         }
         let current = input.value as? String ?? "", old = current == input.placeholderValue ? "" : current
         if keyboardProbe {
-            // Exercise actual software keys independently of typeText injection.
+
             XCTAssertTrue(old.isEmpty); XCTAssertEqual(text, "caf")
             var expected = ""
             for letter in ["c", "a", "f"] {
@@ -27388,8 +28968,8 @@ extension FoundationUITests {
 
     private func task196Pick(_ app: XCUIApplication, _ value: String) {
         let chip = task196ExactChip(app, value), scroll = app.scrollViews["reference-bulk-remove-tag-scroll"]
-        // Imported full labels can be taller than the viewport. Tap only a
-        // measured visible intersection, preserving the full value and AX label.
+
+
         var visible = CGRect.zero
         for _ in 0..<24 {
             var viewport = scroll.frame.intersection(app.frame)
@@ -27460,8 +29040,8 @@ extension FoundationUITests {
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Task196 visible Done before coordinate tap"
         shot.lifetime = .keepAlways; add(shot)
         print("Task196 visible Done coordinate frame=" + String(describing: visibleDone) + " fixture=" + library)
-        // Element tap interruption handling cancels this app-owned modal.
-        // Use the same measured app-coordinate pattern as the token chips.
+
+
         app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
             dx: visibleDone.midX - app.frame.minX, dy: visibleDone.midY - app.frame.minY)).tap()
         XCTAssertTrue(app.alerts["reference-bulk-remove-tag-dialog"].exists)
@@ -27479,7 +29059,7 @@ extension FoundationUITests {
         app.launch(); task186Open(app); referenceGroup(app, "none"); task193Range(app, status: "inbox", rtl: rtl)
         task196OpenRemove(app)
         if largest {
-            // Exercise keyboard dismissal/refocus before the long paged union.
+
             let input = task196Control(app, "reference-bulk-remove-tag-input", field: true)
             input.tap()
             let keyboard = app.keyboards.firstMatch
@@ -27507,8 +29087,8 @@ extension FoundationUITests {
             _ = task196Control(app, "reference-bulk-remove-tag-input", field: true)
             print("Task196 largest keyboard hide/refocus exact query PASS fixture=" + library)
         }
-        // Unfiltered union is210. Two actual More actions publish100/100/10;
-        // the real-host suite independently checks every value and revision.
+
+
         XCTAssertTrue(app.buttons["reference-bulk-remove-tag-option-99"].exists)
         XCTAssertFalse(app.buttons["reference-bulk-remove-tag-option-100"].exists)
         for boundary in [199, 209] {
@@ -27684,7 +29264,7 @@ extension FoundationUITests {
     func testTask196ReferenceBulkRemoveTagOriginalJournalColdRecovery() {
         continueAfterFailure = false
         let app = XCUIApplication(); app.launchArguments = task192Arguments("bcd47dde-a273-4e68-b705-c8b61933b7ae")
-        // Stage only the accepted failure DB plus its actual final pending bytes.
+
         for launch in 0..<2 {
             app.launch()
             if launch == 0 { boardEnabled(app.buttons["reference-overflow-button"], timeout: 30) }
@@ -27943,7 +29523,7 @@ extension FoundationUITests {
         app.launchArguments = task192Arguments(library, rtl: rtl, largest: largest)
         app.launch()
         if rtl {
-            // Arabic requires the shared explicit Language setting, not a system-locale hint.
+
             task97Open(app); task97Picker(app, "language"); task97Choose(app, "ar")
             task197Observe(app, "Arabic Language setup settled")
             boardTap(app, "general-back"); boardTap(app, "settings-back")
@@ -28046,13 +29626,13 @@ extension FoundationUITests {
 
 }
 
-// Task423: static About navigation never launches an external site in UI tests.
+
 extension FoundationUITests {
     private func task423Settings(_ app: XCUIApplication) {
         boardEnabled(app.buttons["tab-menu"], timeout: 30)
         boardTap(app, "tab-menu")
         let settings = app.buttons["menu-settings"]
-        if !settings.isHittable {
+        if !settings.isHittable, app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch.exists {
             revealPagedElement(app, settings, in: app.scrollViews.containing(.button, identifier: "menu-settings").firstMatch)
         }
         boardTap(app, "menu-settings")
@@ -28131,7 +29711,7 @@ extension FoundationUITests {
     }
 }
 
-// Task427's fixed unavailable fixture never contacts Apple or opens the store.
+
 extension FoundationUITests {
     func testTask427AboutManualUpdateAndRatingUnavailableLargestAndCold() {
         continueAfterFailure = false
@@ -28180,7 +29760,7 @@ extension FoundationUITests {
     }
 }
 
-// Blank endpoint reaches the actual fail-closed configuration API; this case sends no feedback.
+
 extension FoundationUITests {
     private func task433OpenFeedback(_ app: XCUIApplication) {
         if !app.buttons["about-back"].exists {
@@ -28201,8 +29781,8 @@ extension FoundationUITests {
 
     private func task433Reveal(_ app: XCUIApplication, _ element: XCUIElement) {
         let scroll = app.scrollViews["feedback-scroll"]
-        // Lazy locations lose their AX element offscreen; the non-lazy heading
-        // supplies an existing frame so the shared helper can first scroll up.
+
+
         let whereHeading = app.staticTexts["Where did this happen?"]
         if element.exists && element.identifier == "feedback-message" && element.frame.isEmpty {
             revealPagedElement(app, app.staticTexts["Message"], in: scroll, ready: app.buttons["feedback-back"], outerEdge: true)
@@ -28381,7 +29961,7 @@ extension FoundationUITests {
         let title = "Task497 acknowledged read failure"
         task497Capture(app, title: title); boardTap(app, "capture-save-edit")
         task497Editor(app, title: title, readRetry: true); boardTap(app, "task-view-close")
-        // Closing the clean editor refreshes its caller and clears the read failure.
+
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["persistence-retry"])
         waitForExpectations(timeout: 30)
         XCTAssertFalse(app.buttons["task-editor-save"].exists)
@@ -28611,7 +30191,7 @@ extension FoundationUITests {
     func testTask500CountAndPreparedByteBoundsRetainEditableDraft() throws {
         let countApp = try task500App("COUNT", paste: "count")
         defer { countApp.terminate() }
-        // Choose the real shared language setting, rather than injecting translated fixture copy.
+
         task97Open(countApp); task97Picker(countApp, "language"); task97Choose(countApp, "zh")
         task97Picker(countApp, "language")
         let selected = countApp.buttons["general-option-zh"]
@@ -28683,7 +30263,7 @@ extension FoundationUITests {
         boardEnabled(app.buttons["persistence-retry"], timeout: 30)
         let ids = task497State(app)["linesIds"] as? [String] ?? []; XCTAssertEqual(ids.count, 2)
         app.terminate()
-        // The isolated injector is configured only before a request exists; cold replay uses the real pending journal.
+
         app.launchArguments.removeAll { $0 == "--native-capture-terminal-failure-once" }
         app.launch(); boardEnabled(app.buttons["capture-open"], timeout: 30)
         XCTAssertFalse(app.textViews["capture-input"].exists); XCTAssertFalse(app.buttons["task-editor-save"].exists)
@@ -28717,9 +30297,7 @@ extension FoundationUITests {
         boardTap(acceptedApp, "capture-save-edit-fixture-release"); task500SavedOnce(acceptedApp, expected: ids)
     }
 
-    // Externally staged, isolated Trash libraries; these use the actual public
-    // native bulk owner. Delivery holds occur after a real Host response. The
-    // terminal flag uses the native journalRemove fault, never an App save fake.
+
     private func task503App(_ suffix: String, mode: String = "", largest: Bool = false,
                             terminal: Bool = false, language: String = "en-US") throws -> XCUIApplication {
         let library = try task371Library(suffix, prefix: "MINDWTR_TRASH_BULK_UI_")
@@ -28757,7 +30335,7 @@ extension FoundationUITests {
             boardTap(app, id)
             task503Wait(app) { $0["busy"] as? Bool == false }
             if task503State(app)["selectedCount"] as? Int == selectedCount { return }
-            // A minute rollover can reject the displayed revision; press the refreshed row explicitly.
+
             guard attempt == 0, app.staticTexts["trash-error"].exists,
                   app.staticTexts["trash-error"].label.hasPrefix("STALE_REVISION:") else { break }
             revealPagedElement(app, row, in: list)
@@ -28930,7 +30508,7 @@ extension FoundationUITests {
         XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 10), .completed)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
-        // shortcut: iOS 27 reports foreground before its zoom finishes; remove when XCTest waits for that transition.
+
         Thread.sleep(forTimeInterval: 1)
         XCTAssertEqual(app.state, .runningForeground)
     }
@@ -28984,8 +30562,7 @@ extension FoundationUITests {
         }
     }
 
-    // Task508 uses real public Host calls and the existing isolated terminal
-    // journalRemove fault. These authored cases require staged libraries +507.
+
     private func task508App(_ suffix: String, mode: String = "", largest: Bool = false,
                             terminal: Bool = false, language: String = "en-US") throws -> XCUIApplication {
         let library = try task371Library(suffix, prefix: "MINDWTR_TRASH_PURGE_UI_")
@@ -29137,7 +30714,7 @@ extension FoundationUITests {
     func testTask508AlertOpenSavedArrivalSurvivesFrozenClear() throws {
         let app = try task508App("ARRIVAL", mode: "arrival"); defer { app.terminate() }
         boardTap(app, "trash-clear"); task508Alert(app)
-        // Confirm is enabled only after actual Reference->Trash Host persistence.
+
         boardEnabled(app.alerts.firstMatch.buttons.matching(identifier: "trash-purge-confirm").firstMatch, timeout: 30)
         boardTap(app, "trash-purge-confirm"); task508Settled(app, count: 140, total: 1)
         XCTAssertEqual(task503State(app)["mutationCompleted"] as? Bool, true)
@@ -29151,9 +30728,8 @@ extension FoundationUITests {
     func testTask508OrdinaryRefreshPreservesOpenFrozenPurgeConfirmation() throws {
         let app = try task508App("ALERT_REFRESH", mode: "ordinary-refresh"); defer { app.terminate() }
         boardTap(app, "trash-clear"); task508Alert(app)
-        // The isolated fixture requests the shipping refresh() after the real
-        // alert opens. Without the guard it holds an actual areaFilter reply
-        // while busy, making the old enabled Confirm silently cancel the claim.
+
+
         task503Wait(app) { $0["mutationCompleted"] as? Bool == true || $0["held"] as? Bool == true }
         let state = task503State(app)
         XCTAssertEqual(state["mutationError"] as? String, "")
@@ -29321,8 +30897,8 @@ extension FoundationUITests {
         task503BackgroundAndReturn(app)
         boardEnabled(app.buttons["trash-clear"], timeout: 30)
         XCTAssertFalse(app.alerts.firstMatch.exists)
-        // Opening the replacement exercises the old confirm + dismissal IDs
-        // synchronously against the new real snapshot; neither may consume it.
+
+
         boardTap(app, "trash-clear"); task508Alert(app)
         boardTap(app, "trash-purge-cancel")
         XCTAssertEqual(task503State(app)["mutationCompleted"] as? Bool, true)
@@ -29518,7 +31094,7 @@ extension FoundationUITests {
         task583Tap(app, "pomodoro-complete")
         XCTAssertTrue(app.staticTexts["task-completion-notice"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["persistence-error"].exists)
-        // RN keeps the linked task after completion; the saved row is checked by the fixture audit.
+
         XCTAssertEqual(linked.label, "Task583 outside Focus")
         let change = app.buttons["pomodoro-link"]
         revealPagedElement(app, change, in: app.scrollViews.firstMatch); boardEnabled(change); change.tap()
@@ -29698,7 +31274,7 @@ extension FoundationUITests {
 
 }
 
-// Task601 fixtures use the actual typed App route and externally staged offline libraries.
+
 extension FoundationUITests {
     private func task601App(_ role: String, flags: [String] = [], largest: Bool = false) throws -> XCUIApplication {
         continueAfterFailure = false
@@ -29814,7 +31390,7 @@ extension FoundationUITests {
         let app = try task601App(role, flags: flags); defer { app.terminate() }
         task601Advanced(app); task601Choose(app, 60)
         XCTAssertTrue(app.staticTexts["ai-timeout-save-error"].waitForExistence(timeout: 20))
-        // The initial typed save exhausts five real SQL COMMIT attempts.
+
         task601State(app, "failure=true;exact=false;commits=5;retired=false")
         XCTAssertEqual(app.staticTexts["ai-summary-timeout"].label, "30 seconds")
         if retirement == "background" { task601Background(app) }
@@ -29840,7 +31416,7 @@ extension FoundationUITests {
     func testNativeAITimeoutReplacementHostCannotRetryUncertainOwner() throws {
         let app = try task601App("COMMIT_HOST", flags: ["--native-ai-timeout-commit-failure-once"]); defer { app.terminate() }
         task601Advanced(app); task601Choose(app, 60)
-        // The initial typed save exhausts five real SQL COMMIT attempts.
+
         task601State(app, "failure=true;exact=false;commits=5;retired=false")
         boardTap(app, "ai-summary-test-host")
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.staticTexts["ai-summary-title"])
@@ -30141,7 +31717,7 @@ extension FoundationUITests {
         XCTAssertTrue(app.staticTexts["persistence-error"].exists)
     }
 
-    // Task736 uses externally staged independent fixtures and authors no screenshots.
+
     func testInboxSortNormalAndColdRead() throws { try task736InboxSort("NORMAL") }
     func testInboxSortLargestTextAndColdRead() throws { try task736InboxSort("LARGEST", largest: true) }
 
@@ -30169,7 +31745,7 @@ extension FoundationUITests {
             XCTAssertTrue(app.buttons["tab-inbox"].isSelected)
             task736AssertFirst(app, "055")
         }
-        // Reaching item001 traverses the first50 plus the revision-checked5-row continuation.
+
         let tail = app.buttons["task-title-inbox-sort-001"]
         revealPagedElement(app, tail, in: app.descendants(matching: .any)["inbox-scroll"].firstMatch, more: "inbox-more", ready: app.buttons["inbox-sort-open"])
         XCTAssertTrue(tail.exists); XCTAssertTrue(tail.isHittable)
@@ -30212,7 +31788,7 @@ extension FoundationUITests {
         XCTAssertEqual(titles.min(by: { $0.frame.minY < $1.frame.minY })?.identifier, title.identifier)
     }
 
-    // Task737 uses fresh externally staged libraries, including two heading paging boundaries.
+
     func testInboxGroupNormalAndColdRead() throws { try task737InboxGroup("NORMAL") }
     func testInboxGroupLargestTextAndColdRead() throws { try task737InboxGroup("LARGEST", largest: true) }
 
@@ -30240,7 +31816,7 @@ extension FoundationUITests {
             boardEnabled(app.buttons["inbox-group-open"])
             XCTAssertEqual(button.value as? String, "Expand")
         }
-        // Each axis restores its own fold, then unfolds without touching the other maps.
+
         for (axis, heading) in headings {
             task737ChooseGroup(app, axis)
             let button = app.buttons["inbox-section-" + heading]
@@ -30249,7 +31825,7 @@ extension FoundationUITests {
             boardEnabled(app.buttons["inbox-group-open"])
             XCTAssertEqual(button.value as? String, "Collapse")
         }
-        // Context beta is item45 (automatic trigger); Tag beta is item50 (a new-page heading).
+
         for axis in ["context", "tag"] {
             task737ChooseGroup(app, axis)
             let tail = app.buttons["task-title-inbox-group-055"]
@@ -30309,7 +31885,7 @@ extension FoundationUITests {
         boardTap(app, "inbox-group-close"); boardEnabled(app.buttons["inbox-group-open"])
     }
 
-    // Task738 libraries are staged by root; these tests exercise read-only session filters.
+
     func testInboxFiltersNormalAndColdRead() throws { try task738InboxFilters("NORMAL") }
     func testLegacyTokenFiltersNormalAndColdRead() throws { try legacyTokenFilters("NORMAL") }
     func testLegacyTokenFiltersLargestAndColdRead() throws { try legacyTokenFilters("LARGEST", largest: true) }
@@ -30349,7 +31925,7 @@ extension FoundationUITests {
                 if !row.isHittable { revealPagedElement(app, row, in: scroll) }
                 boardEnabled(row); XCTAssertTrue(row.isHittable)
             }
-            // Traverse the entire three-row fixture; a virtualized offscreen row is not proof of exclusion.
+
             scroll.swipeDown(); scroll.swipeDown()
             var observed = Set<String>()
             for step in 0..<4 {
@@ -30362,7 +31938,7 @@ extension FoundationUITests {
         }
         for prefix in ["inbox", "done"] {
             openPage(prefix); rows(prefix, target: true, others: true)
-            // Only the target has bare office/desk and admin/team; no prefixed duplicate or taxonomy entry.
+
             for (parent, child, bare) in [("@office", "@office/desk", "office"), ("#admin", "#admin/team", "admin")] {
                 for state in 1...3 {
                     openTokens(prefix)
@@ -30382,6 +31958,7 @@ extension FoundationUITests {
                                 && (selected.value as? String ?? "").isEmpty && selected.isHittable
                         }, object: nil)
                         guard XCTWaiter.wait(for: [ready], timeout: max(0, hitPointDeadline - ProcessInfo.processInfo.systemUptime)) == .completed else {
+                            task739TokenHitScopeTimeout(app, role: role, tokenIdentifier: identifier, prefix: prefix)
                             task739FilterModalAXState(app, role: role, phase: prefix + "-reopened-selected-timeout",
                                 tokenIdentifier: identifier, prefix: prefix)
                             XCTFail("The reopened selected token must have a native accessibility hit point before its second tap")
@@ -30432,7 +32009,7 @@ extension FoundationUITests {
         task736OpenInbox(app)
         _ = app.buttons["inbox-process-primary"].label
         XCTAssertFalse(app.buttons["inbox-filters-open"].isSelected)
-        // Retain Task738's presentation/disclosure prelude before the first alpha edit.
+
         task738OpenFilters(app)
         XCTAssertFalse(app.buttons["inbox-filter-projects"].exists)
         XCTAssertFalse(app.buttons["inbox-filter-timeEstimates"].exists)
@@ -30453,7 +32030,7 @@ extension FoundationUITests {
         task739FilterModalAXState(app, role: role, phase: "after-first-selection")
         let hitPointDeadline = ProcessInfo.processInfo.systemUptime + 10
 
-        // Do not scroll a geometrically visible row to repair an invalid AX hit point.
+
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             let matches = app.buttons.matching(identifier: identifier)
             let selected = matches.firstMatch
@@ -30482,17 +32059,50 @@ extension FoundationUITests {
         XCTAssertTrue(app.descendants(matching: .any)["inbox-scroll"].firstMatch.exists)
     }
 
+    private func task739TokenHitScopeTimeout(_ app: XCUIApplication, role: String,
+        tokenIdentifier: String, prefix: String) {
+        let sampleStarted = ProcessInfo.processInfo.systemUptime
+        func sample(_ category: String, query: XCUIElementQuery) -> String {
+            let started = ProcessInfo.processInfo.systemUptime - sampleStarted
+            let count = query.count, token = query.firstMatch, exists = token.exists
+            let enabled = exists && token.isEnabled, selected = exists && token.isSelected
+            let hittable = exists && token.isHittable
+            let finished = ProcessInfo.processInfo.systemUptime - sampleStarted
+            return "\(category)Count=\(count), \(category)Exists=\(exists), \(category)Enabled=\(enabled), "
+                + "\(category)Selected=\(selected), \(category)Hittable=\(hittable), "
+                + "\(category)StartedSeconds=\(started), \(category)FinishedSeconds=\(finished), "
+        }
+        let before = sample("globalBefore", query: app.buttons.matching(identifier: tokenIdentifier))
+        let scoped = sample("pickerScoped", query: app.scrollViews[prefix + "-filter-picker-scroll"]
+            .buttons.matching(identifier: tokenIdentifier))
+        let after = sample("globalAfter", query: app.buttons.matching(identifier: tokenIdentifier))
+        let state = "role=\(role), context=\(prefix), " + before + scoped + after
+            + "sampleSeconds=\(ProcessInfo.processInfo.systemUptime - sampleStarted)"
+        XCTAssertLessThanOrEqual(state.utf8.count, 2048)
+        let attachment = XCTAttachment(string: state)
+        attachment.name = "Task739 token timeout hit scope " + role + " " + prefix
+        attachment.lifetime = .keepAlways; add(attachment)
+    }
+
     private func task739FilterModalAXState(_ app: XCUIApplication, role: String, phase: String,
         tokenIdentifier: String = "inbox-filter-token-@alpha", prefix: String = "inbox") {
-        // Start from an unfiltered native AX query. Export only fixed-category counts,
-        // state booleans and geometry; never labels, identifiers, values or hierarchy.
+
+
         let sampleStarted = ProcessInfo.processInfo.systemUptime
         let all = app.descendants(matching: .any).allElementsBoundByIndex
         let identifiers = all.map { $0.identifier }
         func count(_ predicate: (String) -> Bool) -> Int { identifiers.filter(predicate).count }
         let matches = app.buttons.matching(identifier: tokenIdentifier), token = matches.firstMatch
         let exists = token.exists, picker = app.scrollViews[prefix + "-filter-picker-scroll"]
-        let keyboard = app.keyboards.firstMatch, primary = app.buttons[prefix + "-process-primary"]
+        let keyboard = app.keyboards.firstMatch
+        let primaryMatches = app.buttons.matching(identifier: prefix + "-process-primary")
+        let primary = primaryMatches.firstMatch, primaryExists = primary.exists
+        let childTypes = exists ? token.children(matching: .any).allElementsBoundByIndex.map { $0.elementType } : []
+        let rowPickerMatches = picker.exists ? picker.buttons.matching(identifier: tokenIdentifier).count : 0
+        let rowAlertOwners = app.alerts.containing(.button, identifier: tokenIdentifier).count
+        let rowSheetOwners = app.sheets.containing(.button, identifier: tokenIdentifier).count
+        let primaryAlertOwners = app.alerts.containing(.button, identifier: prefix + "-process-primary").count
+        let primarySheetOwners = app.sheets.containing(.button, identifier: prefix + "-process-primary").count
         let state = "role=\(role), phase=\(phase), axElements=\(all.count), "
             + "taskTitles=\(count { $0.hasPrefix("task-title-") }), taskStatuses=\(count { $0.hasPrefix("task-status-") }), "
             + "header=\(count { [prefix + "-title", "area-open", "search-open"].contains($0) }), "
@@ -30502,6 +32112,12 @@ extension FoundationUITests {
             + "hittable=\(exists && token.isHittable), valueEmpty=\(exists && (token.value as? String ?? "").isEmpty), "
             + "valueExcluded=\(exists && (token.value as? String) == "Excluded"), "
             + "row=\(exists ? token.frame : .zero), picker=\(picker.exists ? picker.frame : .zero), app=\(app.frame), "
+            + "rowChildren=\(childTypes.count), rowChildButtons=\(childTypes.filter { $0 == .button }.count), "
+            + "rowChildImages=\(childTypes.filter { $0 == .image }.count), rowChildTexts=\(childTypes.filter { $0 == .staticText }.count), "
+            + "rowChildOther=\(childTypes.filter { $0 != .button && $0 != .image && $0 != .staticText }.count), "
+            + "rowPickerMatches=\(rowPickerMatches), rowAlertOwners=\(rowAlertOwners), rowSheetOwners=\(rowSheetOwners), "
+            + "primaryMatches=\(primaryMatches.count), primaryEnabled=\(primaryExists && primary.isEnabled), primaryHittable=\(primaryExists && primary.isHittable), "
+            + "primaryAlertOwners=\(primaryAlertOwners), primarySheetOwners=\(primarySheetOwners), "
             + "primaryFrame=\(primary.exists ? primary.frame : .zero), keyboard=\(keyboard.exists), keyboardFrame=\(keyboard.exists ? keyboard.frame : .zero), "
             + "alertContainers=\(app.alerts.count), sheetContainers=\(app.sheets.count), sampleSeconds=\(ProcessInfo.processInfo.systemUptime - sampleStarted)"
         XCTAssertLessThanOrEqual(state.utf8.count, 2048)
@@ -30535,7 +32151,7 @@ extension FoundationUITests {
         boardTap(app, "inbox-filters-close")
         XCTAssertFalse(app.buttons["inbox-filters-open"].isSelected)
 
-        // All three token states are returned by core, including excluded AX value.
+
         task738OpenFilters(app); task738FilterTap(app, "inbox-filter-tokens")
         task738PickerQuery(app, "@alpha")
         let alpha = app.buttons["inbox-filter-token-@alpha"]
@@ -30568,7 +32184,7 @@ extension FoundationUITests {
         XCTAssertTrue(app.buttons["inbox-chip-token:@alpha"].exists)
         task738Clear(app)
 
-        // Search addresses the whole pool; More extends a staged 100-token window.
+
         task738OpenFilters(app); task738FilterTap(app, "inbox-filter-tokens")
         task738PickerQuery(app, "@token-110")
         task738FilterTap(app, "inbox-filter-token-@token-110", picker: true)
@@ -30583,7 +32199,7 @@ extension FoundationUITests {
         task738AssertSubset(app, included: "110", absent: "109")
         task738Clear(app)
 
-        // Tags have their own match mode and chip actions.
+
         task738OpenFilters(app); task738FilterTap(app, "inbox-filter-tokens")
         task738PickerQuery(app, "#alpha"); task738FilterTap(app, "inbox-filter-token-#alpha", picker: true)
         task738PickerQuery(app, "#beta"); task738FilterTap(app, "inbox-filter-token-#beta", picker: true)
@@ -30617,7 +32233,7 @@ extension FoundationUITests {
         XCTAssertEqual(app.textFields["inbox-filter-location"].value as? String, locationInput)
         boardTap(app, "inbox-filters-close"); task738Clear(app)
 
-        // Close flushes the latest text; filtered empty Clear uses core's action.
+
         task738OpenFilters(app)
         task738SetText(app, "inbox-filter-search", "Task738 no matching Inbox task")
         boardTap(app, "inbox-filters-close"); boardEnabled(app.buttons["inbox-filters-open"])
@@ -30626,7 +32242,7 @@ extension FoundationUITests {
         XCTAssertFalse(app.buttons["capture-save"].exists)
         XCTAssertFalse(app.buttons["process-inbox-close"].exists)
 
-        // Group changes retain filters. The duplicate row is specifically in @alpha.
+
         task738OpenFilters(app); task738FilterTap(app, "inbox-filter-tokens")
         task738PickerQuery(app, "@alpha"); task738FilterTap(app, "inbox-filter-token-@alpha", picker: true)
         boardTap(app, "inbox-filters-close"); boardEnabled(app.buttons["inbox-filters-open"])
@@ -30717,6 +32333,309 @@ extension FoundationUITests {
     func testInboxBulkTrashUndoNormalAndColdRead() throws { try task739InboxBulk("NORMAL") }
     func testInboxBulkTrashUndoLargestTextAndColdRead() throws { try task739InboxBulk("LARGEST", largest: true) }
 
+    private func statusListBulkCount(_ app: XCUIApplication, _ prefix: String, _ expected: Int) {
+        let count = app.staticTexts[prefix + "-bulk-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 20))
+        let predicate = NSPredicate { _, _ in
+            Int(count.label.compactMap { $0.wholeNumberValue }.map(String.init).joined()) == expected
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)], timeout: 20), .completed)
+    }
+
+    private func statusListBulkActions(_ prefix: String) throws {
+        continueAfterFailure = false
+        guard let library = ProcessInfo.processInfo.environment["MINDWTR_STATUS_LIST_BULK_UI_LIBRARY"],
+              let uuid = UUID(uuidString: library), uuid.uuidString.lowercased() == library else {
+            throw XCTSkip("An externally staged canonical Waiting and Someday bulk library is required")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library, "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US", "-AppleInterfaceStyle", "Light"]
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        boardTap(app, "tab-menu"); boardTap(app, "menu-" + prefix)
+        let scroll = prefix + "-scroll", first = "status-bulk-" + prefix + "-01", second = "status-bulk-" + prefix + "-02"
+        func start() {
+            let title = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60)
+            title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+            statusListBulkCount(app, prefix, 1)
+        }
+        func control(_ id: String) -> XCUIElement {
+            let element = task192Reveal(app, prefix + id, buttons: true, scrollID: prefix + "-bulk-actions-scroll", horizontal: true, scans: 12)
+            boardEnabled(element, timeout: 20)
+            XCTAssertGreaterThanOrEqual(element.frame.height, 44 - 0.01)
+            XCTAssertGreaterThanOrEqual(element.frame.width, 44 - 0.01)
+            return element
+        }
+        start()
+        let range = control("-bulk-range"); range.tap()
+        XCTAssertTrue(range.isSelected)
+        task192Reveal(app, prefix + "-select-" + second, buttons: true, scrollID: scroll, scans: 60).tap()
+        statusListBulkCount(app, prefix, 2)
+        XCTAssertFalse(control("-bulk-range").isSelected)
+        control("-bulk-tag-open").tap()
+        let input = app.textFields[prefix + "-bulk-tag-input"]; boardEnabled(input, timeout: 20)
+        input.tap(); input.typeText("#bulk-ui")
+        boardEnabled(app.buttons[prefix + "-bulk-tag-save"], timeout: 20)
+        boardTap(app, prefix + "-bulk-tag-save")
+        XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.staticTexts["task-statusListBulkTag-notice"].waitForExistence(timeout: 30))
+        start()
+        task192Reveal(app, prefix + "-select-" + second, buttons: true, scrollID: scroll, scans: 60).tap()
+        statusListBulkCount(app, prefix, 2)
+        control("-bulk-delete").tap()
+        boardTap(app, prefix + "-bulk-confirm")
+        XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 30))
+        let undo = app.buttons["task-statusListBulkDelete-undo"]; boardEnabled(undo, timeout: 30)
+        XCTAssertTrue(app.descendants(matching: .any)["task-title-" + first].waitForNonExistence(timeout: 30))
+        undo.tap()
+        XCTAssertTrue(task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60).exists)
+        XCTAssertTrue(task192Reveal(app, "task-title-" + second, buttons: true, scrollID: scroll, scans: 60).exists)
+    }
+
+    func testStatusListBulkWaitingRangeTagDeleteAndUndo() throws { try statusListBulkActions("waiting") }
+    func testStatusListBulkSomedayRangeTagDeleteAndUndo() throws { try statusListBulkActions("someday") }
+
+    func testStatusListBulkWaitingTagTypedWhileBusyEnablesSave() throws {
+        continueAfterFailure = false
+        guard let library = ProcessInfo.processInfo.environment["MINDWTR_STATUS_LIST_BULK_UI_LIBRARY"],
+              let uuid = UUID(uuidString: library), uuid.uuidString.lowercased() == library else {
+            throw XCTSkip("An externally staged canonical Waiting and Someday bulk library is required")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library, "--native-text-input-busy-hold-once",
+                               "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US", "-AppleInterfaceStyle", "Light"]
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        boardTap(app, "tab-menu"); boardTap(app, "menu-waiting")
+        let first = "status-bulk-waiting-01"
+        let title = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: "waiting-scroll", scans: 60)
+        title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+        statusListBulkCount(app, "waiting", 1)
+        let open = task192Reveal(app, "waiting-bulk-tag-open", buttons: true, scrollID: "waiting-bulk-actions-scroll", horizontal: true, scans: 12)
+        boardEnabled(open, timeout: 20); open.tap()
+        let input = app.textFields["waiting-bulk-tag-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 20))
+        let save = app.buttons["waiting-bulk-tag-save"]
+        XCTAssertTrue(save.waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["waiting-bulk-tag-cancel"].isEnabled)
+        input.tap(); input.typeText("#phone")
+        XCTAssertFalse(save.isEnabled)
+        XCTAssertEqual(input.value as? String, "#phone")
+        boardEnabled(save, timeout: 30)
+        XCTAssertEqual(input.value as? String, "#phone")
+        boardTap(app, "waiting-bulk-tag-save")
+        XCTAssertTrue(app.staticTexts["waiting-bulk-count"].waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.staticTexts["task-statusListBulkTag-notice"].waitForExistence(timeout: 30))
+    }
+
+    func testStatusListBulkSomedayMoveToSectionNewSectionUndoAndChoice() throws {
+        continueAfterFailure = false
+        guard let library = ProcessInfo.processInfo.environment["MINDWTR_STATUS_LIST_BULK_UI_LIBRARY"],
+              let uuid = UUID(uuidString: library), uuid.uuidString.lowercased() == library else {
+            throw XCTSkip("An externally staged canonical Waiting and Someday bulk library is required")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library, "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US", "-AppleInterfaceStyle", "Light"]
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        boardTap(app, "tab-menu"); boardTap(app, "menu-someday")
+        let first = "status-bulk-someday-01", second = "status-bulk-someday-02"
+        func openBulkMove() {
+            let title = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: "someday-scroll", scans: 60)
+            title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+            statusListBulkCount(app, "someday", 1)
+            task192Reveal(app, "someday-select-" + second, buttons: true, scrollID: "someday-scroll", scans: 60).tap()
+            statusListBulkCount(app, "someday", 2)
+            let move = task192Reveal(app, "someday-bulk-move-section", buttons: true, scrollID: "someday-bulk-actions-scroll",
+                                     horizontal: true, scans: 12)
+            boardEnabled(move, timeout: 20)
+            XCTAssertGreaterThanOrEqual(move.frame.height, 44 - 0.01)
+            XCTAssertFalse(move.label.isEmpty)
+            move.tap()
+            XCTAssertTrue(app.staticTexts["someday-section-move-title"].waitForExistence(timeout: 10))
+            boardEnabled(app.buttons["someday-section-move-cancel"])
+        }
+        openBulkMove()
+        XCTAssertTrue(task81Choice(app, title: "No section").exists)
+        boardTap(app, "someday-section-move-cancel")
+        XCTAssertFalse(app.staticTexts["someday-section-move-title"].exists)
+        statusListBulkCount(app, "someday", 2)
+        boardTap(app, "someday-bulk-exit")
+        XCTAssertTrue(app.staticTexts["someday-bulk-count"].waitForNonExistence(timeout: 20))
+        openBulkMove()
+        boardTap(app, "someday-section-move-new-section")
+        let input = app.textFields["someday-section-create-input"]; boardEnabled(input, timeout: 20)
+        input.tap(); input.typeText("Bulk UI")
+        boardTap(app, "someday-section-create-save")
+        XCTAssertTrue(app.staticTexts["someday-bulk-count"].waitForNonExistence(timeout: 30))
+        let undo = app.buttons["someday-section-move-undo"]; boardEnabled(undo, timeout: 30)
+        let notice = XCTAttachment(screenshot: app.screenshot())
+        notice.name = "Someday bulk section move notice"; notice.lifetime = .keepAlways; add(notice)
+        undo.tap()
+        XCTAssertTrue(undo.waitForNonExistence(timeout: 20))
+        XCTAssertFalse(app.staticTexts["someday-section-undo-error"].exists)
+        let undone = XCTAttachment(screenshot: app.screenshot())
+        undone.name = "Someday bulk section move after Undo"; undone.lifetime = .keepAlways; add(undone)
+        XCTAssertTrue(app.buttons["someday-select-" + first].waitForNonExistence(timeout: 20))
+        XCTAssertFalse(app.staticTexts["someday-bulk-count"].exists)
+        openBulkMove()
+        task81Choose(app, title: "Bulk UI")
+        XCTAssertTrue(app.staticTexts["someday-bulk-count"].waitForNonExistence(timeout: 30))
+        boardEnabled(app.buttons["someday-section-move-undo"], timeout: 30)
+        XCTAssertFalse(app.staticTexts["someday-section-move-title"].exists)
+    }
+
+    private func statusListBulk(_ prefix: String, largest: Bool) throws {
+        continueAfterFailure = false
+        guard let library = ProcessInfo.processInfo.environment["MINDWTR_STATUS_LIST_BULK_UI_LIBRARY"],
+              let uuid = UUID(uuidString: library), uuid.uuidString.lowercased() == library else {
+            throw XCTSkip("An externally staged canonical Waiting and Someday bulk library is required")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library, "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US", "-AppleInterfaceStyle", "Light"]
+        if largest { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        boardTap(app, "tab-menu"); boardTap(app, "menu-" + prefix)
+        let scroll = prefix + "-scroll", first = "status-bulk-" + prefix + "-01", second = "status-bulk-" + prefix + "-02"
+        func start() {
+            let title = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60)
+            title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+            statusListBulkCount(app, prefix, 1)
+            XCTAssertFalse(app.buttons["task-editor-save"].exists)
+            XCTAssertFalse(app.buttons["task-view-close"].exists)
+        }
+        func control(_ id: String) -> XCUIElement {
+            let element = id.hasSuffix("-bulk-exit") ? app.buttons[id]
+                : task192Reveal(app, id, buttons: true, scrollID: prefix + "-bulk-actions-scroll", horizontal: true, scans: 12)
+            boardEnabled(element, timeout: 20)
+            XCTAssertGreaterThanOrEqual(element.frame.height, 44 - 0.01)
+            XCTAssertGreaterThanOrEqual(element.frame.width, 44 - 0.01)
+            XCTAssertTrue(element.isHittable)
+            return element
+        }
+        start(); control(prefix + "-bulk-exit").tap()
+        XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 20))
+        start()
+        let firstSelect = task192Reveal(app, prefix + "-select-" + first, buttons: true, scrollID: scroll, scans: 60)
+        XCTAssertTrue(firstSelect.isSelected)
+        XCTAssertFalse(firstSelect.label.isEmpty)
+        XCTAssertFalse(app.buttons[prefix + "-bulk-status-" + prefix].exists)
+        let secondSelect = task192Reveal(app, prefix + "-select-" + second, buttons: true, scrollID: scroll, scans: 60)
+        secondSelect.tap(); statusListBulkCount(app, prefix, 2)
+        XCTAssertTrue(secondSelect.isSelected)
+        if prefix == "waiting" {
+            let ann = app.buttons["waiting-person-Ann"]
+            boardEnabled(ann, timeout: 20); XCTAssertTrue(ann.isHittable); ann.tap()
+            statusListBulkCount(app, prefix, 1)
+            XCTAssertFalse(app.buttons[prefix + "-select-" + second].exists)
+        }
+        let move = control(prefix + "-bulk-status-next")
+        XCTAssertFalse(move.label.isEmpty)
+        move.tap()
+        XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.staticTexts["task-statusListBulkMove-notice"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any)["task-title-" + first].waitForNonExistence(timeout: 30))
+    }
+
+    private func shownListBulk(_ prefix: String, largest: Bool = false) throws {
+        continueAfterFailure = false
+        guard let library = ProcessInfo.processInfo.environment["MINDWTR_SHOWN_LIST_BULK_UI_LIBRARY"],
+              let uuid = UUID(uuidString: library), uuid.uuidString.lowercased() == library else {
+            throw XCTSkip("An externally staged canonical Review and Contexts bulk library is required")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library, "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US", "-AppleInterfaceStyle", "Light"]
+        if largest { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        if prefix == "review" {
+            if app.buttons["tab-review"].exists { boardTap(app, "tab-review") } else { boardTap(app, "tab-menu"); boardTap(app, "menu-review") }
+            boardEnabled(app.buttons["review-start"])
+            boardTap(app, "review-scope-all"); boardTap(app, "review-expand-cycle"); boardTap(app, "review-expand-cycle")
+        } else {
+            boardTap(app, "tab-menu")
+            let menu = app.buttons["menu-contexts"]; boardEnabled(menu, timeout: 30)
+            let menuScroll = app.scrollViews.containing(.button, identifier: "menu-contexts").firstMatch
+            if menuScroll.exists { task467Reveal(app, menu, in: menuScroll, requireHittable: false) }
+            boardTap(app, "menu-contexts")
+            boardTap(app, "contexts-chip-@home")
+        }
+        let scroll = prefix + "-scroll", first = "shown-bulk-" + prefix + "-01", second = "shown-bulk-" + prefix + "-02"
+        func control(_ id: String) -> XCUIElement {
+            let element = id.hasSuffix("-bulk-exit") ? app.buttons[id]
+                : task192Reveal(app, id, buttons: true, scrollID: prefix + "-bulk-actions-scroll", horizontal: true, scans: 12)
+            boardEnabled(element, timeout: 20)
+            XCTAssertGreaterThanOrEqual(element.frame.height, 44 - 0.01)
+            XCTAssertGreaterThanOrEqual(element.frame.width, 44 - 0.01)
+            XCTAssertTrue(element.isHittable)
+            return element
+        }
+        let title = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60)
+        title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+        statusListBulkCount(app, prefix, 1)
+        XCTAssertFalse(app.buttons["task-editor-save"].exists)
+        XCTAssertFalse(app.buttons[prefix + "-bulk-range"].exists)
+        let secondSelect = task192Reveal(app, prefix + "-select-" + second, buttons: true, scrollID: scroll, scans: 60)
+        secondSelect.tap(); statusListBulkCount(app, prefix, 2)
+        XCTAssertTrue(secondSelect.isSelected)
+        XCTAssertEqual(app.buttons[prefix + "-bulk-share"].exists, prefix == "review")
+        if prefix == "contexts" {
+            func chipTap(_ id: String) {
+                let chip = app.buttons["contexts-chip-" + id]; boardEnabled(chip, timeout: 20)
+                let row = app.scrollViews.containing(.button, identifier: "contexts-chip-" + id).firstMatch
+                for _ in 0..<6 where !app.frame.contains(chip.frame) {
+                    if chip.frame.minX < app.frame.minX { row.swipeRight() } else { row.swipeLeft() }
+                }
+                XCTAssertTrue(app.frame.contains(chip.frame))
+                chip.tap()
+            }
+            chipTap("@home")
+            XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForExistence(timeout: 20))
+            chipTap("@work")
+            XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 30))
+            chipTap("@home")
+            let again = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60)
+            again.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+            statusListBulkCount(app, prefix, 1)
+        } else {
+            boardTap(app, "review-scope-due")
+            XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 30))
+            boardTap(app, "review-scope-all")
+            let again = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60)
+            again.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+            statusListBulkCount(app, prefix, 1)
+        }
+        control(prefix + "-bulk-tag-open").tap()
+        let input = app.textFields[prefix + "-bulk-tag-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 20)); input.typeText("#shown")
+        boardEnabled(app.buttons[prefix + "-bulk-tag-save"], timeout: 20); app.buttons[prefix + "-bulk-tag-save"].tap()
+        XCTAssertTrue(app.staticTexts["task-statusListBulkTag-notice"].waitForExistence(timeout: 30))
+        let reselect = task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60)
+        reselect.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+        statusListBulkCount(app, prefix, 1)
+        control(prefix + "-bulk-delete").tap()
+        boardTap(app, prefix + "-bulk-confirm")
+        XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any)["task-title-" + first].waitForNonExistence(timeout: 30))
+        boardTap(app, "task-statusListBulkDelete-undo")
+        XCTAssertTrue(task192Reveal(app, "task-title-" + first, buttons: true, scrollID: scroll, scans: 60).exists)
+        let moveTitle = task192Reveal(app, "task-title-" + second, buttons: true, scrollID: scroll, scans: 60)
+        moveTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.8)
+        statusListBulkCount(app, prefix, 1)
+        control(prefix + "-bulk-status-someday").tap()
+        XCTAssertTrue(app.staticTexts[prefix + "-bulk-count"].waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.staticTexts["task-statusListBulkMove-notice"].waitForExistence(timeout: 30))
+    }
+
+    func testShownListBulkReviewSelectionScopeExitTagDeleteUndoAndMove() throws { try shownListBulk("review") }
+    func testShownListBulkContextsSelectionFilterPruneTagDeleteUndoAndMove() throws { try shownListBulk("contexts") }
+    func testShownListBulkContextsLargestText() throws { try shownListBulk("contexts", largest: true) }
+
+    func testStatusListBulkWaitingSelectionPersonPruneAndMove() throws { try statusListBulk("waiting", largest: false) }
+    func testStatusListBulkSomedaySelectionAndMove() throws { try statusListBulk("someday", largest: false) }
+    func testStatusListBulkWaitingLargestText() throws { try statusListBulk("waiting", largest: true) }
+
     private func task739Count(_ app: XCUIApplication, _ expected: Int) {
         let count = app.staticTexts["inbox-bulk-count"]
         XCTAssertTrue(count.waitForExistence(timeout: 20))
@@ -30803,7 +32722,6 @@ extension FoundationUITests {
 }
 
 
-// Task740: fresh root-owned role libraries only; no authored screenshots or fault hooks.
 extension FoundationUITests {
     func testInboxBulkStatusAllFiveNormalAndColdRead() throws { try task740InboxStatus("NORMAL") }
     func testInboxBulkStatusAllFiveLargestTextAndColdRead() throws { try task740InboxStatus("LARGEST", largest: true) }
@@ -30812,7 +32730,8 @@ extension FoundationUITests {
         [("next", "Next"), ("waiting", "Waiting"), ("someday", "Someday"), ("done", "Done"), ("reference", "Reference")]
     }
 
-    private func task740InboxStatusReady(_ element: XCUIElement) {
+    private func task740InboxStatusReady(_ query: XCUIElement) {
+        let element = query.firstMatch
         boardEnabled(element, timeout: 20)
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in element.exists && element.isEnabled && element.isHittable }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
@@ -30844,8 +32763,8 @@ extension FoundationUITests {
         let actual = previous == input.placeholderValue ? "" : previous
         if actual != query {
             if !actual.isEmpty {
-                // The public selection menu clears the whole old query even when
-                // a large-text field tap placed the caret before its suffix.
+
+
                 input.press(forDuration: 1)
                 let selectAll = app.descendants(matching: .any)["Select All"].firstMatch
                 for _ in 0..<4 {
@@ -30937,8 +32856,8 @@ extension FoundationUITests {
                 let result = app.buttons["search-task-" + id]; task740InboxStatusReady(result); result.tap()
                 boardTap(app, "task-mode-edit")
                 if option.status == "reference" {
-                    // Reference intentionally hides action status fields; this
-                    // existing public affordance is rendered only for Reference.
+
+
                     boardEnabled(app.buttons["task-reference-convert-to-action"])
                     XCTAssertFalse(app.buttons["task-editor-status-reference"].exists)
                 } else {
@@ -30946,7 +32865,7 @@ extension FoundationUITests {
                     revealPagedElement(app, state, in: app.scrollViews["task-editor-scroll"])
                     XCTAssertTrue(state.isSelected, "Cold public task read must show the requested status")
                 }
-                // Read only: do not choose a status, change a field or Save.
+
                 boardTap(app, "task-view-close"); boardEnabled(app.textFields["search-input"])
                 XCTAssertFalse(app.buttons["task-editor-discard"].exists)
                 boardTap(app, "search-close"); boardEnabled(app.buttons["inbox-filters-open"])
@@ -30956,7 +32875,7 @@ extension FoundationUITests {
     }
 }
 
-// Task741: root supplies fresh production-hydrated libraries; no screenshots or fault hooks.
+
 extension FoundationUITests {
     func testInboxBulkTag741NormalCancelNoopMixedAndColdRead() throws { try task741InboxTag("NORMAL") }
     func testInboxBulkTag741LargestCancelNoopMixedAndColdRead() throws { try task741InboxTag("LARGEST", largest: true) }
@@ -31029,7 +32948,7 @@ extension FoundationUITests {
     }
 }
 
-// Task742: three fresh production-hydrated rows; public union picks only, no invented no-op option.
+
 extension FoundationUITests {
     func testInboxBulkRemoveTag742NormalCancelMultiPickSearchMixedAndColdRead() throws { try task742InboxRemove("NORMAL") }
     func testInboxBulkRemoveTag742LargestCancelMultiPickSearchMixedAndColdRead() throws { try task742InboxRemove("LARGEST", largest: true) }
@@ -31054,9 +32973,8 @@ extension FoundationUITests {
         let actual = previous == input.placeholderValue ? "" : previous
         if actual != query {
             if !actual.isEmpty {
-                // These fixture queries are short alpha/beta/gamma tokens. Tapping
-                // the edit menu makes XCTest treat this app Alert as an interruption
-                // and cancel it; type deletes in the field and require a full clear.
+
+
                 input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: actual.count))
                 let cleared = NSPredicate { _, _ in
                     let value = input.value as? String ?? ""
@@ -31138,14 +33056,14 @@ extension FoundationUITests {
     }
 }
 
-// Task743: two isolated, root-staged three-row libraries; public Organize/create flow only.
+
 extension FoundationUITests {
     func testInboxBulkOrganize743NormalCancelCreateApplyAndColdRead() throws { try task743InboxOrganize("NORMAL") }
     func testInboxBulkOrganize743LargestCancelCreateApplyAndColdRead() throws { try task743InboxOrganize("LARGEST", largest: true) }
 
-    @discardableResult private func task743Control(_ app: XCUIApplication, _ id: String, text: Bool = false) -> XCUIElement {
+    @discardableResult private func task743Control(_ app: XCUIApplication, _ id: String, text: Bool = false, prefix: String = "inbox-organize") -> XCUIElement {
         let element = text ? app.textFields[id] : app.buttons[id]
-        revealPagedElement(app, element, in: app.scrollViews["inbox-organize-scroll"], outerEdge: true)
+        revealPagedElement(app, element, in: app.scrollViews[prefix + "-scroll"], outerEdge: true)
         boardEnabled(element); XCTAssertTrue(element.isHittable)
         return element
     }
@@ -31155,13 +33073,13 @@ extension FoundationUITests {
         boardEnabled(app.buttons["inbox-organize-cancel"])
         _ = task743Control(app, "inbox-organize-status-__KEEP__")
     }
-    private func task743Text(_ app: XCUIApplication, _ id: String, _ value: String) {
-        let input = task743Control(app, id, text: true); input.tap()
+    private func task743Text(_ app: XCUIApplication, _ id: String, _ value: String, prefix: String = "inbox-organize") {
+        let input = task743Control(app, id, text: true, prefix: prefix); input.tap()
         let previous = input.value as? String ?? ""
         let actual = previous == input.placeholderValue ? "" : previous
         if actual != value {
             if !actual.isEmpty {
-                // Same short-field keyboard clear as Task742: no public edit menu in an app modal.
+
                 input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: actual.count))
                 let cleared = NSPredicate { _, _ in
                     let current = input.value as? String ?? ""
@@ -31177,21 +33095,19 @@ extension FoundationUITests {
         guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: exact, object: nil)], timeout: 5) == .completed else {
             XCTFail("Task743 field did not accept exact UTF8 intent"); return
         }
-        // Ordinary fields release the keyboard before revealing the next whole row.
-        // Picker submit can create a destination and remains explicit below.
-        if id != "inbox-organize-picker-search" { task743DismissKeyboard(app, id, value) }
+        if id != prefix + "-picker-search" { task743DismissKeyboard(app, id, value, prefix: prefix) }
     }
-    private func task743DismissKeyboard(_ app: XCUIApplication, _ id: String, _ value: String, preservingCreate: Bool = false) {
+    private func task743DismissKeyboard(_ app: XCUIApplication, _ id: String, _ value: String, preservingCreate: Bool = false, prefix: String = "inbox-organize") {
         let input = app.textFields[id], keyboard = app.keyboards.firstMatch
         boardEnabled(input)
-        if preservingCreate { boardEnabled(app.buttons["inbox-organize-picker-create"], timeout: 20) }
+        if preservingCreate { boardEnabled(app.buttons[prefix + "-picker-create"], timeout: 20) }
         let shown = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             keyboard.exists && !keyboard.frame.intersection(app.frame).isNull && !keyboard.frame.intersection(app.frame).isEmpty
         }, object: keyboard)
         guard XCTWaiter.wait(for: [shown], timeout: 10) == .completed else {
             XCTFail("Task743 keyboard must be visible before the non-submitting drag"); return
         }
-        let scroll = app.scrollViews["inbox-organize-scroll"]
+        let scroll = app.scrollViews[prefix + "-scroll"]
         XCTAssertTrue(scroll.waitForExistence(timeout: 10))
         var viewport = scroll.frame.intersection(app.frame)
         if keyboard.frame.intersects(viewport) { viewport.size.height = max(0, keyboard.frame.minY - viewport.minY) }
@@ -31213,18 +33129,18 @@ extension FoundationUITests {
         XCTAssertTrue(input.exists)
         XCTAssertTrue((input.value as? String ?? "").utf8.elementsEqual(value.utf8), "Keyboard dismissal must preserve exact field intent")
         if preservingCreate {
-            XCTAssertTrue(app.textFields["inbox-organize-picker-search"].exists)
-            XCTAssertTrue(app.buttons["inbox-organize-picker-create"].exists)
-            XCTAssertTrue(app.buttons["inbox-organize-picker-create"].isEnabled)
-            XCTAssertFalse(app.buttons["inbox-organize-apply"].exists, "Dismissing the keyboard must leave the picker open")
+            XCTAssertTrue(app.textFields[prefix + "-picker-search"].exists)
+            XCTAssertTrue(app.buttons[prefix + "-picker-create"].exists)
+            XCTAssertTrue(app.buttons[prefix + "-picker-create"].isEnabled)
+            XCTAssertFalse(app.buttons[prefix + "-apply"].exists, "Dismissing the keyboard must leave the picker open")
         }
     }
-    private func task743Choose(_ app: XCUIApplication, _ kind: String, _ label: String) {
-        task743Control(app, "inbox-organize-" + kind).tap()
-        let option = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "inbox-organize-picker-choice-", label)).firstMatch
-        revealPagedElement(app, option, in: app.scrollViews["inbox-organize-scroll"], outerEdge: true)
+    private func task743Choose(_ app: XCUIApplication, _ kind: String, _ label: String, prefix: String = "inbox-organize") {
+        task743Control(app, prefix + "-" + kind, prefix: prefix).tap()
+        let option = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", prefix + "-picker-choice-", label)).firstMatch
+        revealPagedElement(app, option, in: app.scrollViews[prefix + "-scroll"], outerEdge: true)
         task740InboxStatusReady(option); option.tap()
-        XCTAssertTrue(app.textFields["inbox-organize-picker-search"].waitForNonExistence(timeout: 15))
+        XCTAssertTrue(app.textFields[prefix + "-picker-search"].waitForNonExistence(timeout: 15))
     }
     private func task743Section(_ app: XCUIApplication, _ id: String) {
         let header = app.buttons[id]
@@ -31294,7 +33210,7 @@ extension FoundationUITests {
         boardTap(app, "inbox-organize-cancel"); task739Count(app, 2)
         XCTAssertFalse(app.staticTexts["task-inboxBulkOrganize-notice"].exists)
 
-        // Reopening proves the durable created destination survives Cancel; exact Done selects it without another Create.
+
         task743Open(app); task743Control(app, "inbox-organize-project").tap()
         task743Text(app, "inbox-organize-picker-search", "Task743 Created Project")
         let offered = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "inbox-organize-picker-choice-", "Task743 Created Project")).firstMatch
@@ -31344,5 +33260,4176 @@ extension FoundationUITests {
             boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists)
             boardTap(app, "search-close"); boardEnabled(app.buttons["inbox-filters-open"])
         }
+    }
+}
+
+
+extension FoundationUITests {
+    private func captureCopilotFixtureApp(restore: Bool = false, lines: Bool = false, voice: Bool = false, taskAI: Bool = false, inboxAI: Bool = false, reviewAI: Bool = false, largest: Bool = false) throws -> XCUIApplication {
+        let environment = reviewAI ? "MINDWTR_REVIEW_AI_UI_LIBRARY" : inboxAI ? "MINDWTR_INBOX_AI_UI_LIBRARY" : taskAI ? "MINDWTR_TASK_AI_UI_LIBRARY" : "MINDWTR_CAPTURE_AI_UI_LIBRARY"
+        let reserved = reviewAI ? "36af9502-a26f-4c4d-b37a-6158deff197f" : inboxAI ? "9e9cc1b8-659c-4daf-8b31-71f55378ee4c"
+            : taskAI ? "7c6c4adb-06b2-4ecb-94c2-0e84a7c41b2c" : "200e5e94-1e41-4b90-a43f-190ae4d55bdc"
+        guard let library = ProcessInfo.processInfo.environment[environment], library == reserved else {
+            throw XCTSkip("The selected reserved synthetic AI library must be staged externally")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library,
+            restore ? "--native-capture-ai-restore-fixture" : "--native-capture-ai-fixture",
+            "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        if lines { app.launchArguments.append("--native-capture-lines-fixture") }
+        if voice { app.launchArguments.append("--native-voice-ui-fixture") }
+        if taskAI { app.launchArguments.append("--native-task-ai-ui-fixture") }
+        if inboxAI { app.launchArguments.append("--native-inbox-ai-ui-fixture") }
+        if reviewAI {
+            guard let run = ProcessInfo.processInfo.environment["MINDWTR_REVIEW_AI_UI_RUN"],
+                  let token = UUID(uuidString: run), token.uuidString.lowercased() == run else {
+                throw XCTSkip("The root-pinned Review AI run token is required")
+            }
+            app.launchArguments.append("--native-review-ai-ui-fixture")
+            app.launchEnvironment["MINDWTR_REVIEW_AI_UI_RUN"] = run
+        }
+        if largest { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
+        if voice && ProcessInfo.processInfo.environment["MINDWTR_VOICE_UI_SYNTHETIC_AUDIO"] == "1" {
+            app.launchArguments.append("--native-voice-ui-synthetic-audio")
+        }
+        if !restore {
+            guard let address = ProcessInfo.processInfo.environment["MINDWTR_CAPTURE_AI_FIXTURE_URL"] else {
+                throw XCTSkip("The root-owned isolated OpenAI fixture endpoint is required")
+            }
+            app.launchEnvironment["MINDWTR_CAPTURE_AI_FIXTURE_URL"] = address
+        }
+        app.launch()
+        if inboxAI { inboxAIFixtureReady(app) } else if taskAI { taskAIFixtureReady(app) } else { voiceFixtureReady(app) }
+        return app
+    }
+
+    private func captureCopilotTap(_ app: XCUIApplication, _ identifier: String) {
+        let button = app.buttons[identifier]
+        boardEnabled(button, timeout: 30)
+        let scroll = app.scrollViews["capture-scroll"]
+        if identifier == "capture-copilot-apply-all" {
+            let chips = app.scrollViews["capture-copilot-chips"]
+            if scroll.exists { revealPagedElement(app, chips, in: scroll, outerEdge: true) }
+            for _ in 0..<8 {
+                if button.isHittable && chips.frame.intersection(app.frame)
+                    .contains(CGPoint(x: button.frame.midX, y: button.frame.midY)) { break }
+                chips.swipeLeft()
+            }
+        }
+        if !button.isHittable && scroll.exists {
+            if app.keyboards.firstMatch.exists { scroll.swipeUp() }
+            revealPagedElement(app, button, in: scroll, outerEdge: true)
+        }
+        boardTap(app, identifier)
+    }
+
+    private func captureCopilotCapture(_ app: XCUIApplication, title: String) {
+        boardTap(app, "capture-open")
+        let input = app.textViews["capture-input"]
+        boardEnabled(input)
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        replaceTextView(input, with: title)
+        boardEnabled(app.buttons["capture-save-edit"])
+    }
+
+    private func captureCopilotEditorFields(_ app: XCUIApplication, title: String) {
+        task497Editor(app, title: title)
+        let scroll = app.scrollViews["task-editor-scroll"]
+        let organization = app.buttons["task-editor-section-organization"]
+        revealPagedElement(app, organization, in: scroll, outerEdge: true)
+        if organization.value as? String == "Expand" { organization.tap() }
+        for (field, expected) in [("contexts", Set(["@typed-context", "@home"])),
+                                  ("tags", Set(["#typed-ai", "#native-ai"]))] {
+            let input = app.textFields["task-editor-" + field]
+            revealPagedElement(app, input, in: scroll, outerEdge: true)
+            let tokens = Set((input.value as? String ?? "").split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            })
+            XCTAssertEqual(tokens, expected)
+        }
+        let estimate = app.buttons["task-editor-timeEstimate-15min"]
+        revealPagedElement(app, estimate, in: scroll, outerEdge: true)
+        XCTAssertTrue(estimate.isSelected)
+        let details = app.buttons["task-editor-section-details"]
+        revealPagedElement(app, details, in: scroll, outerEdge: true)
+        if details.value as? String == "Expand" { details.tap() }
+        let note = app.textViews["task-editor-note"]
+        revealPagedElement(app, note, in: scroll, outerEdge: true)
+        XCTAssertEqual(note.value as? String, "Capture AI note stays local confirmed")
+    }
+
+    private func aiTextConfigurationReady(_ app: XCUIApplication) {
+        boardEnabled(app.switches["ai-text-enabled"], timeout: 30)
+        XCTAssertFalse(app.staticTexts["ai-text-error"].exists)
+        XCTAssertFalse(app.staticTexts["ai-text-consent-record-error"].exists)
+    }
+
+    private func aiTextConfigurationOpen(_ app: XCUIApplication) {
+        boardTap(app, "tab-menu")
+        let settings = app.buttons.matching(identifier: "menu-settings").firstMatch
+        boardEnabled(settings)
+        XCTAssertFalse(settings.frame.isEmpty)
+        XCTAssertTrue(app.frame.intersects(settings.frame))
+        settings.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let advanced = app.buttons["settings-advanced"]
+        task442Reveal(app, advanced, in: app.scrollViews["settings-scroll"])
+        boardTap(app, "settings-advanced")
+        task594EnterAI(app)
+        task442Reveal(app, app.buttons["ai-text-configure"], in: app.scrollViews["ai-summary-scroll"])
+        boardTap(app, "ai-text-configure")
+        XCTAssertTrue(app.staticTexts["ai-text-title"].waitForExistence(timeout: 20))
+        aiTextConfigurationReady(app)
+    }
+
+    private func aiTextConfigurationTap(_ app: XCUIApplication, _ identifier: String) {
+        let button = app.buttons[identifier]
+        boardEnabled(button, timeout: 30)
+        revealPagedElement(app, button, in: app.scrollViews["ai-text-scroll"], outerEdge: true)
+        boardTap(app, identifier)
+    }
+
+    private func aiTextConfigurationInput(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
+        let input = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        boardEnabled(input, timeout: 30)
+        revealPagedElement(app, input, in: app.scrollViews["ai-text-scroll"], outerEdge: true)
+        return input
+    }
+
+    private func aiTextConfigurationReplace(_ app: XCUIApplication, _ identifier: String, with text: String) {
+        let input = aiTextConfigurationInput(app, identifier)
+        replaceProjectNotesText(input, with: text)
+        if app.keyboards.firstMatch.exists {
+            let done = app.buttons["ai-text-keyboard-done"]
+            boardEnabled(done)
+            let frame = done.frame
+            XCTAssertFalse(frame.isEmpty)
+            XCTAssertTrue(app.frame.contains(CGPoint(x: frame.midX, y: frame.midY)))
+            XCTContext.runActivity(named: "Tap keyboard Done center at \(frame)") { _ in
+                app.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+            }
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 10))
+        }
+        let verified = aiTextConfigurationInput(app, identifier)
+        let value = verified.value as? String ?? ""
+        if text.isEmpty { XCTAssertTrue(value.isEmpty || value == verified.placeholderValue) }
+        else { XCTAssertEqual(value, text) }
+    }
+
+    private func aiTextConfigurationChooseProvider(_ app: XCUIApplication, _ provider: String) {
+        aiTextConfigurationTap(app, "ai-text-provider")
+        for value in ["openai", "gemini", "anthropic"] {
+            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "ai-text-provider-choice-" + value)
+                .firstMatch.waitForExistence(timeout: 5))
+        }
+        let choice = app.descendants(matching: .any).matching(identifier: "ai-text-provider-choice-" + provider).firstMatch
+        boardEnabled(choice); XCTAssertTrue(choice.isHittable); choice.tap()
+    }
+
+    private func aiTextConfigurationProvider(_ app: XCUIApplication, label: String) {
+        let picker = app.buttons["ai-text-provider"]
+        expectation(for: NSPredicate(format: "value == %@", label), evaluatedWith: picker)
+        waitForExpectations(timeout: 30)
+        aiTextConfigurationReady(app)
+    }
+
+    private func aiTextConfigurationReopen(_ app: XCUIApplication, provider: String) {
+        boardTap(app, "ai-text-back")
+        let summary = app.staticTexts["ai-summary-provider"]
+        expectation(for: NSPredicate(format: "label == %@", provider), evaluatedWith: summary)
+        waitForExpectations(timeout: 30)
+        let configure = app.buttons["ai-text-configure"]
+        boardEnabled(configure, timeout: 30)
+        revealPagedElement(app, configure, in: app.scrollViews["ai-summary-scroll"], outerEdge: true)
+        boardTap(app, "ai-text-configure")
+        aiTextConfigurationProvider(app, label: provider)
+    }
+
+    private func aiTextConfigurationCredentialIsBlank(_ app: XCUIApplication) {
+        let input = aiTextConfigurationInput(app, "ai-text-credential-input")
+        let value = input.value as? String ?? ""
+        XCTAssertTrue(value.isEmpty || value == input.placeholderValue)
+        XCTAssertTrue(app.staticTexts["ai-text-credential-status"].exists)
+    }
+
+    func testAITextProvidersSwitchDefaultsConsentAndRestart() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(); defer { app.terminate() }
+        aiTextConfigurationOpen(app)
+        aiTextConfigurationProvider(app, label: "OpenAI")
+        XCTAssertTrue(app.buttons["ai-text-endpoint-edit"].exists)
+        aiTextConfigurationCredentialIsBlank(app)
+
+        aiTextConfigurationChooseProvider(app, "gemini")
+        let agree = app.buttons["ai-text-consent-agree"]
+        if agree.waitForExistence(timeout: 5) {
+            XCTContext.runActivity(named: "Gemini target consent Cancel and Agree exercised") { _ in
+                XCTAssertTrue(app.alerts.firstMatch.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Gemini")).firstMatch.exists)
+                boardTap(app, "ai-text-consent-cancel")
+                aiTextConfigurationProvider(app, label: "OpenAI")
+                XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-model-input").value as? String, "capture-ai-fixture")
+                XCTAssertEqual(app.switches["ai-text-enabled"].value as? String, "1")
+                aiTextConfigurationChooseProvider(app, "gemini")
+                XCTAssertTrue(agree.waitForExistence(timeout: 10))
+                boardTap(app, "ai-text-consent-agree")
+            }
+        } else {
+            XCTContext.runActivity(named: "Gemini target consent already recorded") { _ in }
+        }
+        aiTextConfigurationProvider(app, label: "Gemini")
+        XCTAssertEqual(app.switches["ai-text-enabled"].value as? String, "1")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-model-input").value as? String, "gemini-3.6-flash")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-copilot-model-input").value as? String, "gemini-3.5-flash-lite")
+        XCTAssertFalse(app.buttons["ai-text-endpoint-edit"].exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "ai-text-endpoint-input").firstMatch.exists)
+        aiTextConfigurationCredentialIsBlank(app)
+        let assistant = "synthetic-gemini-custom", copilot = "synthetic-gemini-copilot"
+        aiTextConfigurationReplace(app, "ai-text-model-input", with: assistant)
+        aiTextConfigurationTap(app, "ai-text-model-save"); aiTextConfigurationReady(app)
+        aiTextConfigurationReplace(app, "ai-text-copilot-model-input", with: copilot)
+        aiTextConfigurationTap(app, "ai-text-copilot-model-save"); aiTextConfigurationReady(app)
+        aiTextConfigurationChooseProvider(app, "gemini")
+        aiTextConfigurationProvider(app, label: "Gemini")
+        XCTAssertFalse(agree.exists)
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-model-input").value as? String, assistant)
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-copilot-model-input").value as? String, copilot)
+        aiTextConfigurationReopen(app, provider: "Gemini")
+
+        let enabled = app.switches["ai-text-enabled"]
+        revealPagedElement(app, enabled, in: app.scrollViews["ai-text-scroll"], outerEdge: true)
+        enabled.tap()
+        expectation(for: NSPredicate(format: "value == %@ AND enabled == true", "0"), evaluatedWith: enabled)
+        waitForExpectations(timeout: 30)
+        aiTextConfigurationChooseProvider(app, "anthropic")
+        aiTextConfigurationProvider(app, label: "Anthropic (Claude)")
+        XCTAssertFalse(agree.exists)
+        XCTAssertEqual(app.switches["ai-text-enabled"].value as? String, "0")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-model-input").value as? String, "claude-sonnet-5")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-copilot-model-input").value as? String, "claude-haiku-4-5")
+        XCTAssertFalse(app.buttons["ai-text-endpoint-edit"].exists)
+        aiTextConfigurationCredentialIsBlank(app)
+        aiTextConfigurationReopen(app, provider: "Anthropic (Claude)")
+        revealPagedElement(app, enabled, in: app.scrollViews["ai-text-scroll"], outerEdge: true)
+        enabled.tap()
+        if agree.waitForExistence(timeout: 5) {
+            XCTContext.runActivity(named: "Anthropic enable target consent Agree exercised") { _ in
+                XCTAssertTrue(app.alerts.firstMatch.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Anthropic")).firstMatch.exists)
+                boardTap(app, "ai-text-consent-agree")
+            }
+        } else {
+            XCTContext.runActivity(named: "Anthropic enable target consent already recorded") { _ in }
+        }
+        expectation(for: NSPredicate(format: "value == %@ AND enabled == true", "1"), evaluatedWith: enabled)
+        waitForExpectations(timeout: 30)
+        aiTextConfigurationReady(app)
+
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "--native-capture-ai-fixture" }
+        app.launchEnvironment.removeValue(forKey: "MINDWTR_CAPTURE_AI_FIXTURE_URL")
+        XCTAssertFalse(app.launchArguments.contains("--native-capture-ai-fixture"))
+        XCTAssertTrue(app.launchArguments.contains("200e5e94-1e41-4b90-a43f-190ae4d55bdc"))
+        app.launch(); boardEnabled(app.buttons["capture-open"], timeout: 30)
+        aiTextConfigurationOpen(app)
+        aiTextConfigurationProvider(app, label: "Anthropic (Claude)")
+        XCTAssertEqual(app.switches["ai-text-enabled"].value as? String, "1")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-model-input").value as? String, "claude-sonnet-5")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-copilot-model-input").value as? String, "claude-haiku-4-5")
+        XCTAssertFalse(app.buttons["ai-text-endpoint-edit"].exists)
+        aiTextConfigurationCredentialIsBlank(app)
+    }
+
+    func testAITextConfigurationEnablesModelsEndpointAndCaptures() throws {
+        continueAfterFailure = false
+        guard let endpoint = ProcessInfo.processInfo.environment["MINDWTR_CAPTURE_AI_FIXTURE_URL"],
+              let components = URLComponents(string: endpoint), components.scheme == "http", components.host == "127.0.0.1",
+              components.port != nil, components.path == "/v1", components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else {
+            throw XCTSkip("The root-owned loopback provider endpoint is required")
+        }
+        let app = try captureCopilotFixtureApp(); defer { app.terminate() }
+        let assistant = "synthetic-setup-assistant", copilot = "synthetic-setup-copilot"
+        aiTextConfigurationOpen(app)
+        let enabled = app.switches["ai-text-enabled"]
+        XCTAssertEqual(enabled.value as? String, "1")
+        revealPagedElement(app, enabled, in: app.scrollViews["ai-text-scroll"], outerEdge: true)
+        enabled.tap()
+        expectation(for: NSPredicate(format: "value == %@ AND enabled == true", "0"), evaluatedWith: enabled)
+        waitForExpectations(timeout: 30)
+        enabled.tap()
+        let agree = app.buttons["ai-text-consent-agree"]
+        if agree.waitForExistence(timeout: 5) { boardTap(app, "ai-text-consent-agree") }
+        expectation(for: NSPredicate(format: "value == %@ AND enabled == true", "1"), evaluatedWith: enabled)
+        waitForExpectations(timeout: 30)
+        aiTextConfigurationReady(app)
+
+        aiTextConfigurationReplace(app, "ai-text-model-input", with: assistant)
+        aiTextConfigurationTap(app, "ai-text-model-save"); aiTextConfigurationReady(app)
+        aiTextConfigurationReplace(app, "ai-text-copilot-model-input", with: copilot)
+        aiTextConfigurationTap(app, "ai-text-copilot-model-save"); aiTextConfigurationReady(app)
+        aiTextConfigurationTap(app, "ai-text-endpoint-edit")
+        aiTextConfigurationReplace(app, "ai-text-endpoint-input", with: "")
+        aiTextConfigurationTap(app, "ai-text-endpoint-save"); aiTextConfigurationReady(app)
+        aiTextConfigurationTap(app, "ai-text-endpoint-edit")
+        let defaultEndpoint = aiTextConfigurationInput(app, "ai-text-endpoint-input")
+        let defaultValue = defaultEndpoint.value as? String ?? ""
+        XCTAssertTrue(defaultValue.isEmpty || defaultValue == defaultEndpoint.placeholderValue)
+        aiTextConfigurationReplace(app, "ai-text-endpoint-input", with: endpoint)
+        aiTextConfigurationTap(app, "ai-text-endpoint-save"); aiTextConfigurationReady(app)
+
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "--native-capture-ai-fixture" }
+        app.launchEnvironment.removeValue(forKey: "MINDWTR_CAPTURE_AI_FIXTURE_URL")
+        XCTAssertFalse(app.launchArguments.contains("--native-capture-ai-fixture"))
+        XCTAssertTrue(app.launchArguments.contains("200e5e94-1e41-4b90-a43f-190ae4d55bdc"))
+        app.launch(); boardEnabled(app.buttons["capture-open"], timeout: 30)
+        aiTextConfigurationOpen(app)
+        XCTAssertEqual(app.switches["ai-text-enabled"].value as? String, "1")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-model-input").value as? String, assistant)
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-copilot-model-input").value as? String, copilot)
+        aiTextConfigurationTap(app, "ai-text-endpoint-edit")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-endpoint-input").value as? String, endpoint)
+        aiTextConfigurationTap(app, "ai-text-endpoint-cancel")
+        for identifier in ["ai-text-back", "ai-summary-back", "advanced-back", "settings-back"] { boardTap(app, identifier) }
+
+        let title = "Synthetic capture copilot " + UUID().uuidString.lowercased()
+        captureCopilotCapture(app, title: title + " @typed-context #typed-ai")
+        captureCopilotTap(app, "capture-options")
+        let note = app.descendants(matching: .any).matching(identifier: "capture-note").firstMatch
+        boardEnabled(note); note.tap(); note.typeText("Capture AI note stays local confirmed")
+        boardEnabled(app.buttons["capture-save-edit"], timeout: 30)
+        captureCopilotTap(app, "capture-options")
+        captureCopilotTap(app, "capture-copilot-suggest")
+        let first = app.buttons["capture-copilot-chip-0"]
+        boardEnabled(first, timeout: 30); XCTAssertEqual(first.label, "@home")
+        XCTAssertFalse(app.staticTexts["capture-copilot-applied"].exists)
+        captureCopilotTap(app, "capture-copilot-apply-all")
+        XCTAssertTrue(first.waitForNonExistence(timeout: 15))
+        let applied = app.staticTexts["capture-copilot-applied"]
+        XCTAssertTrue(applied.waitForExistence(timeout: 15))
+        XCTAssertTrue(applied.label.contains("@home")); XCTAssertTrue(applied.label.contains("#native-ai"))
+        captureCopilotTap(app, "capture-save-edit")
+        captureCopilotEditorFields(app, title: title)
+        boardTap(app, "task-view-close")
+        app.terminate(); app.launch(); boardEnabled(app.buttons["capture-open"], timeout: 30)
+        boardTap(app, "tab-inbox")
+        let saved = app.buttons[title]
+        revealPagedElement(app, saved, in: app.descendants(matching: .any)["inbox-scroll"].firstMatch, more: "inbox-more", ready: app.buttons["inbox-filters-open"])
+        boardEnabled(saved, timeout: 30); saved.tap()
+        boardTap(app, "task-mode-edit")
+        captureCopilotEditorFields(app, title: title)
+        boardTap(app, "task-view-close")
+    }
+
+    func testCaptureCopilotAppliesAndDurablySavesAndEdits() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(); defer { app.terminate() }
+        let title = "Synthetic capture copilot " + UUID().uuidString.lowercased()
+        captureCopilotCapture(app, title: title + " @typed-context #typed-ai")
+        captureCopilotTap(app, "capture-options")
+        let note = app.descendants(matching: .any).matching(identifier: "capture-note").firstMatch
+        boardEnabled(note); note.tap(); note.typeText("Capture AI note stays local")
+        boardEnabled(app.buttons["capture-save-edit"], timeout: 30)
+        captureCopilotTap(app, "capture-options")
+        boardEnabled(app.buttons["capture-copilot-suggest"], timeout: 30)
+        XCTAssertEqual(app.buttons["capture-copilot-suggest"].label, "Suggest")
+        XCTAssertFalse(app.staticTexts["capture-copilot-applied"].exists)
+        captureCopilotTap(app, "capture-copilot-suggest")
+        let first = app.buttons["capture-copilot-chip-0"]
+        boardEnabled(first, timeout: 30)
+        XCTAssertEqual(first.label, "@home")
+        XCTAssertGreaterThanOrEqual(first.frame.height, 44 - 0.01)
+        XCTAssertFalse(app.staticTexts["capture-copilot-applied"].exists, "A suggestion alone must not apply metadata")
+        first.tap()
+        let applied = app.staticTexts["capture-copilot-applied"]
+        XCTAssertTrue(applied.waitForExistence(timeout: 15)); XCTAssertTrue(applied.label.contains("@home"))
+        captureCopilotTap(app, "capture-copilot-apply-all")
+        XCTAssertTrue(app.buttons["capture-copilot-chip-0"].waitForNonExistence(timeout: 15))
+        XCTAssertTrue(applied.label.contains("#native-ai"))
+        captureCopilotTap(app, "capture-options")
+        boardEnabled(note)
+        replaceTextView(note, with: "Capture AI note stays local confirmed")
+        boardEnabled(app.buttons["capture-save-edit"], timeout: 30)
+        XCTAssertTrue(applied.waitForExistence(timeout: 15)); XCTAssertTrue(applied.label.contains("#native-ai"))
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Capture AI explicitly applied metadata"
+        shot.lifetime = .keepAlways; add(shot)
+        captureCopilotTap(app, "capture-save-edit")
+        captureCopilotEditorFields(app, title: title)
+        boardTap(app, "task-view-close")
+        app.terminate(); app.launch(); boardEnabled(app.buttons["capture-open"], timeout: 30)
+        boardTap(app, "tab-inbox")
+        let saved = app.buttons[title]; boardEnabled(saved, timeout: 30); saved.tap()
+        boardTap(app, "task-mode-edit")
+        captureCopilotEditorFields(app, title: title)
+        boardTap(app, "task-view-close")
+    }
+
+    func testCaptureCopilotRetiresOnTypingAndMultilineKeepsOrdinaryCapture() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(lines: true); defer { app.terminate() }
+        captureCopilotCapture(app, title: "Synthetic capture copilot edit")
+        boardEnabled(app.buttons["capture-copilot-suggest"], timeout: 30); captureCopilotTap(app, "capture-copilot-suggest")
+        boardEnabled(app.buttons["capture-copilot-chip-0"], timeout: 30)
+        captureCopilotTap(app, "capture-copilot-apply-all")
+        XCTAssertTrue(app.staticTexts["capture-copilot-applied"].waitForExistence(timeout: 15))
+        let input = app.textViews["capture-input"]; input.tap(); input.typeText(" changed")
+        XCTAssertTrue(app.staticTexts["capture-copilot-applied"].waitForNonExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["capture-copilot-chip-0"].exists)
+        boardEnabled(app.buttons["capture-save"], timeout: 30)
+        captureCopilotTap(app, "capture-copilot-suggest"); boardEnabled(app.buttons["capture-copilot-chip-0"], timeout: 30)
+        captureCopilotTap(app, "capture-lines-fixture-paste")
+        boardEnabled(app.buttons["capture-save"], timeout: 30)
+        XCTAssertFalse(app.buttons["capture-copilot-suggest"].exists)
+        XCTAssertFalse(app.buttons["capture-copilot-chip-0"].exists)
+        XCTAssertFalse(app.staticTexts["capture-copilot-applied"].exists)
+        task500Question(app)
+        captureCopilotTap(app, "capture-lines-cancel"); captureCopilotTap(app, "capture-close")
+    }
+
+    func testCaptureCopilotRestoreFixture() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(restore: true); defer { app.terminate() }
+        captureCopilotTap(app, "capture-open")
+        let state = app.staticTexts["capture-ai-fixture-state"]
+        XCTAssertTrue(state.waitForExistence(timeout: 15)); XCTAssertEqual(state.label, "restored")
+        captureCopilotTap(app, "capture-close")
+    }
+}
+
+
+extension FoundationUITests {
+    private func voiceFixtureReady(_ app: XCUIApplication) {
+        expectation(for: NSPredicate { _, _ in app.buttons["capture-open"].exists || app.buttons["task-recovery-keep"].exists }, evaluatedWith: app)
+        waitForExpectations(timeout: 30)
+        if app.buttons["task-recovery-keep"].exists { boardTap(app, "task-recovery-keep") }
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+    }
+    private func voiceSettingsOpen(_ app: XCUIApplication) {
+        aiTextConfigurationOpen(app)
+        boardTap(app, "ai-text-back")
+        revealPagedElement(app, app.buttons["voice-settings-open"], in: app.scrollViews["ai-summary-scroll"], outerEdge: true)
+        boardTap(app, "voice-settings-open")
+        boardEnabled(app.switches["voice-settings-enabled"], timeout: 30)
+    }
+    private func voiceSettingsTap(_ app: XCUIApplication, _ id: String) {
+        let button = app.buttons[id]
+        revealPagedElement(app, button, in: app.scrollViews["voice-settings-scroll"], outerEdge: true)
+        boardTap(app, id)
+    }
+    private func voiceCredentialStatus(_ app: XCUIApplication, _ label: String) {
+        let state = app.staticTexts["voice-settings-credential-status"]
+        revealPagedElement(app, state, in: app.scrollViews["voice-settings-scroll"], outerEdge: true)
+        expectation(for: NSPredicate(format: "label == %@", label), evaluatedWith: state)
+        waitForExpectations(timeout: 20)
+    }
+    private func voiceSettingsClose(_ app: XCUIApplication) {
+        for id in ["voice-settings-back", "ai-summary-back", "advanced-back", "settings-back"] { boardTap(app, id) }
+    }
+    func testNativeVoiceSettingsRecordSaveAndAddAnother() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(lines: true, voice: true); defer { app.terminate() }
+        voiceSettingsOpen(app)
+        XCTAssertEqual(app.staticTexts["voice-settings-provider"].label, "Gemini")
+        let enabled = app.switches["voice-settings-enabled"]
+        if enabled.value as? String != "1" { enabled.tap() }
+        voiceCredentialStatus(app, "No API key saved")
+        print("VOICE_UI_EMPTY_CREDENTIAL_CONFIRMED")
+        let credential = app.secureTextFields["voice-settings-credential-input"]
+        revealPagedElement(app, credential, in: app.scrollViews["voice-settings-scroll"], outerEdge: true)
+        credential.tap(); credential.typeText("SYNTHETIC-NATIVE-VOICE-UI")
+        voiceSettingsTap(app, "voice-settings-credential-save")
+        voiceCredentialStatus(app, "API key available")
+        voiceSettingsClose(app)
+        captureCopilotCapture(app, title: "Synthetic voice first")
+        let another = app.switches["capture-add-another"]
+        revealPagedElement(app, another, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        if another.value as? String != "1" { another.tap() }
+        captureCopilotTap(app, "capture-voice-record")
+        boardEnabled(app.buttons["capture-voice-stop"], timeout: 20)
+        let input = app.textViews["capture-input"]
+        revealPagedElement(app, input, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        captureCopilotTap(app, "capture-lines-fixture-paste")
+        XCTAssertTrue((input.value as? String ?? "").contains("\n"))
+        captureCopilotTap(app, "capture-voice-stop")
+        XCTAssertTrue(app.buttons["capture-voice-stop"].exists)
+        XCTAssertEqual(app.staticTexts["capture-notice"].label, "A recording can be saved to one task. Remove extra task lines.")
+        revealPagedElement(app, input, in: app.scrollViews["capture-scroll"], outerEdge: true)
+        replaceProjectNotesText(input, with: "Synthetic voice first")
+        captureCopilotTap(app, "capture-voice-stop")
+        XCTAssertTrue(app.buttons["capture-voice-stop"].waitForNonExistence(timeout: 30))
+        XCTAssertTrue(input.waitForExistence(timeout: 20))
+        XCTAssertEqual(input.value as? String ?? "", "")
+        XCTAssertEqual(app.switches["capture-add-another"].value as? String, "1")
+        input.tap(); input.typeText("Synthetic voice follow-up")
+        boardEnabled(app.buttons["capture-save"], timeout: 20)
+        captureCopilotTap(app, "capture-save")
+        let followupSaved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", ""), object: input)
+        XCTAssertEqual(XCTWaiter.wait(for: [followupSaved], timeout: 20), .completed)
+        captureCopilotTap(app, "capture-close")
+        voiceSettingsOpen(app)
+        voiceSettingsTap(app, "voice-settings-credential-clear")
+        voiceCredentialStatus(app, "No API key saved")
+        voiceSettingsClose(app)
+    }
+    func testNativeVoiceFixtureCleanup() throws {
+        continueAfterFailure = false
+        if ProcessInfo.processInfo.environment["MINDWTR_VOICE_UI_OWNED_CREDENTIAL"] == "1" {
+            let app = XCUIApplication()
+            app.launchArguments = ["--native-ui-test-library", "200e5e94-1e41-4b90-a43f-190ae4d55bdc", "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+            app.launch(); voiceFixtureReady(app)
+            voiceSettingsOpen(app)
+            voiceSettingsTap(app, "voice-settings-credential-clear")
+            voiceCredentialStatus(app, "No API key saved")
+            voiceSettingsClose(app); app.terminate()
+        }
+        let app = try captureCopilotFixtureApp(restore: true, voice: true); defer { app.terminate() }
+        captureCopilotTap(app, "capture-open")
+        XCTAssertEqual(app.staticTexts["capture-ai-fixture-state"].label, "restored")
+        captureCopilotTap(app, "capture-close")
+    }
+}
+
+
+extension FoundationUITests {
+    private func taskAIFixtureReady(_ app: XCUIApplication) {
+        let library = "7c6c4adb-06b2-4ecb-94c2-0e84a7c41b2c", arguments = app.launchArguments
+        guard ProcessInfo.processInfo.environment["MINDWTR_TASK_AI_UI_LIBRARY"] == library,
+              arguments.filter({ $0 == "--native-ui-test-library" }).count == 1,
+              let position = arguments.firstIndex(of: "--native-ui-test-library"), position + 1 < arguments.count,
+              arguments[position + 1] == library,
+              arguments.filter({ $0 == "--native-task-ai-ui-fixture" }).count == 1 else {
+            XCTFail("Owned task-AI recovery cleanup requires its exact dedicated fixture namespace")
+            return
+        }
+        expectation(for: NSPredicate { _, _ in app.buttons["capture-open"].exists || app.buttons["task-recovery-discard"].exists }, evaluatedWith: app)
+        waitForExpectations(timeout: 30)
+        if app.buttons["task-recovery-discard"].exists {
+            boardTap(app, "task-recovery-discard")
+            boardTap(app, "task-recovery-discard-confirm")
+        }
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+    }
+
+    private func taskAITap(_ app: XCUIApplication, _ identifier: String, dialog: Bool = false) {
+        let button = app.buttons[identifier]
+        boardEnabled(button, timeout: 30)
+        let scroll = dialog ? app.scrollViews.containing(.button, identifier: identifier).firstMatch
+                            : app.scrollViews["task-editor-scroll"]
+        if scroll.exists { revealPagedElement(app, button, in: scroll, outerEdge: true) }
+        boardTap(app, identifier)
+    }
+
+    private func taskAIReopen(_ app: XCUIApplication, title: String) {
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        boardTap(app, "tab-inbox")
+        let saved = app.buttons[title]
+        revealPagedElement(app, saved, in: app.descendants(matching: .any)["inbox-scroll"].firstMatch,
+            more: "inbox-more", ready: app.buttons["inbox-filters-open"], outerEdge: true)
+        boardEnabled(saved, timeout: 30); saved.tap()
+        boardTap(app, "task-mode-edit")
+        task497Editor(app, title: title)
+    }
+
+    private func taskAIAssertSuggestion(_ app: XCUIApplication, title: String) {
+        let input = app.textFields["task-editor-title"]
+        boardEnabled(input, timeout: 30)
+        expectation(for: NSPredicate(format: "value == %@", title), evaluatedWith: input)
+        waitForExpectations(timeout: 30)
+        task497Editor(app, title: title)
+        let scroll = app.scrollViews["task-editor-scroll"]
+        let organization = app.buttons["task-editor-section-organization"]
+        revealPagedElement(app, organization, in: scroll, outerEdge: true)
+        if organization.value as? String == "Expand" { organization.tap() }
+        let contexts = app.textFields["task-editor-contexts"]
+        revealPagedElement(app, contexts, in: scroll, outerEdge: true)
+        XCTAssertEqual(contexts.value as? String, "@home")
+        let estimate = app.buttons["task-editor-timeEstimate-15min"]
+        revealPagedElement(app, estimate, in: scroll, outerEdge: true)
+        XCTAssertTrue(estimate.isSelected)
+    }
+
+    private func taskAIShowChecklist(_ app: XCUIApplication) {
+        let scroll = app.scrollViews["task-editor-scroll"]
+        let details = app.buttons["task-editor-section-details"]
+        revealPagedElement(app, details, in: scroll, outerEdge: true)
+        if details.value as? String == "Expand" { details.tap() }
+        revealPagedElement(app, app.buttons["task-checklist-add"], in: scroll, outerEdge: true)
+    }
+
+    private func taskAIClarifySaveAndBreakdownDiscard(largest: Bool) throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(taskAI: true, largest: largest)
+        let library = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_TASK_AI_UI_LIBRARY"])
+        defer { app.terminate() }
+        let title = "Synthetic task AI " + UUID().uuidString.lowercased()
+        let clarified = title + " clarified"
+        captureCopilotCapture(app, title: title)
+        captureCopilotTap(app, "capture-save-edit")
+        task497Editor(app, title: title)
+        let editorTitle = app.textFields["task-editor-title"]
+        editorTitle.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        taskAITap(app, "task-ai-clarify")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 10))
+        let dialog = app.descendants(matching: .any).matching(identifier: "task-ai-dialog").firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 30))
+        XCTAssertEqual(app.buttons["task-ai-choice-0"].label, "Use synthetic rewrite")
+        XCTAssertEqual(app.buttons["task-ai-choice-1"].label, "Use suggestion")
+        XCTAssertEqual(app.buttons["task-ai-choice-2"].label, "Cancel")
+        taskAITap(app, "task-ai-choice-1", dialog: true)
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 15))
+        taskAIAssertSuggestion(app, title: clarified)
+        boardEnabled(app.buttons["task-editor-save"], timeout: 30)
+        boardTap(app, "task-editor-save")
+        XCTAssertTrue(editorTitle.waitForNonExistence(timeout: 30), "Ordinary Save must settle and close the draft")
+        taskAIReopen(app, title: clarified)
+        taskAIAssertSuggestion(app, title: clarified)
+
+        taskAITap(app, "task-ai-breakdown")
+        XCTAssertTrue(dialog.waitForExistence(timeout: 30))
+        XCTAssertEqual(app.buttons["task-ai-choice-0"].label, "Cancel")
+        XCTAssertEqual(app.buttons["task-ai-choice-1"].label, "Add steps")
+        taskAITap(app, "task-ai-choice-1", dialog: true)
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 15))
+        taskAIShowChecklist(app)
+        for (index, expected) in ["Synthetic task AI inspect scope", "Synthetic task AI prepare result",
+                                  "Synthetic task AI check result"].enumerated() {
+            let input = app.textFields["task-checklist-input-\(index)"]
+            revealPagedElement(app, input, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+            XCTAssertEqual(input.value as? String, expected)
+        }
+        XCTAssertFalse(app.textFields["task-checklist-input-3"].exists)
+        boardTap(app, "task-view-close"); boardTap(app, "task-editor-discard")
+        XCTAssertTrue(editorTitle.waitForNonExistence(timeout: 30))
+
+        app.terminate()
+        app.launchArguments.removeAll { ["--native-capture-ai-fixture", "--native-task-ai-ui-fixture"].contains($0) }
+        app.launchEnvironment.removeValue(forKey: "MINDWTR_CAPTURE_AI_FIXTURE_URL")
+        XCTAssertTrue(app.launchArguments.contains(library))
+        XCTAssertFalse(app.launchArguments.contains("--native-capture-ai-fixture"))
+        XCTAssertFalse(app.launchArguments.contains("--native-task-ai-ui-fixture"))
+        app.launch()
+        voiceFixtureReady(app)
+        taskAIReopen(app, title: clarified)
+        taskAIAssertSuggestion(app, title: clarified)
+        taskAIShowChecklist(app)
+        XCTAssertFalse(app.textFields["task-checklist-input-0"].exists, "Discarded AI steps must not persist")
+        boardTap(app, "task-view-close")
+        XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+    }
+
+    func testTaskAIRestoreFixture() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(restore: true, taskAI: true); defer { app.terminate() }
+        captureCopilotTap(app, "capture-open")
+        let state = app.staticTexts["capture-ai-fixture-state"]
+        XCTAssertTrue(state.waitForExistence(timeout: 15)); XCTAssertEqual(state.label, "restored")
+        captureCopilotTap(app, "capture-close")
+    }
+
+    func testTaskAIClarifySaveAndBreakdownDiscard() throws {
+        try taskAIClarifySaveAndBreakdownDiscard(largest: false)
+    }
+
+    func testTaskAILargestClarifySaveAndBreakdownDiscard() throws {
+        try taskAIClarifySaveAndBreakdownDiscard(largest: true)
+    }
+}
+
+extension FoundationUITests {
+    private func inboxAIFixtureReady(_ app: XCUIApplication) {
+        let library = "9e9cc1b8-659c-4daf-8b31-71f55378ee4c", arguments = app.launchArguments
+        guard ProcessInfo.processInfo.environment["MINDWTR_INBOX_AI_UI_LIBRARY"] == library,
+              arguments.filter({ $0 == "--native-ui-test-library" }).count == 1,
+              let position = arguments.firstIndex(of: "--native-ui-test-library"), position + 1 < arguments.count,
+              arguments[position + 1] == library,
+              arguments.filter({ $0 == "--native-inbox-ai-ui-fixture" }).count == 1,
+              !arguments.contains("--native-task-ai-ui-fixture"), !arguments.contains("--native-voice-ui-fixture") else {
+            XCTFail("Owned Inbox-AI recovery cleanup requires its exact dedicated fixture namespace"); return
+        }
+        expectation(for: NSPredicate { _, _ in app.buttons["capture-open"].exists || app.buttons["task-recovery-discard"].exists }, evaluatedWith: app)
+        waitForExpectations(timeout: 30)
+        if app.buttons["task-recovery-discard"].exists {
+            boardTap(app, "task-recovery-discard"); boardTap(app, "task-recovery-discard-confirm")
+        }
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+    }
+
+    private func inboxAITap(_ app: XCUIApplication, _ identifier: String, dialog: Bool = false) {
+        let button = app.buttons[identifier]
+        boardEnabled(button, timeout: 30)
+        let scroll = app.scrollViews[dialog ? "process-inbox-ai-dialog" : "process-inbox-scroll"]
+        if scroll.exists { revealPagedElement(app, button, in: scroll, outerEdge: true) }
+        boardTap(app, identifier)
+    }
+
+    private func inboxAIDialog(_ app: XCUIApplication) -> XCUIElement {
+        let dialog = app.scrollViews["process-inbox-ai-dialog"]
+        XCTAssertTrue(dialog.waitForExistence(timeout: 30))
+        XCTAssertEqual(app.buttons["process-inbox-ai-choice-0"].label, "Use synthetic rewrite")
+        XCTAssertEqual(app.buttons["process-inbox-ai-choice-1"].label, "Use suggestion")
+        XCTAssertEqual(app.buttons["process-inbox-ai-choice-2"].label, "Cancel")
+        return dialog
+    }
+
+    func testInboxAIClarifyCancelApplyCommit() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(inboxAI: true)
+        let library = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_INBOX_AI_UI_LIBRARY"])
+        defer { app.terminate() }
+        let original = "Synthetic inbox AI " + UUID().uuidString.lowercased()
+        let local = original + " local", clarified = original + " clarified"
+        captureCopilotCapture(app, title: original); captureCopilotTap(app, "capture-save")
+        XCTAssertTrue(app.textViews["capture-input"].waitForNonExistence(timeout: 30))
+        boardTap(app, "inbox-process-primary")
+        let title = app.descendants(matching: .any).matching(identifier: "process-inbox-title").firstMatch
+        boardEnabled(title, timeout: 30)
+        boardEnabled(app.buttons["process-inbox-choice-actionable"], timeout: 30)
+        replaceTextView(title, with: local)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        inboxAITap(app, "process-inbox-ai-clarify")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 10))
+        var dialog = inboxAIDialog(app)
+        inboxAITap(app, "process-inbox-ai-choice-2", dialog: true)
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 15))
+        expectation(for: NSPredicate(format: "value == %@", local), evaluatedWith: title); waitForExpectations(timeout: 15)
+
+        inboxAITap(app, "process-inbox-ai-clarify"); dialog = inboxAIDialog(app)
+        inboxAITap(app, "process-inbox-ai-choice-1", dialog: true)
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 15))
+        expectation(for: NSPredicate(format: "value == %@", clarified), evaluatedWith: title); waitForExpectations(timeout: 15)
+        boardTap(app, "process-inbox-close")
+        boardEnabled(app.buttons[original], timeout: 30)
+        XCTAssertFalse(app.buttons[clarified].exists)
+        boardTap(app, "inbox-process-primary")
+        boardEnabled(title, timeout: 30)
+        XCTAssertEqual(title.value as? String, original)
+        inboxAITap(app, "process-inbox-ai-clarify"); dialog = inboxAIDialog(app)
+        inboxAITap(app, "process-inbox-ai-choice-1", dialog: true)
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 15))
+        expectation(for: NSPredicate(format: "value == %@", clarified), evaluatedWith: title); waitForExpectations(timeout: 15)
+        inboxAITap(app, "process-inbox-choice-actionable")
+        inboxAITap(app, "process-inbox-choice-done")
+        boardEnabled(app.buttons["process-inbox-finish"], timeout: 30)
+        inboxAITap(app, "process-inbox-finish")
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+
+        app.terminate()
+        app.launchArguments.removeAll { ["--native-capture-ai-fixture", "--native-inbox-ai-ui-fixture"].contains($0) }
+        app.launchEnvironment.removeValue(forKey: "MINDWTR_CAPTURE_AI_FIXTURE_URL")
+        XCTAssertTrue(app.launchArguments.contains(library))
+        app.launch()
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        guard inboxAIOpenMeasuredHistory(app) else { return }
+        boardEnabled(app.buttons[clarified], timeout: 30)
+        let saved = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier BEGINSWITH %@", clarified, "task-title-"))
+        XCTAssertEqual(saved.count, 1)
+        XCTAssertFalse(app.buttons[original].exists)
+        app.buttons[clarified].tap(); boardTap(app, "task-mode-edit")
+        task497Editor(app, title: clarified)
+        let scroll = app.scrollViews["task-editor-scroll"]
+        let done = app.buttons["task-editor-status-done"]
+        revealPagedElement(app, done, in: scroll, outerEdge: true); XCTAssertTrue(done.isSelected)
+        let organization = app.buttons["task-editor-section-organization"]
+        revealPagedElement(app, organization, in: scroll, outerEdge: true)
+        if organization.value as? String == "Expand" { organization.tap() }
+        let contexts = app.textFields["task-editor-contexts"]
+        revealPagedElement(app, contexts, in: scroll, outerEdge: true)
+        XCTAssertEqual(contexts.value as? String, "@home")
+        boardTap(app, "task-view-close")
+        XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+    }
+
+    func testInboxAIRestoreFixture() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(restore: true, inboxAI: true); defer { app.terminate() }
+        captureCopilotTap(app, "capture-open")
+        let state = app.staticTexts["capture-ai-fixture-state"]
+        XCTAssertTrue(state.waitForExistence(timeout: 15)); XCTAssertEqual(state.label, "restored")
+        captureCopilotTap(app, "capture-close")
+    }
+}
+
+extension FoundationUITests {
+    private func inboxAIOpenMeasuredHistory(_ app: XCUIApplication) -> Bool {
+        boardEnabled(app.buttons["tab-menu"], timeout: 30); boardTap(app, "tab-menu")
+        let query = app.buttons.matching(identifier: "menu-history")
+        var selected: XCUIElement?, probes = 0
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let candidates = query.allElementsBoundByIndex
+            probes += 1
+            if probes <= 5 { print("INBOX_AI_COLD_HISTORY probe=\(probes) candidates=\(candidates.count)") }
+            guard candidates.count == 1 else { return false }
+            let candidate = candidates[0], frame = candidate.frame, viewport = app.frame
+            let exists = candidate.exists, enabled = exists && candidate.isEnabled
+            let hittable = exists && candidate.isHittable
+            let bounded = [frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite }
+                && frame.width >= 44 && frame.height >= 44 && viewport.contains(frame)
+            if probes <= 5 {
+                print("INBOX_AI_COLD_HISTORY candidate=0 exists=\(exists) enabled=\(enabled) hittable=\(hittable) frame=\(frame) bounded=\(bounded)")
+            }
+            guard enabled && bounded else { return false }
+            selected = candidate
+            return true
+        }, object: nil)
+        guard XCTWaiter.wait(for: [ready], timeout: 10) == .completed, let history = selected else {
+            XCTFail("Diagnostic requires one enabled History instance with a contained frame of at least44points"); return false
+        }
+        let viewport = app.frame, frame = history.frame
+        guard query.count == 1, history.exists, history.isEnabled,
+              [frame.minX, frame.minY, frame.width, frame.height].allSatisfy({ $0.isFinite }),
+              frame.width >= 44, frame.height >= 44, viewport.width > 0, viewport.height > 0,
+              viewport.contains(frame) else { XCTFail("Measured History frame changed before the diagnostic tap"); return false }
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        print("INBOX_AI_COLD_HISTORY measuredCenter=\(center) frame=\(frame) appFrame=\(viewport) tap=element-frame-center")
+        app.coordinate(withNormalizedOffset: CGVector(dx: (center.x - viewport.minX) / viewport.width,
+            dy: (center.y - viewport.minY) / viewport.height)).tap()
+        let arrived = app.buttons["history-tab-done"].waitForExistence(timeout: 10)
+        print("INBOX_AI_COLD_HISTORY arrived=\(arrived) menuDismissExists=\(app.buttons["menu-dismiss"].exists)")
+        guard arrived else { XCTFail("Measured-center History touch did not reach the History screen"); return false }
+        boardEnabled(app.buttons["history-tab-done"], timeout: 30)
+        if !app.buttons["history-tab-done"].isSelected { boardTap(app, "history-tab-done") }
+        boardEnabled(app.buttons["done-overflow-button"], timeout: 30)
+        return true
+    }
+
+    func testInboxAIColdReadRetainedDoneTask() throws {
+        continueAfterFailure = false
+        let library = "9e9cc1b8-659c-4daf-8b31-71f55378ee4c"
+        let taskID = "df66a17c-05b7-4fac-99d1-f68b7b58f40f"
+        let title = "Synthetic inbox AI 7709d0c0-fdf6-42ae-a09f-b33fcfe6157f clarified"
+        guard ProcessInfo.processInfo.environment["MINDWTR_INBOX_AI_UI_LIBRARY"] == library else {
+            throw XCTSkip("The retained Inbox AI library must be selected externally")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library,
+            "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        app.launch(); defer { app.terminate() }
+        guard inboxAIOpenMeasuredHistory(app) else { return }
+        let rows = app.buttons.matching(identifier: "task-title-" + taskID)
+        boardEnabled(rows.firstMatch, timeout: 30)
+        XCTAssertEqual(rows.count, 1); XCTAssertEqual(rows.firstMatch.label, title)
+        rows.firstMatch.tap(); boardTap(app, "task-mode-edit")
+        task497Editor(app, title: title)
+        let scroll = app.scrollViews["task-editor-scroll"], done = app.buttons["task-editor-status-done"]
+        revealPagedElement(app, done, in: scroll, outerEdge: true); XCTAssertTrue(done.isSelected)
+        let organization = app.buttons["task-editor-section-organization"]
+        revealPagedElement(app, organization, in: scroll, outerEdge: true)
+        if organization.value as? String == "Expand" { organization.tap() }
+        let contexts = app.textFields["task-editor-contexts"]
+        revealPagedElement(app, contexts, in: scroll, outerEdge: true)
+        XCTAssertEqual(contexts.value as? String, "@home")
+        boardTap(app, "task-view-close")
+        XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+    }
+}
+
+extension FoundationUITests {
+    private func reviewAITap(_ app: XCUIApplication, _ identifier: String) {
+        let button = app.buttons[identifier]
+        boardEnabled(button, timeout: 30)
+        let scroll = app.scrollViews["review-guide-content-stale"]
+        if scroll.exists { revealPagedElement(app, button, in: scroll, outerEdge: true) }
+        boardTap(app, identifier)
+    }
+    private func reviewAIOpenStale(_ app: XCUIApplication) {
+        if app.buttons["tab-review"].exists { boardTap(app, "tab-review") }
+        else { boardTap(app, "tab-menu"); boardTap(app, "menu-review") }
+        boardTap(app, "review-start"); boardTap(app, "review-start-weekly")
+        boardEnabled(app.buttons["review-guide-close"], timeout: 30)
+        for _ in 0..<10 where !app.buttons["review-ai-run"].exists {
+            boardTap(app, "review-guide-next"); boardEnabled(app.buttons["review-guide-close"], timeout: 30)
+        }
+        XCTAssertTrue(app.scrollViews["review-guide-content-stale"].exists)
+        reviewAITap(app, "review-ai-run")
+    }
+    func testReviewAIAnalyzeSelectedApplyAndColdRead() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(reviewAI: true); defer { app.terminate() }
+        let run = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_REVIEW_AI_UI_RUN"])
+        let library = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_REVIEW_AI_UI_LIBRARY"])
+        let somedayID = "review-ai-" + run + "-someday", archiveID = "review-ai-" + run + "-archive"
+        let title = "Synthetic review AI " + run + " someday"
+        reviewAIOpenStale(app)
+        let someday = app.buttons["review-ai-suggestion-" + somedayID], archive = app.buttons["review-ai-suggestion-" + archiveID]
+        boardEnabled(someday, timeout: 30); boardEnabled(archive, timeout: 30)
+        XCTAssertTrue(someday.isSelected); XCTAssertTrue(archive.isSelected)
+        XCTAssertFalse(app.staticTexts["review-ai-error"].exists)
+        reviewAITap(app, archive.identifier); XCTAssertFalse(archive.isSelected); XCTAssertTrue(someday.isSelected)
+        let apply = app.buttons["review-ai-apply"]
+        reviewAITap(app, "review-ai-apply")
+        XCTAssertTrue(apply.waitForNonExistence(timeout: 30), "Durable Apply acknowledgement must retire the displayed proposals")
+        boardEnabled(app.buttons["review-ai-run"], timeout: 30)
+        XCTAssertFalse(app.staticTexts["review-ai-error"].exists)
+        boardTap(app, "review-guide-close")
+        app.terminate()
+        app.launchArguments.removeAll { ["--native-capture-ai-fixture", "--native-review-ai-ui-fixture"].contains($0) }
+        app.launchEnvironment.removeValue(forKey: "MINDWTR_CAPTURE_AI_FIXTURE_URL")
+        app.launchEnvironment.removeValue(forKey: "MINDWTR_REVIEW_AI_UI_RUN")
+        XCTAssertTrue(app.launchArguments.contains(library))
+        app.launch(); boardEnabled(app.buttons["search-open"], timeout: 30)
+        boardTap(app, "search-open")
+        let search = app.textFields["search-input"]; boardEnabled(search, timeout: 30); search.tap(); search.typeText(title)
+        let saved = app.buttons["search-task-" + somedayID]; boardEnabled(saved, timeout: 30); saved.tap()
+        boardTap(app, "task-mode-edit"); task497Editor(app, title: title)
+        let status = app.buttons["task-editor-status-someday"]
+        revealPagedElement(app, status, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+        XCTAssertTrue(status.isSelected)
+        boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+        boardTap(app, "search-close")
+    }
+    func testReviewAIRestoreFixture() throws {
+        continueAfterFailure = false
+        let app = try captureCopilotFixtureApp(restore: true, reviewAI: true); defer { app.terminate() }
+        captureCopilotTap(app, "capture-open")
+        let state = app.staticTexts["capture-ai-fixture-state"]
+        XCTAssertTrue(state.waitForExistence(timeout: 15)); XCTAssertEqual(state.label, "restored")
+        captureCopilotTap(app, "capture-close")
+    }
+}
+
+
+extension FoundationUITests {
+    func testNativeAddTaskShortcutsDiscoveryProbe() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_QUICK_CAPTURE_INTENT_OS_PROBE"] == "1",
+              let run = environment["MINDWTR_QUICK_CAPTURE_INTENT_OS_PROBE_RUN"],
+              UUID(uuidString: run)?.uuidString.lowercased() == run else {
+            throw XCTSkip("A root-owned simulator Shortcuts discovery probe and run UUID are required")
+        }
+        continueAfterFailure = false
+        let shortcuts = XCUIApplication(bundleIdentifier: "com.apple.shortcuts")
+        let startedHere = shortcuts.state == .notRunning
+        if startedHere { shortcuts.launch() } else { shortcuts.activate() }
+        defer { if startedHere { shortcuts.terminate() } }
+        XCTAssertEqual(shortcuts.state, .runningForeground)
+        if shortcuts.staticTexts["What’s New in Shortcuts"].exists {
+            let proceed = shortcuts.buttons["Continue"]
+            XCTAssertTrue(proceed.isHittable); proceed.tap()
+        }
+        let library = shortcuts.navigationBars["All Shortcuts"].buttons["BackButton"]
+        if library.exists && library.label == "Library" && library.isHittable { library.tap() }
+        let mindwtr = shortcuts.staticTexts["Mindwtr"]
+        XCTAssertTrue(mindwtr.isHittable); mindwtr.tap()
+        let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screen.name = "shortcuts-discovery-screen-" + run
+        screen.lifetime = .keepAlways
+        add(screen)
+        var summary: [String: Any] = ["run": run, "bundle": "com.apple.shortcuts",
+            "startedHere": startedHere, "state": shortcuts.state.rawValue]
+        let navigation = shortcuts.navigationBars.firstMatch
+        if navigation.waitForExistence(timeout: 5) {
+            summary["navigationIdentifier"] = String(navigation.identifier.prefix(128))
+            summary["navigationLabel"] = String(navigation.label.prefix(128))
+            let buttons = navigation.buttons
+            let count = buttons.count
+            summary["navigationButtonCount"] = count
+            summary["navigationButtons"] = (0..<min(count, 8)).map { index -> [String: Any] in
+                let button = buttons.element(boundBy: index)
+                return ["index": index, "identifier": String(button.identifier.prefix(128)),
+                        "label": String(button.label.prefix(128)), "enabled": button.isEnabled]
+            }
+        } else { summary["navigationBarObserved"] = false }
+        let data = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys, .prettyPrinted])
+        let evidence = XCTAttachment(string: String(decoding: data, as: UTF8.self))
+        evidence.name = "shortcuts-discovery-navigation-" + run
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        if environment["MINDWTR_QUICK_CAPTURE_INTENT_OS_INVOKE"] == "1" {
+            let action = shortcuts.staticTexts["Add Task"]
+            XCTAssertTrue(action.waitForExistence(timeout: 10))
+            let hierarchy = XCTAttachment(string: String(shortcuts.debugDescription.prefix(20_000)))
+            hierarchy.name = "shortcut-tile-hierarchy-" + run; hierarchy.lifetime = .keepAlways; add(hierarchy)
+            let tile = shortcuts.cells.containing(.staticText, identifier: "Add Task").firstMatch
+            XCTAssertTrue(tile.exists); XCTAssertTrue(tile.isHittable)
+            XCTAssertGreaterThanOrEqual(tile.frame.width, 44); XCTAssertGreaterThanOrEqual(tile.frame.height, 44)
+            let runButton = tile.buttons["tray.and.arrow.down"]
+            XCTAssertTrue(runButton.isHittable)
+            runButton.tap()
+            let native = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+            let input = native.textViews["capture-input"]
+            XCTAssertTrue(input.waitForExistence(timeout: 40)); XCTAssertEqual(native.state, .runningForeground)
+            XCTAssertTrue((input.value as? String ?? "").isEmpty || input.value as? String == input.placeholderValue)
+            let presented = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            presented.name = "shortcut-opened-native-capture-" + run; presented.lifetime = .keepAlways; add(presented)
+            native.buttons["capture-close"].tap(); XCTAssertTrue(input.waitForNonExistence(timeout: 20))
+            native.terminate()
+        }
+    }
+}
+
+
+extension FoundationUITests {
+    func testNativeCaptureWidgetGalleryProbe() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_WIDGET_GALLERY_PROBE"] == "1",
+              let run = environment["MINDWTR_WIDGET_GALLERY_RUN"],
+              UUID(uuidString: run)?.uuidString.lowercased() == run else {
+            throw XCTSkip("Root-owned widget gallery probe required")
+        }
+        continueAfterFailure = false
+        XCUIDevice.shared.press(.home)
+        let home = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertEqual(home.state, .runningForeground)
+        defer { XCUIDevice.shared.press(.home) }
+        home.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65)).press(forDuration: 1.2)
+        let edit = home.buttons["Edit"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5)); edit.tap()
+        let addWidget = home.buttons["Add Widget"]
+        if addWidget.waitForExistence(timeout: 3) {
+            addWidget.tap()
+            let search = home.searchFields.firstMatch
+            if search.waitForExistence(timeout: 5) {
+                search.tap(); search.typeText("Mindwtr")
+                XCTAssertEqual(search.value as? String, "Mindwtr")
+                home.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.29)).tap()
+            }
+        }
+
+        if environment["MINDWTR_WIDGET_INSTALL"] == "1" {
+            let install = home.buttons[" Add Widget"]
+            XCTAssertTrue(install.waitForExistence(timeout: 10)); install.tap()
+            let done = home.buttons["Done"]
+            XCTAssertTrue(done.waitForExistence(timeout: 10)); done.tap()
+            let capture = home.buttons["native-capture-widget-open"]
+            if capture.waitForExistence(timeout: 10) && capture.isHittable {
+                capture.tap()
+                let native = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+                let input = native.textViews["capture-input"]
+                XCTAssertTrue(input.waitForExistence(timeout: 30))
+                XCTAssertEqual(native.state, .runningForeground)
+                let opened = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+                opened.name = "widget-opened-native-capture-" + run; opened.lifetime = .keepAlways; add(opened)
+                native.buttons["capture-close"].tap()
+                XCTAssertTrue(input.waitForNonExistence(timeout: 20)); native.terminate()
+            }
+        }
+        let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screen.name = "widget-gallery-entry-" + run; screen.lifetime = .keepAlways; add(screen)
+        let hierarchy = XCTAttachment(string: String(home.debugDescription.suffix(28_000)))
+        hierarchy.name = "widget-gallery-entry-hierarchy-" + run; hierarchy.lifetime = .keepAlways; add(hierarchy)
+    }
+}
+
+
+extension FoundationUITests {
+    private func nativeNextWidgetRun() throws -> String {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_NEXT_WIDGET_UI"] == "1",
+              let run = environment["MINDWTR_NEXT_WIDGET_RUN"],
+              UUID(uuidString: run)?.uuidString.lowercased() == run else {
+            throw XCTSkip("Root-owned native.dev widget run required")
+        }
+        continueAfterFailure = false
+        return run
+    }
+
+    func testNativeNextWidgetSeedThroughCapture() throws {
+        let run = try nativeNextWidgetRun()
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = ["-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["capture-open"], timeout: 40)
+        boardTap(app, "capture-open")
+        let input = app.textViews["capture-input"]
+        boardEnabled(input)
+        input.typeText("Next widget " + run + " /next")
+        let another = app.switches["capture-add-another"]
+        if another.exists && another.value as? String == "1" { another.tap() }
+        boardTap(app, "capture-save")
+        XCTAssertTrue(input.waitForNonExistence(timeout: 30))
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screen.name = "next-widget-seed-" + run; screen.lifetime = .keepAlways; add(screen)
+    }
+
+    func testNativeNextWidgetExistingHomeRowOpensTask() throws {
+        let run = try nativeNextWidgetRun()
+        guard let task = ProcessInfo.processInfo.environment["MINDWTR_NEXT_WIDGET_TASK"],
+              UUID(uuidString: task) != nil else { throw XCTSkip("Root verified synthetic task ID required") }
+        XCUIDevice.shared.press(.home)
+        let home = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertEqual(home.state, .runningForeground)
+        if home.pageIndicators["Page control"].value as? String == "Page 1 of 2" { home.swipeLeft() }
+        let row = home.descendants(matching: .any).matching(identifier: "native-next-widget-task-" + task).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+        XCTAssertTrue(row.label.contains("Next widget " + run))
+        let before = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        before.name = "next-widget-home-" + run; before.lifetime = .keepAlways; add(before)
+        row.tap()
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        defer { app.terminate(); XCUIDevice.shared.press(.home) }
+        boardEnabled(app.buttons["task-view-close"], timeout: 40)
+        XCTAssertEqual(app.state, .runningForeground)
+        task454Preview(app, title: "Next widget " + run)
+        XCTAssertFalse(app.textViews["capture-input"].exists)
+        let opened = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        opened.name = "next-widget-opened-task-" + run; opened.lifetime = .keepAlways; add(opened)
+        boardTap(app, "task-view-close")
+        XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+        XCTAssertTrue(app.buttons["task-view-close"].waitForNonExistence(timeout: 20))
+    }
+}
+
+
+extension FoundationUITests {
+    func testNativeNextWidgetGalleryDiscovery() throws {
+        let run = try nativeNextWidgetRun()
+        XCUIDevice.shared.press(.home)
+        let home = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertEqual(home.state, .runningForeground)
+        defer {
+            let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            screen.name = "next-widget-gallery-" + run; screen.lifetime = .keepAlways; add(screen)
+            let hierarchy = XCTAttachment(string: String(home.debugDescription.suffix(32_000)))
+            hierarchy.name = "next-widget-gallery-hierarchy-" + run; hierarchy.lifetime = .keepAlways; add(hierarchy)
+        }
+        let capture = home.buttons["native-capture-widget-open"]
+        XCTAssertTrue(capture.waitForExistence(timeout: 15))
+        capture.press(forDuration: 1.2)
+        let editHome = home.buttons["Edit Home Screen"]
+        XCTAssertTrue(editHome.waitForExistence(timeout: 5)); editHome.tap()
+        let edit = home.buttons["Edit"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5)); edit.tap()
+        let addWidget = home.buttons["Add Widget"]
+        XCTAssertTrue(addWidget.waitForExistence(timeout: 5)); addWidget.tap()
+        let search = home.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("Mindwtr")
+        XCTAssertEqual(search.value as? String, "Mindwtr")
+        home.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.29)).tap()
+        XCTAssertTrue(home.buttons[" Add Widget"].waitForExistence(timeout: 10))
+    }
+}
+
+
+extension FoundationUITests {
+    func testNativeNextWidgetScopedURLColdOpenAndForeignRefusal() throws {
+        let run = try nativeNextWidgetRun()
+        guard #available(iOS 16.4, *),
+              let raw = ProcessInfo.processInfo.environment["MINDWTR_NEXT_WIDGET_URL"],
+              let url = URL(string: raw), url.scheme == "mindwtr-native-dev", url.host == "widget-task" else {
+            throw XCTSkip("Root-verified widget cache URL required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.open(url); defer { app.terminate() }
+        task454Preview(app, title: "Next widget " + run)
+        boardTap(app, "task-view-close")
+        XCTAssertTrue(app.buttons["task-view-close"].waitForNonExistence(timeout: 20))
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        let token = String(components.path.dropFirst())
+        XCTAssertGreaterThan(token.count, 65)
+        components.path = "/" + (token.first == "0" ? "1" : "0") + String(token.dropFirst())
+        app.open(try XCTUnwrap(components.url))
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        let wrong = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true"),
+            object: app.staticTexts.matching(identifier: "task-view-task-title").firstMatch)
+        wrong.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [wrong], timeout: 2), .completed)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+
+extension FoundationUITests {
+    func testNativeNextWidgetPlaceFromInspectedGallery() throws {
+        let run = try nativeNextWidgetRun()
+        guard let task = ProcessInfo.processInfo.environment["MINDWTR_NEXT_WIDGET_TASK"],
+              UUID(uuidString: task) != nil else { throw XCTSkip("Root verified synthetic task ID required") }
+        let home = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertEqual(home.state, .runningForeground)
+        defer {
+            let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            screen.name = "next-widget-placed-" + run; screen.lifetime = .keepAlways; add(screen)
+            let hierarchy = XCTAttachment(string: String(home.debugDescription.suffix(32_000)))
+            hierarchy.name = "next-widget-placement-hierarchy-" + run; hierarchy.lifetime = .keepAlways; add(hierarchy)
+        }
+        let capturePreview = home.buttons["Mindwtr, Add Task"]
+        XCTAssertTrue(capturePreview.waitForExistence(timeout: 10))
+        capturePreview.swipeLeft()
+        let nextPreview = home.buttons["Mindwtr, Next Actions"]
+        XCTAssertTrue(nextPreview.waitForExistence(timeout: 10))
+        let install = home.buttons[" Add Widget"]
+        XCTAssertTrue(install.waitForExistence(timeout: 5)); install.tap()
+        let done = home.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 10)); done.tap()
+        let row = home.descendants(matching: .any).matching(identifier: "native-next-widget-task-" + task).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+        XCTAssertTrue(row.label.contains("Next widget " + run))
+    }
+}
+
+
+extension FoundationUITests {
+    func testNativeNextWidgetUndoThenCompleteFromHome() throws {
+        _ = try nativeNextWidgetRun()
+        guard let task = ProcessInfo.processInfo.environment["MINDWTR_NEXT_WIDGET_TASK"],
+              UUID(uuidString: task) != nil else { throw XCTSkip("Root verified synthetic task ID required") }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launch()
+        boardEnabled(app.buttons["capture-open"], timeout: 40)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        defer { app.terminate(); XCUIDevice.shared.press(.home) }
+        XCUIDevice.shared.press(.home)
+        let home = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if home.pageIndicators["Page control"].value as? String == "Page 1 of 2" { home.swipeLeft() }
+        let complete = home.buttons["native-next-widget-complete-" + task]
+        XCTAssertTrue(complete.waitForExistence(timeout: 30))
+        complete.tap()
+        let undo = home.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "native-next-widget-undo-")).firstMatch
+        XCTAssertTrue(undo.waitForExistence(timeout: 2))
+        undo.tap()
+        XCTAssertTrue(complete.waitForExistence(timeout: 10))
+        app.activate()
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        XCUIDevice.shared.press(.home)
+        if home.pageIndicators["Page control"].value as? String == "Page 1 of 2" { home.swipeLeft() }
+        XCTAssertTrue(complete.waitForExistence(timeout: 15))
+        complete.tap()
+        XCTAssertTrue(complete.waitForNonExistence(timeout: 12))
+        XCTAssertTrue(undo.waitForNonExistence(timeout: 12))
+        app.activate()
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        XCUIDevice.shared.press(.home)
+        if home.pageIndicators["Page control"].value as? String == "Page 1 of 2" { home.swipeLeft() }
+        XCTAssertFalse(complete.exists)
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "next-widget-after-undo-and-complete"; screenshot.lifetime = .keepAlways; add(screenshot)
+    }
+}
+
+
+extension FoundationUITests {
+    private func cloudKitFixtureApp(library: String, available: Bool) throws -> XCUIApplication {
+        #if targetEnvironment(simulator)
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = ["--native-ui-test-library", library,
+            available ? "--native-cloudkit-fixture" : "--native-cloudkit-no-account",
+            "-AppleLanguages", "(en-US)", "-AppleLocale", "en_US"]
+        app.launchEnvironment = [:]
+        return app
+        #else
+        throw XCTSkip("The controlled CloudKit fixture is simulator-only")
+        #endif
+    }
+
+    private func cloudKitAssertCard(_ app: XCUIApplication, available: Bool) {
+        let scroll = app.scrollViews["sync-screen"], status = app.staticTexts["sync-cloudkit-account-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 30))
+        revealPagedElement(app, status, in: scroll)
+        XCTAssertFalse(status.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertTrue(status.frame.intersects(app.frame))
+        let sync = app.buttons["sync-now"]
+        if available { revealPagedElement(app, sync, in: scroll) }
+        else {
+            XCTAssertTrue(sync.waitForExistence(timeout: 30))
+            for _ in 0..<6 {
+                if scroll.frame.intersection(app.frame).contains(sync.frame) { break }
+                scroll.swipeUp()
+            }
+        }
+        boardEnabled(app.buttons["sync-back"], timeout: 30)
+        if available { boardEnabled(sync, timeout: 30) }
+        XCTAssertEqual(sync.isEnabled, available)
+        XCTAssertGreaterThanOrEqual(sync.frame.height, 44 - 0.01)
+        XCTAssertTrue(sync.frame.intersects(app.frame))
+        for id in ["sync-url", "sync-username"] { XCTAssertFalse(app.textFields[id].exists) }
+        for id in ["sync-password", "sync-token"] { XCTAssertFalse(app.secureTextFields[id].exists) }
+        for id in ["sync-save", "sync-test"] { XCTAssertFalse(app.buttons[id].exists) }
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "sync-encryption-")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["sync-error"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+
+    func testNativeCloudKitAvailableSyncAndColdSelection() throws {
+        continueAfterFailure = false
+        let app = try cloudKitFixtureApp(library: "c53e6579-0bcd-414c-8a5c-816b429dabf3", available: true)
+        app.launch(); defer { app.terminate() }
+        task322OpenSync(app)
+        let option = app.buttons["sync-option-cloudkit"]
+        revealPagedElement(app, option, in: app.scrollViews["sync-screen"])
+        boardTap(app, "sync-option-cloudkit")
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: option)
+        waitForExpectations(timeout: 30)
+        cloudKitAssertCard(app, available: true)
+        boardTap(app, "sync-now")
+        expectation(for: NSPredicate(format: "exists == true AND label != ''"), evaluatedWith: app.staticTexts["sync-status"])
+        waitForExpectations(timeout: 60)
+        boardEnabled(app.buttons["sync-now"], timeout: 30)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "sync-progress").firstMatch.waitForNonExistence(timeout: 30))
+        cloudKitAssertCard(app, available: true)
+        let screenshot = XCTAttachment(string: app.debugDescription)
+        screenshot.name = "cloudkit-fixture-available-after-sync"; screenshot.lifetime = .keepAlways; add(screenshot)
+        app.terminate(); app.launch()
+        task371OpenSync(app, openFlow: false, backend: "cloudkit")
+        cloudKitAssertCard(app, available: true)
+        XCTAssertTrue(app.buttons["sync-option-cloudkit"].isSelected)
+        let cold = XCTAttachment(string: app.debugDescription)
+        cold.name = "cloudkit-fixture-cold-stored-selection"; cold.lifetime = .keepAlways; add(cold)
+    }
+
+    func testNativeCloudKitNoAccountDisablesSync() throws {
+        continueAfterFailure = false
+        let app = try cloudKitFixtureApp(library: "c4bd842f-d7d6-4447-abf0-81ba6d4a64c2", available: false)
+        app.launch(); defer { app.terminate() }
+        task322OpenSync(app)
+        let option = app.buttons["sync-option-cloudkit"]
+        revealPagedElement(app, option, in: app.scrollViews["sync-screen"])
+        boardTap(app, "sync-option-cloudkit")
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: option)
+        waitForExpectations(timeout: 30)
+        cloudKitAssertCard(app, available: false)
+        let screenshot = XCTAttachment(string: app.debugDescription)
+        screenshot.name = "cloudkit-fixture-no-account-disabled"; screenshot.lifetime = .keepAlways; add(screenshot)
+    }
+
+    func testSandboxRealSampleCaptureEditResetExitAndSharedAppLock() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard let library = environment["MINDWTR_SANDBOX_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library,
+              let personalTitle = environment["MINDWTR_SANDBOX_UI_PERSONAL_TITLE"], !personalTitle.isEmpty else {
+            throw XCTSkip("Root-owned isolated personal library and synthetic preserved-task title are required")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--native-ui-test-library", library, "--native-app-lock-auth", "success,cancel,success,success",
+            "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["capture-open"], timeout: 60)
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", personalTitle)).firstMatch.exists,
+            "Use a fresh root-owned fixture; never replace existing personal data")
+        boardTap(app, "capture-open")
+        let personalInput = app.textViews["capture-input"]
+        boardEnabled(personalInput); personalInput.tap(); personalInput.typeText(personalTitle)
+        boardTap(app, "capture-save")
+        XCTAssertTrue(personalInput.waitForNonExistence(timeout: 30))
+        task97Open(app)
+        if task102LockToggle(app).value as? String == "0" { task102LockToggle(app).tap() }
+        boardTap(app, "general-back"); boardTap(app, "settings-back")
+        task197Data(app)
+        revealPagedElement(app, app.buttons["sandbox-open"], in: app.scrollViews["diagnostics-scroll"])
+        boardTap(app, "sandbox-open"); boardTap(app, "sandbox-enter-confirm")
+        let reset = app.buttons["sandbox-reset"]
+        let transitionState = app.staticTexts["sandbox-transition-state"]
+        var lastTransition: String?
+        var printedTransitions = 0
+        let sampleReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let observed = transitionState.exists ? transitionState.label : "state-unavailable"
+            if observed != lastTransition {
+                lastTransition = observed
+                if printedTransitions < 32 {
+                    print("Sandbox entry \(String(observed.prefix(4096)))")
+                    printedTransitions += 1
+                }
+            }
+            return reset.exists && reset.isEnabled
+        }, object: reset)
+        let sampleWait = XCTWaiter.wait(for: [sampleReady], timeout: 60)
+        let observedTransition = transitionState.exists ? String(transitionState.label.prefix(4096)) : "state-unavailable"
+        print("Sandbox entry wait=\(sampleWait.rawValue) \(observedTransition)")
+        XCTAssertEqual(sampleWait, .completed, "Expected real sample Reset control; \(observedTransition)")
+        boardEnabled(reset)
+        let captured = "Sandbox capture " + UUID().uuidString, edited = captured + " edited"
+        let input = app.textFields["sandbox-capture-input"]
+        boardEnabled(input); input.tap(); input.typeText(captured)
+        boardTap(app, "sandbox-capture-save")
+        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "sandbox-task-", captured)).firstMatch
+        boardEnabled(row, timeout: 30); row.tap()
+        let title = app.textFields["sandbox-task-title"]
+        boardEnabled(title); title.tap()
+        title.typeKey("a", modifierFlags: .command)
+        title.typeText(edited)
+        XCTAssertEqual(title.value as? String, edited)
+        boardTap(app, "sandbox-task-save")
+        let saved = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "sandbox-task-", edited)).firstMatch
+        boardEnabled(saved, timeout: 30)
+        XCUIDevice.shared.press(.home); app.activate()
+        task102Gate(app)
+        XCTAssertFalse(app.buttons["sandbox-exit"].exists, "Sample and transition controls must stay behind the shared lock")
+        XCTAssertTrue(app.staticTexts["Mindwtr is still locked."].waitForExistence(timeout: 10),
+            "Shared foreground authentication must cancel before explicit manual unlock")
+        boardTap(app, "app-lock-unlock")
+        boardEnabled(app.buttons["sandbox-reset"], timeout: 30)
+        XCTAssertTrue(saved.exists, "Warm lock preserves the volatile sample until explicit Reset")
+        boardTap(app, "sandbox-reset")
+        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: saved)
+        waitForExpectations(timeout: 60)
+        boardEnabled(app.textFields["sandbox-capture-input"], timeout: 60)
+        XCTAssertFalse(saved.exists, "Reset must replace the context rather than retain edited sample rows")
+        boardTap(app, "sandbox-exit")
+        boardEnabled(app.buttons["capture-open"], timeout: 60)
+        if app.buttons["tab-inbox"].exists { boardTap(app, "tab-inbox") }
+        let personal = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", personalTitle)).firstMatch
+        XCTAssertTrue(personal.waitForExistence(timeout: 30), "Personal task survives sample edit/reset/exit")
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", edited)).firstMatch.exists)
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["capture-open"], timeout: 60)
+        XCTAssertFalse(app.buttons["sandbox-exit"].exists, "Cold startup must return to personal")
+        XCTAssertTrue(personal.waitForExistence(timeout: 30))
+    }
+
+    func testDataGettingStartedExplicitSeedRepeatOpenAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_GETTING_STARTED_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_GETTING_STARTED_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh root-owned native.dev isolated library is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        app.launch(); defer { app.terminate() }
+        let readyText = "Getting Started is ready in Projects."
+        let tutorialTitle = "Start here: process your first inbox item"
+        let result = app.descendants(matching: .any).matching(identifier: "data-getting-started-result").firstMatch
+        let failure = app.descendants(matching: .any).matching(identifier: "data-getting-started-error").firstMatch
+        let open = app.buttons["data-getting-started-open"]
+        let seed = app.buttons["data-getting-started"]
+        func observe(_ phase: String) {
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Getting Started " + phase; shot.lifetime = .keepAlways; add(shot)
+        }
+        func backupDisclosure() {
+            task192Reveal(app, "backup-disclosure", buttons: true, scrollID: "diagnostics-scroll")
+            boardTap(app, "backup-disclosure")
+            task192Reveal(app, "data-getting-started", buttons: true, scrollID: "diagnostics-scroll")
+            boardEnabled(seed, timeout: 30)
+        }
+        func assertNoResult() {
+            XCTAssertFalse(result.exists)
+            XCTAssertFalse(open.exists)
+            XCTAssertFalse(failure.exists)
+            XCTAssertFalse(app.buttons["data-getting-started-retry"].exists)
+            XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        }
+        func readyOnData(_ phase: String) {
+            let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in result.exists && result.label == readyText }, object: result)
+            XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 30), .completed)
+            task192Reveal(app, "data-getting-started-open", buttons: true, scrollID: "diagnostics-scroll")
+            boardEnabled(open, timeout: 30)
+            XCTAssertEqual(result.label, readyText)
+            XCTAssertTrue(app.staticTexts["diagnostics-title"].exists)
+            XCTAssertFalse(app.staticTexts["project-detail-title"].exists, "Seed completion must remain on Data until explicit Open")
+            XCTAssertFalse(failure.exists)
+            XCTAssertFalse(app.buttons["data-getting-started-retry"].exists)
+            XCTAssertFalse(app.buttons["persistence-retry"].exists)
+            observe(phase)
+        }
+        func assertProject(_ phase: String) {
+            boardEnabled(app.buttons["project-back"], timeout: 30)
+            XCTAssertEqual(app.staticTexts["project-detail-title"].label, "Getting Started")
+            let tutorial = app.descendants(matching: .any).matching(NSPredicate(format:
+                "identifier BEGINSWITH %@ AND label == %@", "task-title-", tutorialTitle)).firstMatch
+            revealPagedElement(app, tutorial, in: app.scrollViews["project-detail-scroll"])
+            XCTAssertEqual(tutorial.label, tutorialTitle)
+            observe(phase)
+        }
+        func projects() {
+            boardEnabled(app.buttons["tab-menu"], timeout: 30)
+            boardTap(app, "tab-menu"); boardTap(app, "menu-projects")
+            XCTAssertTrue(app.scrollViews["projects-scroll"].waitForExistence(timeout: 30))
+        }
+        task197Data(app)
+        assertNoResult()
+        XCTAssertFalse(app.staticTexts["project-detail-title"].exists)
+        backupDisclosure()
+        assertNoResult()
+        boardTap(app, "data-getting-started")
+        readyOnData("explicit seed ready on Data")
+        task192Reveal(app, "data-getting-started", buttons: true, scrollID: "diagnostics-scroll")
+        boardEnabled(seed, timeout: 30)
+        boardTap(app, "data-getting-started")
+        readyOnData("repeat ready on same Data presentation")
+        boardTap(app, "data-getting-started-open")
+        assertProject("explicit Open project")
+        boardTap(app, "project-back")
+        boardEnabled(app.buttons["settings-back"], timeout: 30)
+        boardTap(app, "settings-back")
+        projects()
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "project-open-"))
+        boardEnabled(rows.firstMatch, timeout: 30)
+        XCTAssertEqual(rows.count, 1, "The offered repeat must retain one canonical starter project")
+        let projectIdentifier = rows.firstMatch.identifier
+        XCTAssertTrue(rows.firstMatch.label.contains("Getting Started"))
+        let projectID = String(projectIdentifier.dropFirst("project-open-".count))
+        XCTAssertFalse(projectID.isEmpty)
+        app.terminate(); app.launch()
+        projects()
+        let coldRow = app.buttons[projectIdentifier]
+        revealPagedElement(app, coldRow, in: app.scrollViews["projects-scroll"])
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(String(coldRow.identifier.dropFirst("project-open-".count)), projectID)
+        coldRow.tap()
+        assertProject("cold read same project")
+        boardTap(app, "project-back")
+        task197Data(app)
+        backupDisclosure()
+        assertNoResult()
+        XCTAssertFalse(app.staticTexts["project-detail-title"].exists)
+        observe("cold Data has no stale result or Open")
+    }
+
+    func testWhisperRealModelDownloadColdReadRemove() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_WHISPER_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_WHISPER_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh root-owned native.dev isolated Whisper library is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        app.launch(); defer { app.terminate() }
+        let provider = app.buttons["voice-settings-provider"]
+        let selectedModel = app.buttons["voice-settings-model-options"]
+        let effective = app.descendants(matching: .any).matching(identifier: "voice-settings-local-model-effective").firstMatch
+        let status = app.descendants(matching: .any).matching(identifier: "voice-settings-local-model-status").firstMatch
+        let failure = app.descendants(matching: .any).matching(identifier: "voice-settings-local-model-error").firstMatch
+        let notice = app.descendants(matching: .any).matching(identifier: "voice-settings-local-model-notice").firstMatch
+        let progress = app.descendants(matching: .any).matching(identifier: "voice-settings-local-model-progress").firstMatch
+        let download = app.buttons["voice-settings-local-model-download"]
+        let remove = app.buttons["voice-settings-local-model-remove"]
+        func observe(_ phase: String) {
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Whisper " + phase; shot.lifetime = .keepAlways; add(shot)
+            let tree = app.debugDescription
+            let attachment = XCTAttachment(string: String(tree.prefix(131_072)))
+            attachment.name = "Whisper " + phase + " hierarchy"; attachment.lifetime = .keepAlways; add(attachment)
+            print("Whisper \(phase) hierarchy:\n" + String(tree.prefix(65_536)))
+        }
+        func require(_ condition: Bool, _ phase: String) {
+            if !condition { observe(phase + " failed") }
+            XCTAssertTrue(condition, phase)
+        }
+        func wait(_ phase: String, timeout: TimeInterval = 30, _ condition: @escaping () -> Bool) {
+            let expected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+            let outcome = XCTWaiter.wait(for: [expected], timeout: timeout)
+            if outcome != .completed { observe(phase + " failed") }
+            XCTAssertEqual(outcome, .completed, phase)
+        }
+        func openSettings() {
+            boardEnabled(app.buttons["tab-menu"], timeout: 40)
+            voiceSettingsOpen(app)
+        }
+        func selectedTinyEnglish() {
+            wait("saved Whisper tiny.en selection") {
+                provider.exists && provider.value as? String == "On-device (Whisper)"
+                    && selectedModel.exists && selectedModel.value as? String == "whisper-tiny.en"
+                    && effective.exists && effective.label == "whisper-tiny.en"
+            }
+        }
+        func installed(_ phase: String, timeout: TimeInterval = 30) {
+            wait(phase, timeout: timeout) {
+                failure.exists || (status.exists && status.label == "Model downloaded" && remove.exists && remove.isEnabled)
+            }
+            require(!failure.exists, phase + " no model error")
+            require(status.label == "Model downloaded" && remove.exists && remove.isEnabled && !download.exists, phase + " installed controls")
+            require(!app.buttons["persistence-retry"].exists, phase + " no global persistence retry")
+        }
+        func missing(_ phase: String) {
+            wait(phase) {
+                failure.exists || (status.exists && status.label == "Model not downloaded" && download.exists && download.isEnabled && !remove.exists)
+            }
+            require(!failure.exists, phase + " no model error")
+            require(status.label == "Model not downloaded" && download.exists && download.isEnabled && !remove.exists, phase + " missing controls")
+            require(!app.buttons["persistence-retry"].exists, phase + " no global persistence retry")
+        }
+        openSettings()
+        voiceSettingsTap(app, "voice-settings-provider")
+        boardTap(app, "voice-settings-use-whisper")
+        wait("Whisper provider selected") { provider.exists && provider.value as? String == "On-device (Whisper)" && provider.isEnabled }
+        voiceSettingsTap(app, "voice-settings-model-options")
+        let tiny = app.buttons.matching(NSPredicate(format: "label == %@", "whisper-tiny.en")).firstMatch
+        boardEnabled(tiny); tiny.tap()
+        selectedTinyEnglish()
+        missing("fresh tiny.en missing")
+        require(!app.secureTextFields["voice-settings-credential-input"].exists, "Whisper has no credential input")
+        require(!app.buttons["voice-settings-mode-smart"].exists && !app.buttons["voice-settings-mode-transcript"].exists, "Whisper has no remote mode controls")
+        voiceSettingsTap(app, "voice-settings-local-model-download")
+        if progress.exists { observe("real catalog download progress") }
+        installed("real catalog tiny.en download", timeout: 240)
+        require(notice.exists && notice.label == "Download complete", "download completion notice")
+        selectedTinyEnglish()
+        observe("downloaded tiny.en")
+        app.terminate(); app.launch()
+        openSettings()
+        selectedTinyEnglish()
+        installed("cold installed tiny.en")
+        require(!progress.exists && !notice.exists, "cold installed read has no stale operation UI")
+        observe("cold installed tiny.en")
+        voiceSettingsTap(app, "voice-settings-local-model-remove")
+        missing("explicit tiny.en removal")
+        selectedTinyEnglish()
+        observe("tiny.en removed")
+        app.terminate(); app.launch()
+        openSettings()
+        selectedTinyEnglish()
+        missing("cold missing tiny.en")
+        require(!progress.exists && !notice.exists, "cold missing read has no stale operation UI")
+        observe("cold missing tiny.en")
+    }
+
+}
+
+extension FoundationUITests {
+    func testAdvancedAISettingsThinkingAndExtraBodyColdPersistence() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_ADVANCED_AI_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_ADVANCED_AI_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh root-owned native.dev isolated advanced AI settings library is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        app.launch(); defer { app.terminate() }
+        let thinking = app.switches["ai-text-anthropic-thinking-enabled"]
+        let preset = app.buttons["ai-text-anthropic-thinking-budget-choice-2048"]
+        let budget = app.staticTexts["ai-text-anthropic-thinking-budget-value"]
+        let extraBody = app.descendants(matching: .any).matching(identifier: "ai-text-extra-body-input").firstMatch
+        func observe(_ phase: String) {
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Advanced AI " + phase; shot.lifetime = .keepAlways; add(shot)
+            let hierarchy = XCTAttachment(string: String(app.debugDescription.prefix(131_072)))
+            hierarchy.name = "Advanced AI " + phase + " hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
+        }
+        func wait(_ phase: String, _ condition: @escaping () -> Bool) {
+            let expected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+            let outcome = XCTWaiter.wait(for: [expected], timeout: 30)
+            if outcome != .completed { observe(phase + " failed") }
+            XCTAssertEqual(outcome, .completed, phase)
+        }
+        func passive() {
+            aiTextConfigurationReady(app)
+            XCTAssertEqual(app.switches["ai-text-enabled"].value as? String, "0")
+            XCTAssertFalse(app.alerts.firstMatch.exists)
+            XCTAssertFalse(app.buttons["ai-text-consent-agree"].exists)
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "ai-text-model-discovery-working").firstMatch.exists)
+            XCTAssertFalse(app.staticTexts["ai-text-model-discovery-error"].exists)
+            XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        }
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        aiTextConfigurationOpen(app)
+        aiTextConfigurationProvider(app, label: "OpenAI")
+        passive()
+        aiTextConfigurationChooseProvider(app, "anthropic")
+        aiTextConfigurationProvider(app, label: "Anthropic (Claude)")
+        wait("fresh Anthropic thinking off") { thinking.exists && thinking.isEnabled && thinking.value as? String == "0" }
+        XCTAssertFalse(budget.exists)
+        aiTextConfigurationInput(app, "ai-text-anthropic-thinking-enabled").tap()
+        wait("Anthropic thinking enabled") { thinking.exists && thinking.isEnabled && thinking.value as? String == "1" && preset.exists }
+        aiTextConfigurationTap(app, "ai-text-anthropic-thinking-budget-choice-2048")
+        wait("Anthropic preset saved") { preset.exists && preset.isEnabled && preset.isSelected && budget.exists && (budget.value as? String ?? "").filter { $0.isNumber } == "2048" }
+        passive()
+        observe("thinking preset saved")
+
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        aiTextConfigurationOpen(app)
+        aiTextConfigurationProvider(app, label: "Anthropic (Claude)")
+        wait("cold thinking preset") { thinking.exists && thinking.isEnabled && thinking.value as? String == "1" && preset.exists && preset.isSelected && budget.exists && (budget.value as? String ?? "").filter { $0.isNumber } == "2048" }
+        passive()
+        observe("cold thinking preset")
+        aiTextConfigurationInput(app, "ai-text-anthropic-thinking-enabled").tap()
+        wait("Anthropic thinking disabled") { thinking.exists && thinking.isEnabled && thinking.value as? String == "0" && !budget.exists && !preset.exists }
+        passive()
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        aiTextConfigurationOpen(app)
+        aiTextConfigurationProvider(app, label: "Anthropic (Claude)")
+        wait("cold thinking off") { thinking.exists && thinking.isEnabled && thinking.value as? String == "0" && !budget.exists && !preset.exists }
+        passive()
+        observe("cold thinking off")
+
+        aiTextConfigurationChooseProvider(app, "openai")
+        aiTextConfigurationProvider(app, label: "OpenAI")
+        XCTAssertFalse(thinking.exists)
+        aiTextConfigurationTap(app, "ai-text-extra-body-edit")
+        let blank = aiTextConfigurationInput(app, "ai-text-extra-body-input")
+        XCTAssertTrue((blank.value as? String ?? "").isEmpty || blank.value as? String == blank.placeholderValue)
+        aiTextConfigurationReplace(app, "ai-text-extra-body-input", with: "{")
+        aiTextConfigurationTap(app, "ai-text-extra-body-save")
+        XCTAssertTrue(app.staticTexts["ai-text-extra-body-error"].waitForExistence(timeout: 30))
+        boardEnabled(app.buttons["ai-text-extra-body-save"], timeout: 30)
+        XCTAssertEqual(extraBody.value as? String, "{")
+        XCTAssertFalse(app.buttons["ai-text-extra-body-save-retry"].exists)
+        passive()
+        observe("invalid extra body refused")
+        aiTextConfigurationTap(app, "ai-text-extra-body-cancel")
+        aiTextConfigurationTap(app, "ai-text-extra-body-edit")
+        let unchanged = aiTextConfigurationInput(app, "ai-text-extra-body-input")
+        XCTAssertTrue((unchanged.value as? String ?? "").isEmpty || unchanged.value as? String == unchanged.placeholderValue)
+        let formatted = "{\n  \"temperature\": 0.25\n}"
+        aiTextConfigurationReplace(app, "ai-text-extra-body-input", with: "{\"temperature\":0.25}")
+        aiTextConfigurationTap(app, "ai-text-extra-body-save")
+        wait("extra body saved and formatted") { extraBody.exists && extraBody.isEnabled && extraBody.value as? String == formatted }
+        XCTAssertFalse(app.staticTexts["ai-text-extra-body-error"].exists)
+        passive()
+        observe("extra body saved")
+
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        aiTextConfigurationOpen(app)
+        aiTextConfigurationProvider(app, label: "OpenAI")
+        XCTAssertFalse(extraBody.exists)
+        aiTextConfigurationTap(app, "ai-text-extra-body-edit")
+        XCTAssertEqual(aiTextConfigurationInput(app, "ai-text-extra-body-input").value as? String, formatted)
+        XCTAssertFalse(app.staticTexts["ai-text-extra-body-error"].exists)
+        XCTAssertFalse(app.buttons["ai-text-extra-body-save-retry"].exists)
+        passive()
+        observe("cold extra body saved")
+    }
+}
+
+
+extension FoundationUITests {
+    func testOrdinaryFocusProjectNextActionUndoChooseAndColdRead() throws {
+        continueAfterFailure = false
+        guard ProcessInfo.processInfo.environment["MINDWTR_ORDINARY_NEXT_ACTION_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = ProcessInfo.processInfo.environment["MINDWTR_ORDINARY_NEXT_ACTION_UI_LIBRARY"] else {
+            throw XCTSkip("A fresh owned native dev copy of the existing Task191 Reference fixture is required")
+        }
+        guard UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            XCTFail("The isolated library must be a canonical lowercase UUID")
+            throw CocoaError(.coderReadCorrupt)
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        app.launch(); defer { app.terminate() }
+        task186Open(app); referenceGroup(app, "none")
+        task190Filter(app, "Task191 action choose")
+        task187NextAction(app, "task191-source-choose").tap()
+        boardEnabled(app.buttons["tab-focus"]); boardTap(app, "tab-focus")
+        boardEnabled(app.buttons["focus-view-options"])
+        func completeSource() {
+            XCTAssertFalse(app.descendants(matching: .any)["task-title-task191-candidate-choose"].exists)
+            XCTAssertFalse(app.buttons["task-status-task191-candidate-choose"].exists)
+            let status = app.buttons["task-status-task191-source-choose"]
+            revealPagedElement(app, status, in: app.scrollViews.containing(.button, identifier: "focus-view-options").firstMatch)
+            boardEnabled(status); status.tap(); boardTap(app, "task-complete")
+            XCTAssertTrue(app.staticTexts[task191Prefix + "-description"].waitForExistence(timeout: 30))
+            XCTAssertTrue(task191Prompt(app).exists)
+            XCTAssertEqual(app.buttons.matching(identifier: "task-completion-undo").count, 1)
+            XCTAssertFalse(app.descendants(matching: .any)["task-title-task191-source-choose"].exists)
+        }
+        completeSource()
+        let undo = app.buttons["task-completion-undo"]
+        boardEnabled(undo); XCTAssertTrue(undo.isHittable); undo.tap()
+        XCTAssertTrue(task191Prompt(app).waitForNonExistence(timeout: 30))
+        boardEnabled(app.buttons["task-status-task191-source-choose"])
+        completeSource()
+        let candidate = app.buttons[task191Prefix + "-candidate-0"]
+        boardEnabled(candidate); XCTAssertTrue(candidate.label.contains("Task191 candidate choose"))
+        task191Tap(app, candidate)
+        task191AssertDismissed(app)
+        boardEnabled(app.buttons["task-status-task191-candidate-choose"], timeout: 30)
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["tab-focus"], timeout: 40); boardTap(app, "tab-focus")
+        boardEnabled(app.buttons["task-status-task191-candidate-choose"], timeout: 30)
+        XCTAssertFalse(task191Prompt(app).exists)
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+
+extension FoundationUITests {
+    func testInlineChecklistWaitingToggleAppendAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_INLINE_CHECKLIST_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_INLINE_CHECKLIST_UI_LIBRARY"] else {
+            throw XCTSkip("A fresh isolated Task191 checklist fixture in native.dev is required")
+        }
+        guard UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            XCTFail("The isolated library must be a canonical lowercase UUID")
+            throw CocoaError(.coderReadCorrupt)
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        let taskID = "task191-candidate-choose"
+        let chip = app.buttons["task-inline-checklist-" + taskID]
+        let original = app.buttons["task-inline-checklist-toggle-" + taskID + "-check-" + taskID]
+        let input = app.textFields["task-inline-checklist-input-" + taskID]
+        let title = "Inline checklist UI appended item"
+        let appended = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@",
+            "task-inline-checklist-toggle-" + taskID + "-", title)).firstMatch
+        func openChecklist() {
+            boardEnabled(app.buttons["tab-menu"], timeout: 40)
+            boardTap(app, "tab-menu"); boardTap(app, "menu-waiting")
+            XCTAssertTrue(app.staticTexts["waiting-title"].waitForExistence(timeout: 30))
+            revealPagedElement(app, chip, in: app.scrollViews["waiting-scroll"], more: "waiting-more")
+            boardEnabled(chip); chip.tap()
+            boardEnabled(original, timeout: 30)
+            XCTAssertFalse(app.buttons["task-view-close"].exists)
+        }
+        func selected(_ expected: Bool) {
+            let ready = expectation(for: NSPredicate { _, _ in
+                original.exists && original.isEnabled && original.isSelected == expected
+            }, evaluatedWith: nil)
+            wait(for: [ready], timeout: 30)
+        }
+        app.launch(); defer { app.terminate() }
+        openChecklist()
+        XCTAssertTrue(original.isSelected)
+        XCTAssertFalse(appended.exists)
+        original.tap(); selected(false)
+        original.tap(); selected(true)
+        revealPagedElement(app, input, in: app.scrollViews["waiting-scroll"])
+        boardEnabled(input); input.tap(); input.typeText(title)
+        let add = app.buttons["task-inline-checklist-add-" + taskID]
+        revealPagedElement(app, add, in: app.scrollViews["waiting-scroll"])
+        boardEnabled(add); add.tap()
+        boardEnabled(appended, timeout: 30)
+        XCTAssertFalse(appended.isSelected)
+        XCTAssertFalse(app.buttons["task-view-close"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        app.terminate(); app.launch()
+        openChecklist()
+        XCTAssertTrue(original.isSelected)
+        boardEnabled(appended, timeout: 30)
+        XCTAssertFalse(appended.isSelected)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+extension FoundationUITests {
+    func testRowQuickStatusWaitingSomedayAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_ROW_QUICK_STATUS_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_ROW_QUICK_STATUS_UI_LIBRARY"] else {
+            throw XCTSkip("A fresh isolated Task191 fixture in native.dev is required")
+        }
+        guard UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            XCTFail("The isolated library must be a canonical lowercase UUID")
+            throw CocoaError(.coderReadCorrupt)
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        let status = app.buttons["task-status-task191-candidate-choose"]
+        func openMenu(_ surface: String) {
+            for back in ["waiting-back", "someday-back"] where app.buttons[back].exists { boardTap(app, back) }
+            boardEnabled(app.buttons["tab-menu"], timeout: 40)
+            boardTap(app, "tab-menu"); boardTap(app, "menu-" + surface)
+            revealPagedElement(app, status, in: app.scrollViews[surface + "-scroll"], more: surface + "-more")
+            boardEnabled(status); status.tap()
+            boardEnabled(app.buttons["task-status-inbox"], timeout: 30)
+            for target in ["inbox", "next", "waiting", "someday", "reference"] where target != surface {
+                XCTAssertTrue(app.buttons["task-status-" + target].exists)
+            }
+            XCTAssertTrue(app.buttons["task-complete"].exists)
+            let current = app.buttons["task-status-" + surface].firstMatch
+            XCTAssertTrue(!current.exists || !current.isEnabled)
+        }
+        app.launch(); defer { app.terminate() }
+        openMenu("waiting"); boardTap(app, "task-status-someday")
+        openMenu("someday"); boardTap(app, "task-status-waiting")
+        XCTAssertFalse(app.buttons["task-view-close"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        app.terminate(); app.launch()
+        openMenu("waiting")
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+extension FoundationUITests {
+    func testProjectBulkSelectionRangeMoveAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_PROJECT_BULK_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_PROJECT_BULK_UI_LIBRARY"] else {
+            throw XCTSkip("A fresh owned native.dev Project bulk fixture is required")
+        }
+        guard UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            XCTFail("The isolated library must be a canonical lowercase UUID")
+            throw CocoaError(.coderReadCorrupt)
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        let ids = ["project-bulk-ui-01", "project-bulk-ui-02", "project-bulk-ui-03"]
+        func openProject() {
+            boardEnabled(app.buttons["tab-menu"], timeout: 40)
+            boardTap(app, "tab-menu"); boardTap(app, "menu-projects")
+            let project = app.buttons["project-open-project-bulk-ui-project"]
+            revealPagedElement(app, project, in: app.scrollViews["projects-scroll"])
+            boardEnabled(project); project.tap()
+            boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+        }
+        func row(_ id: String) -> XCUIElement {
+            task192Reveal(app, "task-title-" + id, buttons: true, scrollID: "project-detail-scroll", scans: 80)
+        }
+        func count(_ expected: Int) {
+            let count = app.staticTexts["project-bulk-count"]
+            XCTAssertTrue(count.waitForExistence(timeout: 20))
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                Int(count.label.compactMap { $0.wholeNumberValue }.map(String.init).joined()) == expected
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed)
+            XCTAssertFalse(app.buttons["project-bulk-select-all"].exists)
+        }
+        func bulkButton(_ id: String) -> XCUIElement {
+            task192Reveal(app, id, buttons: true, scrollID: "project-bulk-actions-scroll", horizontal: true, scans: 20)
+        }
+        app.launch(); defer { app.terminate() }
+        openProject()
+        if !app.buttons["project-status-open"].exists {
+            let details = task192Reveal(app, "project-details-toggle", buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            boardEnabled(details); details.tap()
+        }
+        XCTAssertTrue(app.buttons["project-status-open"].exists)
+        let readOnly = row("project-bulk-ui-readonly")
+        task740InboxStatusReady(readOnly); readOnly.press(forDuration: 0.8)
+        XCTAssertFalse(app.staticTexts["project-bulk-count"].exists)
+        if app.buttons["task-view-close"].waitForExistence(timeout: 5) {
+            boardTap(app, "task-view-close")
+            boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+        }
+        let first = row(ids[0]); task740InboxStatusReady(first); first.press(forDuration: 0.8); count(1)
+        XCTAssertFalse(app.buttons["task-view-close"].exists)
+        XCTAssertFalse(app.buttons["project-task-view-options-button"].isEnabled)
+        XCTAssertFalse(app.buttons["project-rename-open"].isEnabled)
+        XCTAssertFalse(app.buttons["project-status-open"].isEnabled)
+        XCTAssertFalse(app.buttons["project-actions-menu"].isEnabled)
+        XCTAssertFalse(app.buttons["capture-open"].isEnabled)
+        XCTAssertFalse(app.buttons["project-select-project-bulk-ui-readonly"].exists)
+        let offered = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "project-bulk-status-"))
+        XCTAssertEqual(offered.allElementsBoundByIndex.map { $0.identifier },
+            ["inbox", "next", "waiting", "someday", "done", "reference"].map { "project-bulk-status-" + $0 })
+        let second = row(ids[1]); task740InboxStatusReady(second); second.tap(); count(2)
+        let secondCheck = app.buttons["project-select-" + ids[1]]
+        XCTAssertTrue(secondCheck.isSelected)
+        secondCheck.tap(); count(1); XCTAssertFalse(secondCheck.isSelected)
+        let range = bulkButton("project-bulk-range"); task740InboxStatusReady(range); range.tap()
+        XCTAssertTrue(range.isSelected)
+        let third = row(ids[2]); task740InboxStatusReady(third); third.tap(); count(3)
+        XCTAssertFalse(app.buttons["project-bulk-range"].isSelected)
+        XCTAssertFalse(app.buttons["task-view-close"].exists)
+        boardTap(app, "project-bulk-exit")
+        XCTAssertTrue(app.staticTexts["project-bulk-count"].waitForNonExistence(timeout: 20))
+        let restart = row(ids[0]); task740InboxStatusReady(restart); restart.press(forDuration: 0.8); count(1)
+        let pickSecond = row(ids[1]); task740InboxStatusReady(pickSecond); pickSecond.tap(); count(2)
+        let move = bulkButton("project-bulk-status-waiting"); task740InboxStatusReady(move); move.tap()
+        XCTAssertTrue(app.staticTexts["project-bulk-count"].waitForNonExistence(timeout: 30))
+        let notice = app.staticTexts["task-projectBulkMove-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 10)); XCTAssertEqual(notice.label, "2 tasks")
+        XCTAssertFalse(app.buttons["task-projectBulkMove-undo"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        app.terminate(); app.launch(); openProject()
+        XCTAssertFalse(app.staticTexts["project-bulk-count"].exists)
+        XCTAssertFalse(app.staticTexts["task-projectBulkMove-notice"].exists)
+        for id in ids.prefix(2) {
+            let title = row(id); task740InboxStatusReady(title); title.tap()
+            boardTap(app, "task-mode-edit")
+            let status = app.buttons["task-editor-status-waiting"]
+            revealPagedElement(app, status, in: app.scrollViews["task-editor-scroll"])
+            XCTAssertTrue(status.isSelected, "Cold public task read must show the bulk target")
+            boardTap(app, "task-view-close")
+            boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+        }
+    }
+}
+
+extension FoundationUITests {
+    func testProjectBulkAddRemoveTagNoopAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_PROJECT_TAGS_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_PROJECT_TAGS_UI_LIBRARY"] else {
+            throw XCTSkip("A fresh owned native.dev Project tag fixture is required")
+        }
+        guard UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            XCTFail("The isolated library must be a canonical lowercase UUID"); throw CocoaError(.coderReadCorrupt)
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        let ids = ["project-bulk-ui-01", "project-bulk-ui-02", "project-bulk-ui-03"]
+        func openProject() {
+            boardEnabled(app.buttons["tab-menu"], timeout: 40)
+            boardTap(app, "tab-menu"); boardTap(app, "menu-projects")
+            let project = app.buttons["project-open-project-bulk-ui-project"]
+            revealPagedElement(app, project, in: app.scrollViews["projects-scroll"])
+            boardEnabled(project); project.tap(); boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+        }
+        func count(_ expected: Int) {
+            let label = app.staticTexts["project-bulk-count"]
+            XCTAssertTrue(label.waitForExistence(timeout: 20))
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                Int(label.label.compactMap { $0.wholeNumberValue }.map(String.init).joined()) == expected
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed)
+        }
+        func selectTwo() {
+            let first = task192Reveal(app, "task-title-" + ids[0], buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            task740InboxStatusReady(first); first.press(forDuration: 0.8); count(1)
+            let second = task192Reveal(app, "project-select-" + ids[1], buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            task740InboxStatusReady(second); second.tap(); count(2); XCTAssertTrue(second.isSelected)
+            XCTAssertFalse(app.buttons["project-select-project-bulk-ui-readonly"].exists)
+        }
+        func openComposer(_ prefix: String) {
+            let button = task192Reveal(app, prefix + "-open", buttons: true, scrollID: "project-bulk-actions-scroll", horizontal: true, scans: 20)
+            task740InboxStatusReady(button); button.tap()
+            boardEnabled(app.textFields[prefix + "-input"], timeout: 20)
+        }
+        func assertColdTags(added: Bool) {
+            app.terminate(); app.launch(); openProject()
+            XCTAssertFalse(app.staticTexts["project-bulk-count"].exists)
+            XCTAssertFalse(app.textFields["project-bulk-tag-input"].exists)
+            XCTAssertFalse(app.textFields["project-bulk-remove-tag-input"].exists)
+            for (index, id) in ids.enumerated() {
+                let title = task192Reveal(app, "task-title-" + id, buttons: true, scrollID: "project-detail-scroll", scans: 80)
+                task740InboxStatusReady(title); title.tap(); boardTap(app, "task-mode-edit")
+                let header = app.buttons["task-editor-section-organization"]
+                revealPagedElement(app, header, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+                if header.value as? String == "Expand" { header.tap() }
+                let tags = app.textFields["task-editor-tags"]
+                revealPagedElement(app, tags, in: app.scrollViews["task-editor-scroll"], outerEdge: true); boardEnabled(tags)
+                let displayed = tags.value as? String ?? "", rawTags = displayed == tags.placeholderValue ? "" : displayed
+                let values = Set(rawTags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+                XCTAssertEqual(values, added && index < 2 ? Set(["#ProjectTagsUI"]) : Set<String>())
+                boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+                boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+            }
+        }
+        app.launch(); defer { app.terminate() }
+        openProject(); selectTwo()
+        openComposer("project-bulk-tag")
+        XCTAssertFalse(app.buttons["project-bulk-tag-save"].isEnabled)
+        let input = app.textFields["project-bulk-tag-input"]; input.tap(); input.typeText("###\n")
+        boardEnabled(app.buttons["project-bulk-tag-save"]); boardTap(app, "project-bulk-tag-save")
+        XCTAssertTrue(input.waitForNonExistence(timeout: 20)); count(2)
+        XCTAssertFalse(app.staticTexts["task-projectBulkTag-notice"].exists)
+        openComposer("project-bulk-tag")
+        let tag = app.textFields["project-bulk-tag-input"]; tag.tap(); tag.typeText("  ###ProjectTagsUI  \n")
+        boardEnabled(app.buttons["project-bulk-tag-save"]); boardTap(app, "project-bulk-tag-save")
+        XCTAssertTrue(app.staticTexts["project-bulk-count"].waitForNonExistence(timeout: 30))
+        let addNotice = app.staticTexts["task-projectBulkTag-notice"]
+        XCTAssertTrue(addNotice.waitForExistence(timeout: 15)); XCTAssertEqual(addNotice.label, "Done: 2 tasks")
+        XCTAssertFalse(app.buttons["task-projectBulkTag-undo"].exists)
+        assertColdTags(added: true)
+        selectTwo(); openComposer("project-bulk-remove-tag")
+        XCTAssertFalse(app.buttons["project-bulk-remove-tag-save"].isEnabled)
+        let query = app.textFields["project-bulk-remove-tag-input"]; query.tap(); query.typeText("ProjectTagsUI\n")
+        let option = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "project-bulk-remove-tag-option-", "#ProjectTagsUI")).firstMatch
+        boardEnabled(option, timeout: 20); option.tap(); XCTAssertTrue(option.isSelected)
+        boardEnabled(app.buttons["project-bulk-remove-tag-save"]); boardTap(app, "project-bulk-remove-tag-save")
+        XCTAssertTrue(app.staticTexts["project-bulk-count"].waitForNonExistence(timeout: 30))
+        let removeNotice = app.staticTexts["task-projectBulkRemoveTag-notice"]
+        XCTAssertTrue(removeNotice.waitForExistence(timeout: 15)); XCTAssertEqual(removeNotice.label, "Done: 2 tasks")
+        XCTAssertFalse(app.buttons["task-projectBulkRemoveTag-undo"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        assertColdTags(added: false)
+    }
+}
+
+extension FoundationUITests {
+    private func projectOrganizeApp(_ role: String) throws -> XCUIApplication {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_PROJECT_ORGANIZE_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_PROJECT_ORGANIZE_UI_" + role + "_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh owned native.dev Project Organize role library is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library); app.launch(); return app
+    }
+    private func projectOrganizeOpenSource(_ app: XCUIApplication) {
+        boardEnabled(app.buttons["tab-menu"], timeout: 40); boardTap(app, "tab-menu"); boardTap(app, "menu-projects")
+        let source = app.buttons["project-open-project-bulk-ui-project"]
+        revealPagedElement(app, source, in: app.scrollViews["projects-scroll"]); boardEnabled(source); source.tap()
+        boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+    }
+    private func projectOrganizeCount(_ app: XCUIApplication, _ expected: Int) {
+        let count = app.staticTexts["project-bulk-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 20))
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            Int(count.label.compactMap { $0.wholeNumberValue }.map(String.init).joined()) == expected
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed)
+    }
+    private func projectOrganizeSelectTwo(_ app: XCUIApplication) {
+        let first = task192Reveal(app, "task-title-project-bulk-ui-01", buttons: true, scrollID: "project-detail-scroll", scans: 80)
+        task740InboxStatusReady(first); first.press(forDuration: 0.8); projectOrganizeCount(app, 1)
+        let second = task192Reveal(app, "project-select-project-bulk-ui-02", buttons: true, scrollID: "project-detail-scroll", scans: 80)
+        task740InboxStatusReady(second); second.tap(); projectOrganizeCount(app, 2)
+    }
+    private func projectOrganizeOpenForm(_ app: XCUIApplication) {
+        let open = task192Reveal(app, "project-bulk-organize-open", buttons: true, scrollID: "project-bulk-actions-scroll", horizontal: true, scans: 20)
+        task740InboxStatusReady(open); open.tap(); boardEnabled(app.buttons["project-organize-cancel"])
+        _ = task743Control(app, "project-organize-status-__KEEP__", prefix: "project-organize")
+    }
+    private func projectOrganizeSearchTask(_ app: XCUIApplication, _ id: String) {
+        boardTap(app, "search-open"); let input = app.textFields["search-input"]; boardEnabled(input)
+        input.tap(); let prior = input.value as? String ?? ""
+        input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: prior == input.placeholderValue ? 0 : prior.count) + "id:" + id + "\n")
+        let found = app.buttons["search-task-" + id]; task740InboxStatusReady(found); found.tap(); boardTap(app, "task-mode-edit")
+    }
+    func testProjectBulkOrganizeExistingDestinationApplyAndColdRead() throws {
+        let app = try projectOrganizeApp("APPLY"); defer { app.terminate() }
+        let prefix = "project-organize"
+        projectOrganizeOpenSource(app); projectOrganizeSelectTwo(app); projectOrganizeOpenForm(app)
+        boardEnabled(app.buttons[prefix + "-apply"]); boardTap(app, prefix + "-apply")
+        XCTAssertTrue(app.buttons[prefix + "-apply"].waitForNonExistence(timeout: 20)); projectOrganizeCount(app, 2)
+        XCTAssertFalse(app.staticTexts["task-projectBulkOrganize-notice"].exists)
+        projectOrganizeOpenForm(app)
+        task743Choose(app, "project", "Project Organize Destination", prefix: prefix)
+        XCTAssertFalse(task192Reveal(app, prefix + "-area", buttons: true, scrollID: prefix + "-scroll", scans: 80).isEnabled)
+        task743Control(app, prefix + "-status-waiting", prefix: prefix).tap()
+        XCTAssertFalse(app.buttons[prefix + "-apply"].isEnabled)
+        task743Text(app, prefix + "-delegateWho", "Project Organize Team", prefix: prefix)
+        task743Text(app, prefix + "-dueDate", "2031-03-12", prefix: prefix)
+        task743Text(app, prefix + "-contexts", "@office", prefix: prefix)
+        task743Text(app, prefix + "-tags", "ProjectOrganizeUI", prefix: prefix)
+        boardEnabled(app.buttons[prefix + "-apply"]); boardTap(app, prefix + "-apply")
+        XCTAssertTrue(app.staticTexts["project-bulk-count"].waitForNonExistence(timeout: 30))
+        let notice = app.staticTexts["task-projectBulkOrganize-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 15)); XCTAssertEqual(notice.label, "Done: 2 tasks")
+        XCTAssertFalse(app.buttons["task-projectBulkOrganize-undo"].exists); XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        XCTAssertFalse(app.buttons[prefix + "-apply"].exists)
+        for index in 1...3 {
+            let id = String(format: "project-bulk-ui-%02d", index)
+            projectOrganizeSearchTask(app, id)
+            let status = app.buttons["task-editor-status-" + (index < 3 ? "waiting" : "inbox")]
+            revealPagedElement(app, status, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertTrue(status.isSelected)
+            task743Section(app, "task-editor-section-organization")
+            task743Tokens(app, "tags", index < 3 ? Set(["#ProjectOrganizeUI"]) : Set<String>())
+            task743Tokens(app, "contexts", index < 3 ? Set(["@office"]) : Set<String>())
+            let destination = app.buttons["task-editor-destination"]
+            revealPagedElement(app, destination, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+            XCTAssertEqual(destination.value as? String, index < 3 ? "Project Organize Destination" : "Project bulk UI")
+            if index < 3 {
+                task743Section(app, "task-editor-section-scheduling")
+                let due = app.buttons["task-editor-dueDate"]
+                revealPagedElement(app, due, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertEqual(due.value as? String, "03/12/2031")
+            }
+            boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists); boardTap(app, "search-close")
+        }
+    }
+    func testProjectBulkOrganizeCreateInIncompleteWaitingDraftCancelAndColdRead() throws {
+        let app = try projectOrganizeApp("CREATE"); defer { app.terminate() }
+        let prefix = "project-organize", name = "Project Organize Created"
+        projectOrganizeOpenSource(app); projectOrganizeSelectTwo(app); projectOrganizeOpenForm(app)
+        task743Control(app, prefix + "-status-waiting", prefix: prefix).tap()
+        XCTAssertFalse(app.buttons[prefix + "-apply"].isEnabled)
+        task743Control(app, prefix + "-project", prefix: prefix).tap()
+        task743Text(app, prefix + "-picker-search", name, prefix: prefix)
+        task743DismissKeyboard(app, prefix + "-picker-search", name, preservingCreate: true, prefix: prefix)
+        task743Control(app, prefix + "-picker-create", prefix: prefix).tap()
+        XCTAssertTrue(app.textFields[prefix + "-picker-search"].waitForNonExistence(timeout: 30))
+        XCTAssertEqual(task743Control(app, prefix + "-project", prefix: prefix).label, "Project: " + name)
+        XCTAssertTrue(task743Control(app, prefix + "-status-waiting", prefix: prefix).isSelected)
+        XCTAssertFalse(app.buttons[prefix + "-apply"].isEnabled, "Creation must preserve the incomplete Waiting draft")
+        boardTap(app, prefix + "-cancel"); projectOrganizeCount(app, 2)
+        XCTAssertFalse(app.staticTexts["task-projectBulkOrganize-notice"].exists)
+        app.terminate(); app.launch(); boardEnabled(app.buttons["tab-menu"], timeout: 40)
+        boardTap(app, "tab-menu"); boardTap(app, "menu-projects")
+        let created = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "project-open-", name)).firstMatch
+        revealPagedElement(app, created, in: app.scrollViews["projects-scroll"]); boardEnabled(created)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "project-open-", name)).count, 1)
+        XCTAssertFalse(app.buttons[prefix + "-apply"].exists)
+        task736OpenInbox(app)
+        for index in 1...3 {
+            projectOrganizeSearchTask(app, String(format: "project-bulk-ui-%02d", index))
+            let status = app.buttons["task-editor-status-" + ["next", "someday", "inbox"][index - 1]]
+            revealPagedElement(app, status, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertTrue(status.isSelected)
+            task743Section(app, "task-editor-section-organization"); task743Tokens(app, "tags", []); task743Tokens(app, "contexts", [])
+            let destination = app.buttons["task-editor-destination"]
+            revealPagedElement(app, destination, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertEqual(destination.value as? String, "Project bulk UI")
+            boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists); boardTap(app, "search-close")
+        }
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+extension FoundationUITests {
+    private func projectDeleteApp(_ role: String) throws -> XCUIApplication {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_PROJECT_DELETE_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_PROJECT_DELETE_UI_" + role + "_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh owned native.dev Project Delete role library is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library); app.launch(); return app
+    }
+    private func projectDeleteOpenConfirmation(_ app: XCUIApplication) {
+        let remove = task192Reveal(app, "project-bulk-delete", buttons: true, scrollID: "project-bulk-actions-scroll", horizontal: true, scans: 24)
+        task740InboxStatusReady(remove); remove.tap()
+        boardEnabled(app.buttons["project-bulk-delete-confirm"])
+        XCTAssertTrue(app.buttons["project-bulk-delete-cancel"].exists)
+    }
+    private func projectDeleteCancelAndConfirm(_ app: XCUIApplication) {
+        projectOrganizeOpenSource(app); projectOrganizeSelectTwo(app)
+        projectDeleteOpenConfirmation(app); boardTap(app, "project-bulk-delete-cancel"); projectOrganizeCount(app, 2)
+        for id in ["project-bulk-ui-01", "project-bulk-ui-02"] {
+            let selected = task192Reveal(app, "project-select-" + id, buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            XCTAssertTrue(selected.isSelected)
+        }
+        XCTAssertFalse(app.staticTexts["task-projectBulkDelete-notice"].exists)
+        app.terminate(); app.launch(); projectOrganizeOpenSource(app)
+        XCTAssertFalse(app.staticTexts["project-bulk-count"].exists)
+        projectOrganizeSelectTwo(app)
+        projectDeleteOpenConfirmation(app); boardTap(app, "project-bulk-delete-confirm")
+    }
+    private func projectDeleteAssertSentinels(_ app: XCUIApplication) {
+        for id in ["project-bulk-ui-03", "project-bulk-ui-readonly"] {
+            let row = task192Reveal(app, "task-title-" + id, buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            XCTAssertTrue(row.exists)
+        }
+        XCTAssertEqual(app.staticTexts["project-detail-title"].label, "Project bulk UI")
+        XCTAssertFalse(app.buttons["project-select-project-bulk-ui-readonly"].exists)
+        XCTAssertFalse(app.buttons["project-bulk-select-all"].exists)
+    }
+    func testProjectBulkDeleteCancelConfirmUndoAndColdRead() throws {
+        let app = try projectDeleteApp("UNDO"); defer { app.terminate() }
+        projectDeleteCancelAndConfirm(app)
+        let undo = app.buttons["task-projectBulkDelete-undo"]
+        boardEnabled(undo, timeout: 30); XCTAssertEqual(app.buttons.matching(identifier: "task-projectBulkDelete-undo").count, 1); undo.tap()
+        XCTAssertTrue(undo.waitForNonExistence(timeout: 30))
+        for id in ["project-bulk-ui-01", "project-bulk-ui-02"] {
+            let row = task192Reveal(app, "task-title-" + id, buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            task740InboxStatusReady(row)
+        }
+        XCTAssertFalse(app.staticTexts["project-bulk-count"].exists)
+        projectDeleteAssertSentinels(app); XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        app.terminate(); app.launch(); projectOrganizeOpenSource(app)
+        XCTAssertFalse(app.buttons["task-projectBulkDelete-undo"].exists)
+        XCTAssertFalse(app.staticTexts["project-bulk-count"].exists)
+        for index in 1...3 {
+            let row = task192Reveal(app, "task-title-" + String(format: "project-bulk-ui-%02d", index), buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            task740InboxStatusReady(row); row.tap(); boardTap(app, "task-mode-edit")
+            let status = app.buttons["task-editor-status-" + ["next", "someday", "inbox"][index - 1]]
+            revealPagedElement(app, status, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertTrue(status.isSelected)
+            task743Section(app, "task-editor-section-organization"); task743Tokens(app, "tags", []); task743Tokens(app, "contexts", [])
+            let destination = app.buttons["task-editor-destination"]
+            revealPagedElement(app, destination, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertEqual(destination.value as? String, "Project bulk UI")
+            boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+            boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+        }
+        projectDeleteAssertSentinels(app)
+    }
+    func testProjectBulkDeleteCancelConfirmAndDurableColdAbsence() throws {
+        let app = try projectDeleteApp("DELETE"); defer { app.terminate() }
+        projectDeleteCancelAndConfirm(app)
+        XCTAssertTrue(app.staticTexts["project-bulk-count"].waitForNonExistence(timeout: 30))
+        for id in ["project-bulk-ui-01", "project-bulk-ui-02"] {
+            XCTAssertTrue(app.buttons["task-title-" + id].waitForNonExistence(timeout: 30))
+        }
+        let notice = app.staticTexts["task-projectBulkDelete-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 10)); XCTAssertFalse(notice.label.isEmpty)
+        projectDeleteAssertSentinels(app)
+        app.terminate(); app.launch(); projectOrganizeOpenSource(app)
+        XCTAssertFalse(app.staticTexts["project-bulk-count"].exists)
+        XCTAssertFalse(app.staticTexts["task-projectBulkDelete-notice"].exists)
+        XCTAssertFalse(app.buttons["task-projectBulkDelete-undo"].exists)
+        for id in ["project-bulk-ui-01", "project-bulk-ui-02"] { XCTAssertFalse(app.buttons["task-title-" + id].exists) }
+        projectDeleteAssertSentinels(app); XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+extension FoundationUITests {
+    private func rowBackdateApp(_ role: String) throws -> XCUIApplication {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_ROW_BACKDATE_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_ROW_BACKDATE_UI_" + role + "_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library,
+              let day = environment["MINDWTR_ROW_BACKDATE_UI_PAST_DAY_WHEEL"], !day.isEmpty, day.utf16.count <= 80 else {
+            throw XCTSkip("A fresh owned native.dev row backdate role library and fixed past-day wheel value are required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library); app.launch(); return app
+    }
+    private func rowBackdateOpen(_ app: XCUIApplication, showMinutes: Bool) {
+        let status = task192Reveal(app, "task-status-project-bulk-ui-01", buttons: true, scrollID: "project-detail-scroll", scans: 80)
+        boardEnabled(status); status.tap()
+        let action = app.buttons["task-status-completion-time"]
+        boardEnabled(action); XCTAssertFalse(action.label.isEmpty); action.tap()
+        XCTAssertTrue(app.datePickers["row-backdate-picker"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.datePickers["row-backdate-picker"].label.isEmpty)
+        XCTAssertEqual(app.textFields["row-backdate-time-spent"].exists, showMinutes)
+        if showMinutes { XCTAssertEqual(app.textFields["row-backdate-time-spent"].value as? String, "17") }
+        for id in ["row-backdate-cancel", "row-backdate-save"] {
+            boardEnabled(app.buttons[id]); XCTAssertGreaterThanOrEqual(app.buttons[id].frame.height, 44)
+        }
+        XCTAssertFalse(app.buttons["task-editor-save"].exists)
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+    }
+    private func rowBackdatePastDay(_ app: XCUIApplication, phase: String) {
+        let picker = app.datePickers["row-backdate-picker"]
+        revealPagedElement(app, picker, in: app.scrollViews["row-backdate-scroll"])
+        guard let value = ProcessInfo.processInfo.environment["MINDWTR_ROW_BACKDATE_UI_PAST_DAY_WHEEL"] else { XCTFail("Missing fixed past day"); return }
+        let day = app.pickerWheels.element(boundBy: 0)
+        boardEnabled(day); day.adjust(toPickerWheelValue: value)
+        XCTAssertEqual(day.value as? String, value)
+        let evidence: [String: Any] = ["phase": phase, "expectedLocalDate": "2026-11-01",
+            "wallEpochMilliseconds": Date().timeIntervalSince1970 * 1_000, "testTimeZone": TimeZone.current.identifier,
+            "wheels": app.pickerWheels.allElementsBoundByIndex.map { ["label": $0.label, "value": $0.value as? String ?? ""] }]
+        if let data = try? JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) { print("Row backdate picker observation " + text) }
+        let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Ordinary row backdate " + phase
+        shot.lifetime = .keepAlways; add(shot)
+    }
+    private func rowBackdateMinutes(_ app: XCUIApplication, _ value: String) {
+        let input = app.textFields["row-backdate-time-spent"], scroll = app.scrollViews["row-backdate-scroll"]
+        boardEnabled(input); revealPagedElement(app, input, in: scroll, outerEdge: true)
+        input.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            input.frame.minY >= scroll.frame.minY - 1 && input.frame.maxY <= scroll.frame.maxY + 1
+        }, object: nil)], timeout: 10) == .completed)
+        if let old = input.value as? String, old != input.placeholderValue, !old.isEmpty {
+            input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count))
+        }
+        if !value.isEmpty { input.typeText(value) }
+        XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let actual = input.value as? String
+            return actual == value || value.isEmpty && actual == input.placeholderValue
+        }, object: nil)], timeout: 10) == .completed)
+    }
+    private func rowBackdateSaveAndSkip(_ app: XCUIApplication) {
+        boardTap(app, "row-backdate-save")
+        XCTAssertTrue(app.datePickers["row-backdate-picker"].waitForNonExistence(timeout: 30))
+        let description = app.staticTexts["reference-project-next-action-description"]
+        XCTAssertTrue(description.waitForExistence(timeout: 20)); XCTAssertTrue(description.label.contains("Project bulk UI"))
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists, "Chosen-time completion has no Undo notice")
+        task191Tap(app, app.buttons["reference-project-next-action-skip"], scrollable: false)
+        XCTAssertTrue(task191Prompt(app).waitForNonExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+    private func rowBackdateColdRead(_ app: XCUIApplication, showMinutes: Bool) {
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        XCTAssertFalse(app.datePickers["row-backdate-picker"].exists)
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists); XCTAssertFalse(task191Prompt(app).exists)
+        projectOrganizeSearchTask(app, "project-bulk-ui-01")
+        let done = app.buttons["task-editor-status-done"]
+        revealPagedElement(app, done, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertTrue(done.isSelected)
+        task743Section(app, "task-editor-section-organization")
+        let destination = app.buttons["task-editor-destination"]
+        revealPagedElement(app, destination, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+        XCTAssertEqual(destination.value as? String, "Project bulk UI")
+        let minutes = app.textFields["task-editor-timeSpent-input"]
+        if showMinutes {
+            revealPagedElement(app, minutes, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+            XCTAssertTrue((minutes.value as? String ?? "").isEmpty || minutes.value as? String == minutes.placeholderValue)
+        } else { XCTAssertFalse(minutes.exists) }
+        boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+        boardTap(app, "search-close"); XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+    func testOrdinaryRowBackdateCancelMinutesPromptAndColdRead() throws {
+        let app = try rowBackdateApp("VISIBLE"); defer { app.terminate() }
+        projectOrganizeOpenSource(app)
+        let readOnly = task192Reveal(app, "task-status-project-bulk-ui-readonly", buttons: true, scrollID: "project-detail-scroll", scans: 80)
+        XCTAssertTrue(readOnly.exists); XCTAssertFalse(readOnly.isEnabled)
+        rowBackdateOpen(app, showMinutes: true); rowBackdatePastDay(app, phase: "visible-cancel"); rowBackdateMinutes(app, "45")
+        boardTap(app, "row-backdate-cancel"); XCTAssertTrue(app.datePickers["row-backdate-picker"].waitForNonExistence(timeout: 20))
+        XCTAssertFalse(task191Prompt(app).exists); XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        app.terminate(); app.launch(); projectOrganizeOpenSource(app)
+        rowBackdateOpen(app, showMinutes: true); rowBackdatePastDay(app, phase: "visible-save"); rowBackdateMinutes(app, "")
+        rowBackdateSaveAndSkip(app); rowBackdateColdRead(app, showMinutes: true)
+    }
+    func testOrdinaryReferenceRowBackdateHiddenMinutesAndColdRead() throws {
+        let app = try rowBackdateApp("HIDDEN"); defer { app.terminate() }
+        projectOrganizeOpenSource(app)
+        rowBackdateOpen(app, showMinutes: false); rowBackdatePastDay(app, phase: "hidden-cancel")
+        boardTap(app, "row-backdate-cancel"); XCTAssertTrue(app.datePickers["row-backdate-picker"].waitForNonExistence(timeout: 20))
+        XCTAssertFalse(task191Prompt(app).exists); XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        app.terminate(); app.launch(); projectOrganizeOpenSource(app)
+        rowBackdateOpen(app, showMinutes: false); rowBackdatePastDay(app, phase: "hidden-save")
+        rowBackdateSaveAndSkip(app); rowBackdateColdRead(app, showMinutes: false)
+    }
+}
+
+extension FoundationUITests {
+    private func checklistMoveApp() throws -> XCUIApplication {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_CHECKLIST_MOVE_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_CHECKLIST_MOVE_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh owned native.dev checklist Move/Undo library is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library); app.launch(); return app
+    }
+    private func checklistMoveOpen(_ app: XCUIApplication, _ id: String, eligible: Bool) {
+        let status = app.buttons["task-status-" + id].firstMatch
+        task740InboxStatusReady(status); status.tap()
+        let entry = app.buttons.matching(identifier: "task-add-to-checklist").firstMatch
+        if eligible {
+            boardEnabled(entry); XCTAssertFalse(entry.label.isEmpty); entry.tap()
+            XCTAssertTrue(app.textFields["checklist-move-search"].waitForExistence(timeout: 20))
+            boardEnabled(app.buttons["checklist-move-cancel"])
+            XCTAssertFalse(app.buttons["task-editor-save"].exists)
+        } else {
+            boardEnabled(app.buttons["task-complete"])
+            XCTAssertFalse(entry.exists)
+            dismissStatusPopover(app)
+        }
+    }
+    private func dismissStatusPopover(_ app: XCUIApplication) {
+        let complete = app.buttons.matching(identifier: "task-complete").firstMatch
+        if app.buttons["Cancel"].waitForExistence(timeout: 2) { boardTap(app, "Cancel") }
+        else { app.otherElements["PopoverDismissRegion"].firstMatch.tap() }
+        XCTAssertTrue(complete.waitForNonExistence(timeout: 10))
+    }
+    private func checklistMoveSearch(_ app: XCUIApplication, _ value: String) {
+        let input = app.textFields["checklist-move-search"]; boardEnabled(input); input.tap()
+        for _ in 0..<4 {
+            guard let old = input.value as? String, old != input.placeholderValue, !old.isEmpty else { break }
+            input.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+            input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count))
+        }
+        XCTAssertTrue((input.value as? String).map { $0.isEmpty || $0 == input.placeholderValue } ?? true)
+        if !value.isEmpty { input.typeText(value) }
+    }
+    private func checklistMoveAssertTarget(_ app: XCUIApplication) {
+        boardTap(app, "search-open"); let input = app.textFields["search-input"]; boardEnabled(input)
+        input.tap(); input.typeText("id:checklist-ui-target\n")
+        boardTap(app, "search-task-checklist-ui-target"); boardTap(app, "task-mode-edit")
+        task743Section(app, "task-editor-section-details")
+        let first = app.textFields["task-checklist-input-0"]
+        revealPagedElement(app, first, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+        XCTAssertEqual(first.value as? String, "Retained step")
+        XCTAssertFalse(app.textFields["task-checklist-input-1"].exists)
+        XCTAssertEqual(app.buttons["task-checklist-toggle-0"].value as? String, "Done")
+        boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+        boardTap(app, "search-close")
+    }
+    func testInboxAddToChecklistEligibleSearchCancelMoveUndoAndColdRead() throws {
+        let app = try checklistMoveApp(); defer { app.terminate() }
+        task736OpenInbox(app)
+        checklistMoveOpen(app, "checklist-ui-rich", eligible: false)
+        checklistMoveOpen(app, "checklist-ui-source", eligible: true)
+        boardEnabled(app.buttons["checklist-move-target-checklist-ui-target"])
+        XCTAssertTrue(app.buttons["checklist-move-target-checklist-ui-target"].label.contains("1/1"))
+        boardTap(app, "checklist-move-cancel")
+        XCTAssertTrue(app.textFields["checklist-move-search"].waitForNonExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["task-title-checklist-ui-source"].exists)
+        XCTAssertFalse(app.staticTexts["task-checklistMove-notice"].exists)
+        checklistMoveOpen(app, "checklist-ui-source", eligible: true)
+        checklistMoveSearch(app, "No matching checklist UI target")
+        XCTAssertTrue(app.staticTexts["checklist-move-empty"].waitForExistence(timeout: 20))
+        checklistMoveSearch(app, "Checklist UI target")
+        let target = app.buttons["checklist-move-target-checklist-ui-target"]
+        boardEnabled(target); XCTAssertFalse(app.buttons["checklist-move-target-checklist-ui-other"].exists); target.tap()
+        let undo = app.buttons["task-checklistMove-undo"]
+        boardEnabled(undo, timeout: 30); XCTAssertFalse(undo.label.isEmpty); undo.tap()
+        XCTAssertTrue(undo.waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.buttons["task-title-checklist-ui-source"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.buttons["task-title-checklist-ui-rich"].exists)
+        XCTAssertFalse(app.textFields["checklist-move-search"].exists)
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists); XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        checklistMoveAssertTarget(app)
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        XCTAssertTrue(app.buttons["task-title-checklist-ui-source"].exists)
+        XCTAssertTrue(app.buttons["task-title-checklist-ui-rich"].exists)
+        XCTAssertFalse(app.textFields["checklist-move-search"].exists); XCTAssertFalse(app.buttons["task-checklistMove-undo"].exists)
+        XCTAssertFalse(app.staticTexts["task-checklistMove-notice"].exists)
+        checklistMoveAssertTarget(app); XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+extension FoundationUITests {
+    func testOrdinaryRowDestinationCancelChangeProjectAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_ROW_DESTINATION_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_ROW_DESTINATION_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh owned native.dev ordinary destination fixture is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        func openSource() {
+            boardEnabled(app.buttons["tab-menu"], timeout: 40); boardTap(app, "tab-menu"); boardTap(app, "menu-projects")
+            let project = app.buttons["project-open-row-destination-ui-project-a"]
+            revealPagedElement(app, project, in: app.scrollViews["projects-scroll"])
+            boardEnabled(project); project.tap(); boardEnabled(app.buttons["project-task-view-options-button"], timeout: 30)
+        }
+        func openPicker() {
+            let status = task192Reveal(app, "task-status-row-destination-ui-source", buttons: true, scrollID: "project-detail-scroll", scans: 80)
+            boardEnabled(status); status.tap(); boardTap(app, "task-status-destination")
+            boardEnabled(app.textFields["row-destination-search"], timeout: 20)
+            XCTAssertFalse(app.buttons["task-editor-save"].exists)
+        }
+        func choice(_ label: String) -> XCUIElement {
+            let value = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "row-destination-choice-", label)).firstMatch
+            revealPagedElement(app, value, in: app.scrollViews["row-destination-scroll"], outerEdge: true)
+            boardEnabled(value); return value
+        }
+        app.launch(); defer { app.terminate() }
+        openSource(); openPicker()
+        let initial = choice("Destination UI project A")
+        XCTAssertTrue(initial.isSelected); XCTAssertTrue(initial.isEnabled, "The current destination remains a real choice")
+        boardTap(app, "row-destination-cancel")
+        XCTAssertTrue(app.textFields["row-destination-search"].waitForNonExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["task-title-row-destination-ui-source"].exists)
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        app.terminate(); app.launch(); openSource(); openPicker()
+        XCTAssertTrue(choice("Destination UI project A").isSelected)
+        let query = app.textFields["row-destination-search"]; query.tap(); query.typeText("Destination UI project B")
+        let target = choice("Destination UI project B")
+        XCTAssertFalse(target.isSelected); target.tap()
+        XCTAssertTrue(app.textFields["row-destination-search"].waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.buttons["task-title-row-destination-ui-source"].waitForNonExistence(timeout: 30))
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        XCTAssertFalse(app.textFields["row-destination-search"].exists)
+        projectOrganizeSearchTask(app, "row-destination-ui-source")
+        let next = app.buttons["task-editor-status-next"]
+        revealPagedElement(app, next, in: app.scrollViews["task-editor-scroll"], outerEdge: true); XCTAssertTrue(next.isSelected)
+        task743Section(app, "task-editor-section-organization")
+        let destination = app.buttons["task-editor-destination"]
+        revealPagedElement(app, destination, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+        XCTAssertEqual(destination.value as? String, "Destination UI project B")
+        boardTap(app, "task-view-close"); XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+        boardTap(app, "search-close"); XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+extension FoundationUITests {
+    func testOrdinaryRowDatesCancelNoChangeEditAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_ROW_DATES_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_ROW_DATES_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh owned native.dev ordinary Dates fixture is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        func openDates() {
+            let status = task192Reveal(app, "task-status-row-dates-ui-source", buttons: true, scrollID: "inbox-scroll", scans: 80)
+            boardEnabled(status); status.tap(); boardTap(app, "task-status-dates")
+            boardEnabled(app.buttons["row-dates-save"], timeout: 30)
+            XCTAssertFalse(app.buttons["task-editor-save"].exists)
+        }
+        func chip(_ field: String, _ preset: String) -> XCUIElement {
+            let value = app.buttons["row-dates-" + field + "-quick-" + preset]
+            revealPagedElement(app, value, in: app.scrollViews["row-dates-scroll"], outerEdge: true)
+            boardEnabled(value); return value
+        }
+        func selected(_ field: String, _ preset: String) {
+            let value = chip(field, preset)
+            let expected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "selected == true"), object: value)
+            XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 20), .completed)
+        }
+        func closed() {
+            XCTAssertTrue(app.buttons["row-dates-save"].waitForNonExistence(timeout: 30))
+            XCTAssertTrue(app.buttons["task-title-row-dates-ui-source"].exists, "A Due-only change keeps this task in Inbox")
+            XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+            XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        }
+        app.launch(); defer { app.terminate() }
+        task736OpenInbox(app); openDates()
+        selected("startTime", "no_date"); selected("dueDate", "no_date")
+        chip("startTime", "today").tap()
+        boardTap(app, "row-dates-cancel"); closed()
+        app.terminate(); app.launch(); task736OpenInbox(app); openDates()
+        selected("startTime", "no_date"); selected("dueDate", "no_date")
+        boardTap(app, "row-dates-save"); closed()
+        openDates(); selected("startTime", "no_date"); selected("dueDate", "no_date")
+        chip("dueDate", "tomorrow").tap()
+        boardTap(app, "row-dates-save"); closed()
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        XCTAssertFalse(app.buttons["row-dates-save"].exists)
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        openDates(); selected("startTime", "no_date"); selected("dueDate", "tomorrow")
+        boardTap(app, "row-dates-cancel"); closed()
+    }
+}
+
+extension FoundationUITests {
+    func testSharedRowSwipeRevealActionsFocusDeleteUndoAndColdRead() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_ROW_SWIPE_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_ROW_SWIPE_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh owned native.dev shared-row swipe fixture is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library)
+        func reveal(_ id: String, left: Bool, action: String, scroll: String) -> XCUIElement {
+            let row = task192Reveal(app, "task-title-" + id, buttons: true, scrollID: scroll, scans: 60)
+            boardEnabled(row)
+            let button = app.buttons["task-swipe-" + action + "-" + id]
+            for _ in 0..<4 {
+                if left { row.swipeLeft() } else { row.swipeRight() }
+                if button.waitForExistence(timeout: 2), button.isHittable { break }
+            }
+            boardEnabled(button); return button
+        }
+        func focus() { boardEnabled(app.buttons["tab-focus"]); boardTap(app, "tab-focus") }
+        func menu(_ destination: String) {
+            boardEnabled(app.buttons["tab-menu"]); boardTap(app, "tab-menu"); boardTap(app, destination)
+        }
+        app.launch(); defer { app.terminate() }
+        task736OpenInbox(app)
+        _ = reveal("row-swipe-ui-inbox", left: true, action: "delete", scroll: "inbox-scroll")
+        let organize = app.buttons["task-swipe-organize-row-swipe-ui-inbox"]
+        let dates = app.buttons["task-swipe-dates-row-swipe-ui-inbox"]
+        let remove = app.buttons["task-swipe-delete-row-swipe-ui-inbox"]
+        XCTAssertLessThan(organize.frame.minX, dates.frame.minX); XCTAssertLessThan(dates.frame.minX, remove.frame.minX)
+        XCTAssertFalse(app.buttons["task-editor-save"].exists)
+        XCTAssertFalse(app.buttons["task-delete-undo"].exists)
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        XCTAssertTrue(app.buttons["task-title-row-swipe-ui-inbox"].exists)
+        reveal("row-swipe-ui-inbox", left: true, action: "dates", scroll: "inbox-scroll").tap()
+        boardEnabled(app.buttons["row-dates-save"], timeout: 30); boardTap(app, "row-dates-cancel")
+        reveal("row-swipe-ui-inbox", left: true, action: "organize", scroll: "inbox-scroll").tap()
+        boardEnabled(app.buttons["task-complete"])
+        dismissStatusPopover(app)
+        let star = reveal("row-swipe-ui-inbox", left: false, action: "focus", scroll: "inbox-scroll")
+        XCTAssertLessThan(app.buttons["task-swipe-done-row-swipe-ui-inbox"].frame.minX, star.frame.minX)
+        star.tap()
+        XCTAssertTrue(app.buttons["task-title-row-swipe-ui-inbox"].waitForNonExistence(timeout: 30), "Tray Focus promotes Inbox atomically")
+        XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        app.terminate(); app.launch(); focus()
+        reveal("row-swipe-ui-inbox", left: false, action: "focus", scroll: "focus-scroll").tap()
+        XCTAssertTrue(app.buttons["task-title-row-swipe-ui-inbox"].waitForExistence(timeout: 30), "Removing Focus preserves Next")
+        reveal("row-swipe-ui-inbox", left: true, action: "delete", scroll: "focus-scroll").tap()
+        let undo = app.buttons["task-delete-undo"]; boardEnabled(undo, timeout: 30); undo.tap()
+        XCTAssertTrue(undo.waitForNonExistence(timeout: 30))
+        XCTAssertTrue(app.buttons["task-title-row-swipe-ui-inbox"].waitForExistence(timeout: 30))
+        reveal("row-swipe-ui-next", left: false, action: "done", scroll: "focus-scroll").tap()
+        let completionUndo = app.buttons["task-completion-undo"]; boardEnabled(completionUndo, timeout: 30); completionUndo.tap()
+        XCTAssertTrue(completionUndo.waitForNonExistence(timeout: 30))
+        menu("menu-history"); boardEnabled(app.buttons["history-tab-done"], timeout: 30)
+        if !app.buttons["history-tab-done"].isSelected { boardTap(app, "history-tab-done") }
+        reveal("row-swipe-ui-done", left: false, action: "restore", scroll: "done-scroll").tap()
+        XCTAssertTrue(app.buttons["task-title-row-swipe-ui-done"].waitForNonExistence(timeout: 30))
+        if app.buttons["history-back"].exists { boardTap(app, "history-back") }
+        menu("menu-reference")
+        reveal("row-swipe-ui-reference", left: false, action: "next", scroll: "reference-scroll").tap()
+        XCTAssertTrue(app.buttons["task-title-row-swipe-ui-reference"].waitForNonExistence(timeout: 30))
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        XCTAssertTrue(app.buttons["task-title-row-swipe-ui-done"].exists)
+        XCTAssertFalse(app.buttons["task-title-row-swipe-ui-inbox"].exists)
+        XCTAssertFalse(app.buttons["task-delete-undo"].exists); XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        focus()
+        XCTAssertTrue(task192Reveal(app, "task-title-row-swipe-ui-inbox", buttons: true, scrollID: "focus-scroll", scans: 60).exists)
+        XCTAssertTrue(task192Reveal(app, "task-title-row-swipe-ui-reference", buttons: true, scrollID: "focus-scroll", scans: 60).exists)
+        XCTAssertFalse(app.buttons["task-editor-save"].exists)
+    }
+}
+
+extension FoundationUITests {
+    func testDropboxControlledAuthorizationAndUnavailableConfiguration() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_DROPBOX_APP_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_DROPBOX_APP_UI_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh isolated native.dev Dropbox fixture is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task191LaunchArguments(library) + ["--native-dropbox-authorization-fixture"]
+        app.launch(); defer { app.terminate() }
+        task736OpenInbox(app)
+        task371OpenSync(app, openFlow: false, backend: "off")
+        boardTap(app, "sync-option-dropbox")
+        let scroll = app.scrollViews["sync-screen"]
+        let unavailable = app.staticTexts["sync-dropbox-not-configured"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 30))
+        revealPagedElement(app, unavailable, in: scroll)
+        XCTAssertFalse(unavailable.label.isEmpty)
+        let connect = app.buttons["sync-dropbox-connect"]
+        revealPagedElement(app, connect, in: scroll); XCTAssertFalse(connect.isEnabled)
+        XCTAssertFalse(app.buttons["sync-test"].isEnabled); XCTAssertFalse(app.buttons["sync-now"].isEnabled)
+        let fixture = app.staticTexts["dropbox-authorization-fixture-state"]
+        revealPagedElement(app, fixture, in: scroll)
+        XCTAssertEqual(fixture.label, "passed", "Controlled PKCE/callback/cancel/readmission checks use no OS browser or provider")
+        XCTAssertFalse(app.textFields["sync-url"].exists); XCTAssertFalse(app.secureTextFields["sync-password"].exists)
+        boardTap(app, "sync-option-off")
+        boardTap(app, "sync-back")
+        XCTAssertTrue(app.scrollViews["sync-screen"].waitForNonExistence(timeout: 30))
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        task371OpenSync(app, openFlow: false, backend: "off")
+        XCTAssertFalse(app.staticTexts["sync-dropbox-connection-status"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+
+extension FoundationUITests {
+    private func sharedRowSwipeLargestAccessibility(_ role: String, rtl: Bool) throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MINDWTR_ROW_SWIPE_ACCESSIBILITY_UI_OWNED_NATIVE_DEV"] == "1",
+              let library = environment["MINDWTR_ROW_SWIPE_ACCESSIBILITY_UI_" + role + "_LIBRARY"],
+              UUID(uuidString: library)?.uuidString.lowercased() == library else {
+            throw XCTSkip("A fresh owned native.dev largest-text swipe role fixture is required")
+        }
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library, rtl: rtl, largest: true)
+        let labels = rtl
+            ? ["done": "منتهي", "focus": "ركز", "organize": "تنظم", "dates": "التواريخ…", "delete": "يمسح"]
+            : ["done": "Done", "focus": "Focus", "organize": "Organize", "dates": "Dates…", "delete": "Delete"]
+        func button(_ action: String, _ id: String) -> XCUIElement {
+            app.buttons["task-swipe-" + action + "-" + id]
+        }
+        func row(_ id: String, scroll: String) -> XCUIElement {
+            let value = task192Reveal(app, "task-title-" + id, buttons: true, scrollID: scroll, scans: 60)
+            boardEnabled(value); XCTAssertFalse(value.label.isEmpty); return value
+        }
+        func closed(_ id: String, local: Bool = false) {
+            for action in labels.keys {
+                let value = button(action, id)
+                if local { XCTAssertFalse(value.exists, "Closed local tray buttons must be hidden from accessibility") }
+                XCTAssertFalse(value.exists && value.isHittable, "An unrevealed tray must not expose a hit target")
+            }
+            XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+            XCTAssertFalse(app.buttons["task-delete-undo"].exists)
+            XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        }
+        func reveal(_ id: String, left: Bool, scroll: String) {
+            let title = row(id, scroll: scroll), actions = left ? ["organize", "dates", "delete"] : ["done", "focus"]
+            for _ in 0..<4 {
+                if left { title.swipeLeft() } else { title.swipeRight() }
+                if button(actions[0], id).waitForExistence(timeout: 2), button(actions[0], id).isHittable { break }
+            }
+            var previous: XCUIElement?
+            for action in actions {
+                let value = button(action, id)
+                boardEnabled(value); XCTAssertTrue(value.isHittable)
+                XCTAssertEqual(value.label, labels[action] ?? "")
+                XCTAssertGreaterThanOrEqual(value.frame.width, 44 - 0.001)
+                XCTAssertGreaterThanOrEqual(value.frame.height, 44 - 0.001)
+                XCTAssertGreaterThanOrEqual(value.frame.minX, app.frame.minX - 1)
+                XCTAssertLessThanOrEqual(value.frame.maxX, app.frame.maxX + 1)
+                if let previous { XCTAssertLessThanOrEqual(previous.frame.maxX, value.frame.minX + 1) }
+                previous = value
+            }
+            XCTAssertTrue(title.exists, "A full swipe release only reveals; submission requires a button tap")
+            XCTAssertFalse(app.buttons["task-completion-undo"].exists)
+            XCTAssertFalse(app.buttons["task-delete-undo"].exists)
+        }
+        func observe(_ host: String) {
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Shared swipe largest " + role + " " + host; shot.lifetime = .keepAlways; add(shot)
+            let hierarchy = XCTAttachment(string: String(app.debugDescription.prefix(131_072)))
+            hierarchy.name = "Shared swipe largest " + role + " " + host + " hierarchy"
+            hierarchy.lifetime = .keepAlways; add(hierarchy)
+        }
+        func focus() { boardEnabled(app.buttons["tab-focus"]); boardTap(app, "tab-focus") }
+        app.launch(); defer { app.terminate() }
+        task736OpenInbox(app)
+        _ = row("row-swipe-ui-inbox", scroll: "inbox-scroll"); closed("row-swipe-ui-inbox")
+        reveal("row-swipe-ui-inbox", left: true, scroll: "inbox-scroll"); observe("native List trailing")
+        reveal("row-swipe-ui-inbox", left: false, scroll: "inbox-scroll"); observe("native List leading")
+        app.terminate(); app.launch(); task736OpenInbox(app)
+        _ = row("row-swipe-ui-inbox", scroll: "inbox-scroll"); closed("row-swipe-ui-inbox")
+
+        focus()
+        _ = row("row-swipe-ui-next", scroll: "focus-scroll"); closed("row-swipe-ui-next", local: true)
+        reveal("row-swipe-ui-next", left: true, scroll: "focus-scroll"); observe("local stack trailing")
+        reveal("row-swipe-ui-next", left: false, scroll: "focus-scroll"); observe("local stack leading")
+        app.terminate(); app.launch(); focus()
+        _ = row("row-swipe-ui-next", scroll: "focus-scroll"); closed("row-swipe-ui-next", local: true)
+        reveal("row-swipe-ui-next", left: false, scroll: "focus-scroll")
+        button("done", "row-swipe-ui-next").tap()
+        let undo = app.buttons["task-completion-undo"]
+        boardEnabled(undo, timeout: 30); undo.tap()
+        XCTAssertTrue(undo.waitForNonExistence(timeout: 30))
+        app.terminate(); app.launch(); focus()
+        _ = row("row-swipe-ui-next", scroll: "focus-scroll"); closed("row-swipe-ui-next", local: true)
+        task736OpenInbox(app)
+        _ = row("row-swipe-ui-inbox", scroll: "inbox-scroll"); closed("row-swipe-ui-inbox")
+        observe("cold restored")
+    }
+
+    func testSharedRowSwipeLargestTextAccessibleTargetsAndColdRead() throws {
+        try sharedRowSwipeLargestAccessibility("LARGEST", rtl: false)
+    }
+
+    func testSharedRowSwipeLargestArabicRTLAccessibleTargetsAndColdRead() throws {
+        try sharedRowSwipeLargestAccessibility("RTL", rtl: true)
+    }
+}
+
+extension FoundationUITests {
+    private func processEditorApp(_ role: String, largest: Bool = false) throws -> XCUIApplication {
+        continueAfterFailure = false
+        let library = try task371Library(role, prefix: "MINDWTR_PROCESS_EDITOR_UI_")
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library, largest: largest)
+        print("Process Inbox editor library \(role)=\(library)")
+        app.launch()
+        boardEnabled(app.buttons["tab-inbox"], timeout: 30)
+        boardTap(app, "tab-inbox")
+        return app
+    }
+
+    private func processEditorCapture(_ app: XCUIApplication, _ titles: [String]) {
+        for title in titles {
+            boardTap(app, "capture-open")
+            let input = app.textViews["capture-input"]
+            boardEnabled(input); input.typeText(title)
+            boardTap(app, "capture-save")
+            XCTAssertTrue(input.waitForNonExistence(timeout: 20))
+        }
+    }
+
+    private func processEditorTap(_ app: XCUIApplication, _ id: String) {
+        revealPagedElement(app, app.buttons[id], in: app.scrollViews["process-inbox-scroll"], outerEdge: true)
+        boardTap(app, id)
+    }
+
+    private func processEditorObserve(_ app: XCUIApplication, _ name: String) {
+        let image = XCTAttachment(screenshot: app.screenshot())
+        image.name = name; image.lifetime = .keepAlways; add(image)
+        let hierarchy = XCTAttachment(string: String(app.debugDescription.prefix(65_536)))
+        hierarchy.name = name + " hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
+    }
+
+    private func processEditorRoundTrip(_ app: XCUIApplication, save: String? = nil, discard: Bool = false) {
+        let processing = app.descendants(matching: .any).matching(identifier: "process-inbox-title").firstMatch
+        boardEnabled(processing, timeout: 30)
+        let original = processing.value as? String ?? ""
+        XCTAssertFalse(original.isEmpty)
+        let progress = app.staticTexts["process-inbox-progress"].label
+        let choiceQuery = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "process-inbox-choice-"))
+        let choices = choiceQuery.allElementsBoundByIndex.map(\.identifier).sorted()
+        let filing = app.buttons["process-inbox-file"].exists
+        let edit = app.buttons["process-inbox-edit"]
+        XCTAssertGreaterThanOrEqual(edit.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(edit.frame.height, 44)
+        boardTap(app, "process-inbox-edit")
+        let title = app.descendants(matching: .any).matching(identifier: "task-editor-title").firstMatch
+        boardEnabled(title, timeout: 30)
+        XCTAssertTrue(app.buttons["task-mode-edit"].isSelected)
+        XCTAssertEqual(title.value as? String, original)
+        XCTAssertFalse(app.buttons["process-inbox-close"].isHittable)
+        if let save {
+            replaceTextView(title, with: save)
+            boardTap(app, "task-editor-save")
+        } else {
+            if discard { replaceTextView(title, with: original + " discarded draft") }
+            boardTap(app, "task-view-close")
+            if discard { boardTap(app, "task-editor-discard") }
+            else { XCTAssertFalse(app.buttons["task-editor-discard"].exists) }
+        }
+        XCTAssertTrue(title.waitForNonExistence(timeout: 30))
+        boardEnabled(processing, timeout: 30)
+        expectation(for: NSPredicate(format: "value == %@", save ?? original), evaluatedWith: processing)
+        waitForExpectations(timeout: 20)
+        XCTAssertEqual(app.staticTexts["process-inbox-progress"].label, progress)
+        XCTAssertEqual(choiceQuery.allElementsBoundByIndex.map(\.identifier).sorted(), choices)
+        XCTAssertEqual(app.buttons["process-inbox-file"].exists, filing)
+        XCTAssertFalse(app.staticTexts["process-inbox-error"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        processEditorObserve(app, "Process Inbox editor " + (save != nil ? "saved" : discard ? "discarded" : "unchanged"))
+    }
+
+    func testProcessInboxEditorGuidedSaveCloseAndDiscardReturn() throws {
+        let app = try processEditorApp("GUIDED"); defer { app.terminate() }
+        processEditorCapture(app, ["Guided editor original", "Guided editor remainder"])
+        boardTap(app, "inbox-process-primary")
+        boardEnabled(app.buttons["process-inbox-choice-actionable"], timeout: 30)
+        XCTAssertEqual(app.staticTexts["process-inbox-progress"].label, "0/2 tasks")
+        processEditorRoundTrip(app, save: "Guided editor saved")
+        processEditorTap(app, "process-inbox-choice-actionable")
+        boardEnabled(app.buttons["process-inbox-choice-no"])
+        processEditorRoundTrip(app)
+        processEditorTap(app, "process-inbox-choice-no")
+        boardEnabled(app.buttons["process-inbox-choice-defer"])
+        processEditorRoundTrip(app, discard: true)
+        processEditorTap(app, "process-inbox-choice-defer")
+        processEditorTap(app, "process-inbox-choice-single")
+        boardEnabled(app.buttons["process-inbox-file"])
+        processEditorRoundTrip(app, save: "Guided filing saved")
+        boardTap(app, "process-inbox-close")
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["inbox-process-primary"], timeout: 30)
+        boardTap(app, "inbox-process-primary")
+        let title = app.descendants(matching: .any).matching(identifier: "process-inbox-title").firstMatch
+        boardEnabled(title, timeout: 30)
+        XCTAssertEqual(title.value as? String, "Guided filing saved")
+        XCTAssertEqual(app.staticTexts["process-inbox-progress"].label, "0/2 tasks")
+        boardTap(app, "process-inbox-close")
+    }
+
+    func testProcessInboxEditorQuickReviewReturn() throws {
+        let app = try processEditorApp("QUICK_REVIEW", largest: true); defer { app.terminate() }
+        processEditorCapture(app, ["Quick review original", "Quick review remainder"])
+        if app.buttons["tab-review"].exists { boardTap(app, "tab-review") }
+        else { boardTap(app, "tab-menu"); boardTap(app, "menu-review") }
+        boardTap(app, "review-start"); boardTap(app, "review-start-weekly")
+        boardEnabled(app.buttons["review-guide-close"], timeout: 30)
+        let entry = app.buttons["review-weekly-process-inbox"]
+        for _ in 0..<8 where !entry.exists { boardTap(app, "review-guide-next") }
+        let step = app.staticTexts["review-guide-step"].label
+        revealPagedElement(app, entry, in: app.scrollViews["review-guide-content-inbox"], outerEdge: true)
+        boardTap(app, entry.identifier)
+        boardEnabled(app.buttons["process-inbox-mode"], timeout: 30)
+        boardTap(app, "process-inbox-mode")
+        boardEnabled(app.buttons["process-inbox-choice-next"])
+        processEditorRoundTrip(app, save: "Quick review saved")
+        processEditorRoundTrip(app)
+        processEditorRoundTrip(app, discard: true)
+        boardTap(app, "process-inbox-close")
+        boardEnabled(app.buttons["review-guide-close"], timeout: 30)
+        XCTAssertEqual(app.staticTexts["review-guide-step"].label, step)
+        XCTAssertFalse(app.buttons["process-inbox-edit"].exists)
+        processEditorObserve(app, "Weekly Review caller retained after editor")
+        boardTap(app, "review-guide-close")
+    }
+
+    func testProcessInboxSectionsAndSchedulingControls() throws {
+        let app = try processEditorApp("SECTION_TIME"); defer { app.terminate() }
+        let projectA = "Process editor Project A", projectB = "Process editor Project B"
+        let sectionName = "Process editor Section A"
+        boardTap(app, "tab-menu"); boardTap(app, "menu-projects")
+        for name in [projectA, projectB] {
+            let title = app.textFields["projects-create-title"]
+            boardEnabled(title); title.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+            title.typeText(name)
+            boardTap(app, "projects-create-add")
+            let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "project-open-", name)).firstMatch
+            boardEnabled(row, timeout: 30)
+            if name == projectA {
+                revealPagedElement(app, row, in: app.scrollViews["projects-scroll"])
+                row.tap(); boardTap(app, "project-details-toggle")
+                revealPagedElement(app, app.buttons["project-sections-open"], in: app.scrollViews["project-detail-scroll"])
+                boardTap(app, "project-sections-open"); boardTap(app, "project-section-add")
+                let section = app.textFields["project-section-title"]
+                boardEnabled(section); section.tap()
+                XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+                section.typeText(sectionName)
+                boardTap(app, "project-section-save")
+                XCTAssertTrue(section.waitForNonExistence(timeout: 30))
+                boardTap(app, "project-sections-close"); boardTap(app, "project-back")
+            }
+        }
+        boardTap(app, "tab-inbox")
+        let timedTitle = "Process editor timed section", dateOnlyTitle = "Process editor date only"
+        processEditorCapture(app, [timedTitle, dateOnlyTitle])
+        boardTap(app, "inbox-process-primary")
+        processEditorTap(app, "process-inbox-choice-later")
+        func project(_ name: String) {
+            let search = app.textFields["process-inbox-project-search"]
+            revealPagedElement(app, search, in: app.scrollViews["process-inbox-scroll"], outerEdge: true)
+            search.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+            replaceTextView(search, with: name, tapOffset: CGVector(dx: 0.5, dy: 0.5))
+            let option = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "process-inbox-project-", name)).firstMatch
+            revealPagedElement(app, option, in: app.scrollViews["process-inbox-scroll"], outerEdge: true)
+            boardTap(app, option.identifier)
+            expectation(for: NSPredicate(format: "label CONTAINS %@ AND selected == true", name), evaluatedWith: app.buttons["process-inbox-project-current"])
+            waitForExpectations(timeout: 20)
+        }
+        project(projectA)
+        XCTAssertEqual(app.buttons["process-inbox-section-1"].label, sectionName)
+        processEditorTap(app, "process-inbox-section-1")
+        XCTAssertTrue(app.buttons["process-inbox-section-1"].isSelected)
+        project(projectB)
+        XCTAssertFalse(app.buttons["process-inbox-section-1"].exists)
+        project(projectA)
+        XCTAssertTrue(app.buttons["process-inbox-section-0"].isSelected)
+        processEditorTap(app, "process-inbox-section-1")
+        processEditorObserve(app, "Process Inbox selected owned section")
+        func time(_ commit: Bool) {
+            processEditorTap(app, "process-inbox-time-startTime")
+            let picker = app.datePickers["process-inbox-time-picker"]
+            boardEnabled(picker)
+            XCTAssertTrue([2, 3].contains(picker.pickerWheels.count))
+            picker.pickerWheels.element(boundBy: 0).adjust(toPickerWheelValue: "10")
+            picker.pickerWheels.element(boundBy: 1).adjust(toPickerWheelValue: "37")
+            boardTap(app, commit ? "process-inbox-time-confirm" : "process-inbox-time-cancel")
+            XCTAssertTrue(picker.waitForNonExistence(timeout: 20))
+        }
+        processEditorTap(app, "process-inbox-date-startTime-preset-0")
+        boardEnabled(app.buttons["process-inbox-time-startTime"])
+        let date = app.buttons["process-inbox-date-startTime"]
+        let originalDay = date.label
+        let clock = app.buttons["process-inbox-time-startTime"], originalClock = app.buttons["process-inbox-time-startTime"].label
+        time(false)
+        XCTAssertEqual(date.label, originalDay)
+        XCTAssertEqual(clock.label, originalClock)
+        time(true)
+        XCTAssertTrue(clock.label.contains("37"))
+        XCTAssertTrue(date.label.hasPrefix(originalDay))
+        let timedClock = clock.label
+        processEditorTap(app, "process-inbox-date-startTime-time-mode")
+        expectation(for: NSPredicate(format: "label == %@ AND enabled == true", originalClock), evaluatedWith: clock)
+        waitForExpectations(timeout: 20)
+        XCTAssertEqual(date.label, originalDay)
+        XCTAssertFalse(clock.label.contains("37"))
+        XCTAssertFalse(app.buttons["process-inbox-date-startTime-time-mode"].exists)
+        time(true)
+        XCTAssertEqual(clock.label, timedClock)
+        processEditorObserve(app, "Process Inbox clock committed without changing day")
+        processEditorTap(app, "process-inbox-file")
+        let processing = app.descendants(matching: .any).matching(identifier: "process-inbox-title").firstMatch
+        expectation(for: NSPredicate(format: "value == %@", dateOnlyTitle), evaluatedWith: processing)
+        waitForExpectations(timeout: 30)
+        XCTAssertEqual(app.staticTexts["process-inbox-progress"].label, "1/2 tasks")
+        processEditorTap(app, "process-inbox-choice-later")
+        project(projectA)
+        XCTAssertTrue(app.buttons["process-inbox-section-0"].isSelected)
+        processEditorTap(app, "process-inbox-date-startTime-preset-0")
+        boardEnabled(clock)
+        let dateOnlyDay = date.label
+        time(true)
+        processEditorTap(app, "process-inbox-date-startTime-time-mode")
+        expectation(for: NSPredicate(format: "label == %@ AND enabled == true", originalClock), evaluatedWith: clock)
+        waitForExpectations(timeout: 20)
+        XCTAssertEqual(date.label, dateOnlyDay)
+        XCTAssertFalse(clock.label.contains("37"))
+        XCTAssertFalse(app.buttons["process-inbox-date-startTime-time-mode"].exists)
+        processEditorObserve(app, "Process Inbox date-only before filing")
+        processEditorTap(app, "process-inbox-file")
+        boardTap(app, "process-inbox-finish")
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["search-open"], timeout: 30)
+        for (title, timed) in [(timedTitle, true), (dateOnlyTitle, false)] {
+            boardTap(app, "search-open")
+            let query = app.textFields["search-input"]
+            boardEnabled(query); query.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+            query.typeText(title)
+            let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "search-task-", title)).firstMatch
+            boardEnabled(row, timeout: 30); row.tap(); boardTap(app, "task-mode-edit")
+            let section = app.buttons["task-editor-project-section"]
+            revealPagedElement(app, section, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+            XCTAssertEqual(section.value as? String, timed ? sectionName : "No Section")
+            if !app.buttons["task-editor-startTime"].exists { task743Section(app, "task-editor-section-scheduling") }
+            let start = app.buttons["task-editor-startTime"]
+            revealPagedElement(app, start, in: app.scrollViews["task-editor-scroll"], outerEdge: true)
+            XCTAssertFalse((start.value as? String ?? "").isEmpty)
+            XCTAssertEqual(app.buttons["task-date-startTime-date-only"].exists, timed)
+            if timed { XCTAssertTrue(app.buttons["task-date-startTime-time"].label.contains("37")) }
+            processEditorObserve(app, timed ? "Cold timed section destination" : "Cold date-only no-section destination")
+            boardTap(app, "task-view-close")
+            XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+            boardTap(app, "search-close")
+        }
+    }
+}
+
+extension FoundationUITests {
+    func testContextsSortTitleSelectionCancelAndColdPersistence() throws {
+        continueAfterFailure = false
+        let library = try task371Library("NORMAL", prefix: "MINDWTR_CONTEXTS_SORT_UI_")
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        print("Contexts Sort UI library=\(library)")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        let created = ["Zulu Context sort", "Mike Context sort", "Alpha Context sort"]
+        let alphabetical = Array(created.reversed()), token = "@cxsort"
+        processEditorCapture(app, created.map { $0 + " " + token + " /next" })
+        func open() {
+            boardTap(app, "tab-menu")
+            boardTap(app, "menu-contexts")
+            boardEnabled(app.buttons["contexts-sort"], timeout: 30)
+        }
+        func selectContext() {
+            let query = app.textFields["contexts-search"]
+            boardEnabled(query, timeout: 30)
+            if query.value as? String != token {
+                query.tap()
+                XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+                query.typeText(token)
+            }
+            let chip = app.buttons["contexts-chip-" + token]
+            boardEnabled(chip)
+            if !chip.isSelected { boardTap(app, chip.identifier) }
+            expectation(for: NSPredicate(format: "selected == true AND enabled == true"), evaluatedWith: chip)
+            waitForExpectations(timeout: 20)
+            XCTAssertEqual(query.value as? String, token)
+        }
+        func order(_ titles: [String]) {
+            let rows = titles.map { title in
+                app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "task-title-", title)).firstMatch
+            }
+            for row in rows { boardEnabled(row, timeout: 30); XCTAssertTrue(row.isHittable) }
+            XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "task-title-")).count, 3)
+            XCTAssertLessThan(rows[0].frame.minY, rows[1].frame.minY)
+            XCTAssertLessThan(rows[1].frame.minY, rows[2].frame.minY)
+            XCTAssertTrue(app.buttons["contexts-chip-" + token].isSelected)
+            XCTAssertEqual(app.textFields["contexts-search"].value as? String, token)
+            XCTAssertFalse(app.staticTexts["contexts-error"].exists)
+            XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        }
+        func closeSort() {
+            boardTap(app, "contexts-sort-close")
+            XCTAssertTrue(app.buttons["contexts-sort-close"].waitForNonExistence(timeout: 20))
+            boardEnabled(app.buttons["contexts-sort"])
+        }
+        open(); selectContext()
+        boardTap(app, "contexts-sort")
+        boardTap(app, "contexts-sort-created")
+        XCTAssertTrue(app.buttons["contexts-sort-close"].waitForNonExistence(timeout: 30))
+        order(created)
+        boardTap(app, "contexts-sort")
+        boardEnabled(app.buttons["contexts-sort-created"])
+        XCTAssertTrue(app.buttons["contexts-sort-created"].isSelected)
+        closeSort(); order(created)
+        boardTap(app, "contexts-sort")
+        boardTap(app, "contexts-sort-title")
+        XCTAssertTrue(app.buttons["contexts-sort-close"].waitForNonExistence(timeout: 30))
+        order(alphabetical)
+        boardTap(app, "contexts-sort")
+        boardEnabled(app.buttons["contexts-sort-title"])
+        XCTAssertTrue(app.buttons["contexts-sort-title"].isSelected)
+        processEditorObserve(app, "Contexts Title sort selected")
+        closeSort(); order(alphabetical)
+        boardTap(app, "contexts-back")
+        open(); order(alphabetical)
+        boardTap(app, "contexts-sort")
+        boardEnabled(app.buttons["contexts-sort-title"])
+        XCTAssertTrue(app.buttons["contexts-sort-title"].isSelected)
+        closeSort()
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["tab-menu"], timeout: 30)
+        open(); selectContext(); order(alphabetical)
+        boardTap(app, "contexts-sort")
+        boardEnabled(app.buttons["contexts-sort-title"])
+        XCTAssertTrue(app.buttons["contexts-sort-title"].isSelected)
+        processEditorObserve(app, "Contexts Title sort retained after cold launch")
+        closeSort(); order(alphabetical)
+    }
+}
+
+extension FoundationUITests {
+    func testEditorSectionHelpPreservesUnsavedDraftAndExpansion() throws {
+        continueAfterFailure = false
+        let library = try task371Library("NORMAL", prefix: "MINDWTR_EDITOR_SECTION_HELP_UI_")
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        print("Editor section help UI library=\(library)")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        processEditorCapture(app, ["Section help original"])
+        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "task-title-", "Section help original")).firstMatch
+        boardEnabled(row, timeout: 30); row.tap(); boardTap(app, "task-mode-edit")
+        let scroll = app.scrollViews["task-editor-scroll"]
+        let title = app.descendants(matching: .any).matching(identifier: "task-editor-title").firstMatch
+        boardEnabled(title, timeout: 30)
+        replaceTextView(title, with: "Section help unsaved title")
+        task743Section(app, "task-editor-section-details")
+        let note = app.textViews["task-editor-note"]
+        revealPagedElement(app, note, in: scroll, outerEdge: true)
+        note.tap(); XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        note.typeText("Section help unsaved note")
+        func tap(_ id: String) {
+            revealPagedElement(app, app.buttons[id], in: scroll, outerEdge: true)
+            boardTap(app, id)
+        }
+        func help(_ section: String) -> XCUIElement {
+            app.descendants(matching: .any).matching(identifier: "task-editor-section-help-body-" + section).firstMatch
+        }
+        let scheduling = app.buttons["task-editor-section-scheduling"]
+        let details = app.buttons["task-editor-section-details"]
+        if scheduling.value as? String == "Collapse" { tap("task-editor-section-scheduling") }
+        XCTAssertEqual(scheduling.value as? String, "Expand")
+        XCTAssertEqual(details.value as? String, "Collapse")
+        XCTAssertFalse(help("scheduling").exists)
+        XCTAssertFalse(help("details").exists)
+        tap("task-editor-section-help-scheduling")
+        XCTAssertTrue(help("scheduling").waitForExistence(timeout: 20))
+        XCTAssertEqual(scheduling.value as? String, "Expand")
+        XCTAssertFalse(app.buttons["task-editor-startTime"].exists)
+        processEditorObserve(app, "Scheduling help visible before guide role check")
+        let schedulingGuide = app.buttons["task-editor-section-guide-scheduling"]
+        XCTAssertTrue(schedulingGuide.waitForExistence(timeout: 10))
+        XCTAssertEqual(schedulingGuide.elementType, .button)
+        XCTAssertTrue(schedulingGuide.isEnabled)
+        XCTAssertEqual(note.value as? String, "Section help unsaved note")
+        tap("task-editor-section-help-details")
+        XCTAssertTrue(help("details").waitForExistence(timeout: 20))
+        XCTAssertEqual(details.value as? String, "Collapse")
+        processEditorObserve(app, "Details help visible before guide role check")
+        let detailsGuide = app.buttons["task-editor-section-guide-details"]
+        XCTAssertTrue(detailsGuide.waitForExistence(timeout: 10))
+        XCTAssertEqual(detailsGuide.elementType, .button)
+        XCTAssertTrue(detailsGuide.isEnabled)
+        tap("task-editor-section-details")
+        XCTAssertEqual(details.value as? String, "Expand")
+        XCTAssertFalse(note.exists)
+        XCTAssertTrue(help("details").exists)
+        XCTAssertTrue(help("scheduling").exists)
+        tap("task-editor-section-help-scheduling")
+        XCTAssertTrue(help("scheduling").waitForNonExistence(timeout: 20))
+        XCTAssertEqual(scheduling.value as? String, "Expand")
+        XCTAssertTrue(help("details").exists)
+        tap("task-editor-section-scheduling")
+        XCTAssertEqual(scheduling.value as? String, "Collapse")
+        XCTAssertTrue(app.buttons["task-editor-startTime"].exists)
+        XCTAssertFalse(help("scheduling").exists)
+        task743Section(app, "task-editor-section-details")
+        XCTAssertEqual(note.value as? String, "Section help unsaved note")
+        XCTAssertEqual(title.value as? String, "Section help unsaved title")
+        tap("task-editor-section-help-details")
+        XCTAssertTrue(help("details").waitForNonExistence(timeout: 20))
+        XCTAssertEqual(details.value as? String, "Collapse")
+        XCTAssertEqual(note.value as? String, "Section help unsaved note")
+        processEditorObserve(app, "Section help toggles retain unsaved editor draft")
+        boardTap(app, "task-view-close"); boardTap(app, "task-editor-discard")
+        boardEnabled(row, timeout: 30); row.tap(); boardTap(app, "task-mode-edit")
+        boardEnabled(title, timeout: 30)
+        XCTAssertEqual(title.value as? String, "Section help original")
+        XCTAssertFalse(help("scheduling").exists)
+        XCTAssertFalse(help("details").exists)
+        processEditorObserve(app, "Section help is closed for reopened editor")
+        boardTap(app, "task-view-close")
+        XCTAssertFalse(app.buttons["task-editor-discard"].exists)
+    }
+}
+extension FoundationUITests {
+    private func staleReviewOpenWeekly(_ app: XCUIApplication) {
+        if app.buttons["tab-review"].exists { boardTap(app, "tab-review") }
+        else { boardTap(app, "tab-menu"); boardTap(app, "menu-review") }
+        boardTap(app, "review-start"); boardTap(app, "review-start-weekly")
+        boardEnabled(app.buttons["review-guide-close"], timeout: 30)
+        for _ in 0..<8 where !app.scrollViews["review-guide-content-stale"].exists {
+            boardEnabled(app.buttons["review-guide-next"], timeout: 30)
+            boardTap(app, "review-guide-next")
+        }
+        XCTAssertTrue(app.scrollViews["review-guide-content-stale"].exists)
+    }
+
+    private func staleReviewTap(_ app: XCUIApplication, _ id: String) {
+        let button = app.buttons[id]
+        boardEnabled(button, timeout: 30)
+        let prompt = app.scrollViews["review-project-task-prompt"]
+        let scroll = prompt.exists ? prompt : app.scrollViews["review-guide-content-stale"]
+        revealPagedElement(app, button, in: scroll, outerEdge: true)
+        boardTap(app, id)
+    }
+
+    private func staleReviewTaskRow(_ app: XCUIApplication, _ title: String) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "task-title-", title)).firstMatch
+    }
+
+    func testStaleWeeklyProjectAddEditCancelOpenAndColdPersistence() throws {
+        continueAfterFailure = false
+        let library = try task371Library("NORMAL", prefix: "MINDWTR_STALE_REVIEW_UI_")
+        let projectID = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_STALE_REVIEW_UI_PROJECT_ID"])
+        let original = "UI16 original next"
+        let run = String(library.prefix(8))
+        let canceled = "UI16 canceled " + run
+        let saved = "UI16 saved " + run
+        let createdForEdit = "UI16 editor " + run
+        let edited = "UI16 edited " + run
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        print("Stale Weekly Review UI library=\(library) project=\(projectID)")
+        app.launch(); defer { app.terminate() }
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        staleReviewOpenWeekly(app)
+        let cardID = "review-guide-project-" + projectID
+        let addID = "review-project-add-task-" + projectID
+        let openID = "review-guide-open-project-" + projectID
+        let card = app.buttons[cardID]
+        boardEnabled(card, timeout: 30)
+        XCTAssertFalse(card.isSelected)
+        staleReviewTap(app, cardID)
+        XCTAssertTrue(card.isSelected)
+        let scroll = app.scrollViews["review-guide-content-stale"]
+        let originalRow = staleReviewTaskRow(app, original)
+        revealPagedElement(app, originalRow, in: scroll, outerEdge: true)
+        boardEnabled(originalRow, timeout: 30)
+        XCTAssertFalse(app.buttons["review-project-complete-" + projectID].exists)
+        let step = app.staticTexts["review-guide-step"].label
+        XCTAssertFalse(step.isEmpty)
+        func sameStep() {
+            XCTAssertTrue(app.scrollViews["review-guide-content-stale"].exists)
+            XCTAssertEqual(app.staticTexts["review-guide-step"].label, step)
+            XCTAssertTrue(card.isSelected)
+            XCTAssertFalse(app.staticTexts["review-error"].exists)
+            XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        }
+        func enter(_ title: String) {
+            staleReviewTap(app, addID)
+            let input = app.descendants(matching: .any).matching(identifier: "review-project-task-title").firstMatch
+            boardEnabled(input, timeout: 30)
+            XCTAssertFalse(app.buttons["review-guide-close"].isHittable)
+            input.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+            input.typeText(title)
+            XCTAssertEqual(input.value as? String, title)
+        }
+        func promptClosed() {
+            let prompt = app.descendants(matching: .any).matching(identifier: "review-project-task-prompt").firstMatch
+            XCTAssertTrue(prompt.waitForNonExistence(timeout: 30))
+        }
+        enter(canceled)
+        staleReviewTap(app, "review-project-task-cancel")
+        promptClosed(); sameStep()
+        XCTAssertFalse(staleReviewTaskRow(app, canceled).exists)
+        XCTAssertEqual(originalRow.label, original)
+        enter(saved)
+        staleReviewTap(app, "review-project-task-save")
+        promptClosed(); sameStep()
+        let savedRow = staleReviewTaskRow(app, saved)
+        revealPagedElement(app, savedRow, in: scroll, outerEdge: true)
+        boardEnabled(savedRow, timeout: 30)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "task-title-", saved)).count, 1)
+        processEditorObserve(app, "Stale project Add task saved in place")
+        enter(createdForEdit)
+        staleReviewTap(app, "review-project-task-save-edit")
+        let title = app.descendants(matching: .any).matching(identifier: "task-editor-title").firstMatch
+        boardEnabled(title, timeout: 30)
+        XCTAssertTrue(app.buttons["task-mode-edit"].isSelected)
+        XCTAssertEqual(title.value as? String, createdForEdit)
+        replaceTextView(title, with: edited)
+        boardTap(app, "task-editor-save")
+        XCTAssertTrue(title.waitForNonExistence(timeout: 30))
+        sameStep()
+        let editedRow = staleReviewTaskRow(app, edited)
+        revealPagedElement(app, editedRow, in: scroll, outerEdge: true)
+        boardEnabled(editedRow, timeout: 30)
+        XCTAssertFalse(staleReviewTaskRow(app, createdForEdit).exists)
+        revealPagedElement(app, originalRow, in: scroll, outerEdge: true)
+        boardEnabled(originalRow); originalRow.tap(); boardTap(app, "task-mode-edit")
+        boardEnabled(title, timeout: 30)
+        XCTAssertEqual(title.value as? String, original)
+        replaceTextView(title, with: "UI16 discarded editor " + run)
+        boardTap(app, "task-view-close"); boardTap(app, "task-editor-discard")
+        XCTAssertTrue(title.waitForNonExistence(timeout: 30))
+        sameStep()
+        XCTAssertEqual(originalRow.label, original)
+        staleReviewTap(app, openID)
+        boardEnabled(app.buttons["project-back"], timeout: 30)
+        XCTAssertFalse(app.staticTexts["project-detail-title"].label.isEmpty)
+        boardTap(app, "project-back")
+        boardEnabled(card, timeout: 30); sameStep()
+        processEditorObserve(app, "Stale project editor and project route return to checkpoint")
+        boardTap(app, "review-guide-close")
+        app.terminate(); app.launch()
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        staleReviewOpenWeekly(app)
+        boardEnabled(card, timeout: 30)
+        XCTAssertFalse(card.isSelected)
+        staleReviewTap(app, cardID)
+        sameStep()
+        for expected in [original, saved, edited] {
+            let row = staleReviewTaskRow(app, expected)
+            revealPagedElement(app, row, in: app.scrollViews["review-guide-content-stale"], outerEdge: true)
+            boardEnabled(row, timeout: 30)
+            XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "task-title-", expected)).count, 1)
+        }
+        XCTAssertFalse(staleReviewTaskRow(app, canceled).exists)
+        XCTAssertFalse(staleReviewTaskRow(app, createdForEdit).exists)
+        XCTAssertFalse(staleReviewTaskRow(app, "UI16 discarded editor " + run).exists)
+        processEditorObserve(app, "Stale project Add and editor saves persisted once after cold launch")
+    }
+}
+
+extension FoundationUITests {
+    func testTaskCardCompactCuesDetailsStatusPreferenceAndWaitingAssignee() throws {
+        continueAfterFailure = false
+        let library = try task371Library("NORMAL", prefix: "MINDWTR_TASK_CARD_CUES_UI_")
+        let environment = ProcessInfo.processInfo.environment
+        let cueID = try XCTUnwrap(environment["MINDWTR_TASK_CARD_CUES_UI_CUE_TASK_ID"])
+        let plainID = try XCTUnwrap(environment["MINDWTR_TASK_CARD_CUES_UI_PLAIN_TASK_ID"])
+        let waitingID = try XCTUnwrap(environment["MINDWTR_TASK_CARD_CUES_UI_WAITING_TASK_ID"])
+        let descriptionText = "UI20 compact description"
+        let assigneeName = "UI20 Alex"
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        app.launch(); defer { app.terminate() }
+        func element(_ id: String) -> XCUIElement {
+            app.descendants(matching: .any).matching(identifier: id).firstMatch
+        }
+        let cueTitle = app.buttons["task-title-" + cueID]
+        let plainTitle = app.buttons["task-title-" + plainID]
+        let descriptionCue = element("task-description-cue-" + cueID)
+        let recurrenceCue = element("task-recurrence-cue-" + cueID)
+        let description = element("task-description-" + cueID)
+        let status = app.buttons["task-status-" + cueID]
+        func focus() {
+            boardEnabled(app.buttons["tab-focus"], timeout: 30); boardTap(app, "tab-focus")
+            boardEnabled(app.buttons["focus-view-options"], timeout: 30)
+            revealPagedElement(app, cueTitle, in: app.scrollViews["focus-scroll"], outerEdge: true)
+            boardEnabled(cueTitle, timeout: 30)
+            XCTAssertEqual(cueTitle.label, "UI20 cue task")
+        }
+        func compact() {
+            revealPagedElement(app, cueTitle, in: app.scrollViews["focus-scroll"], outerEdge: true)
+            XCTAssertTrue(descriptionCue.waitForExistence(timeout: 10))
+            XCTAssertEqual(descriptionCue.label, "Description")
+            XCTAssertTrue(recurrenceCue.waitForExistence(timeout: 10))
+            XCTAssertTrue(recurrenceCue.label.contains("Recurrence"))
+            XCTAssertFalse(description.exists)
+            revealPagedElement(app, plainTitle, in: app.scrollViews["focus-scroll"], outerEdge: true)
+            boardEnabled(plainTitle)
+            XCTAssertEqual(plainTitle.label, "UI20 plain task")
+            XCTAssertFalse(element("task-description-cue-" + plainID).exists)
+            XCTAssertFalse(element("task-recurrence-cue-" + plainID).exists)
+        }
+        func details(_ visible: Bool) {
+            let options = app.buttons["focus-view-options"]
+            revealPagedElement(app, options, in: app.scrollViews["focus-scroll"], outerEdge: true)
+            boardTap(app, "focus-view-options")
+            let toggle = app.buttons["focus-details"]
+            revealPagedElement(app, toggle, in: app.scrollViews.containing(.button, identifier: "focus-details").firstMatch)
+            boardEnabled(toggle)
+            XCTAssertEqual(toggle.isSelected, !visible)
+            toggle.tap()
+            expectation(for: NSPredicate(format: "selected == %@ AND enabled == true", NSNumber(value: visible)), evaluatedWith: toggle)
+            waitForExpectations(timeout: 30)
+            boardTap(app, "focus-controls-close")
+        }
+        func statusVisible(_ visible: Bool) {
+            task144Open(app); task144Group(app, "basic", expanded: true)
+            let eye = app.buttons["gtd-taskEditorFieldVisible-status"]
+            revealPagedElement(app, eye, in: app.scrollViews["gtd-taskEditor-scroll"])
+            boardEnabled(eye)
+            XCTAssertEqual(eye.isSelected, !visible)
+            eye.tap()
+            expectation(for: NSPredicate(format: "selected == %@ AND enabled == true", NSNumber(value: visible)), evaluatedWith: eye)
+            waitForExpectations(timeout: 30)
+            boardTap(app, "gtd-taskEditor-back"); boardTap(app, "gtd-back"); boardTap(app, "settings-back")
+            focus()
+        }
+        focus(); compact()
+        XCTAssertTrue(status.exists)
+        processEditorObserve(app, "UI20 compact description and recurrence cues with plain control")
+        details(true)
+        revealPagedElement(app, description, in: app.scrollViews["focus-scroll"], outerEdge: true)
+        XCTAssertTrue(description.waitForExistence(timeout: 10))
+        XCTAssertEqual(description.label, descriptionText)
+        XCTAssertFalse(descriptionCue.exists); XCTAssertFalse(recurrenceCue.exists)
+        processEditorObserve(app, "UI20 details show description instead of compact cues")
+        details(false); compact()
+        statusVisible(false); compact()
+        XCTAssertFalse(status.exists)
+        XCTAssertFalse(app.buttons["task-status-" + plainID].exists)
+        processEditorObserve(app, "UI20 hidden Status preference retains compact cues")
+        app.terminate(); app.launch()
+        focus(); compact()
+        XCTAssertFalse(status.exists)
+        XCTAssertFalse(app.buttons["task-status-" + plainID].exists)
+        processEditorObserve(app, "UI20 compact cues and hidden Status survive cold launch")
+        revealPagedElement(app, plainTitle, in: app.scrollViews["focus-scroll"], outerEdge: true)
+        let done = app.buttons["task-swipe-done-" + plainID]
+        for _ in 0..<4 {
+            plainTitle.swipeRight()
+            if done.waitForExistence(timeout: 2), done.isHittable { break }
+        }
+        boardEnabled(done, timeout: 15); done.tap()
+        boardEnabled(app.buttons["task-completion-undo"], timeout: 30)
+        XCTAssertTrue(plainTitle.waitForNonExistence(timeout: 30))
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        processEditorObserve(app, "UI20 hidden Status still allows explicit row swipe completion")
+        app.terminate(); app.launch()
+        focus()
+        XCTAssertFalse(plainTitle.exists)
+        XCTAssertFalse(status.exists)
+        XCTAssertTrue(descriptionCue.exists); XCTAssertTrue(recurrenceCue.exists)
+        boardTap(app, "tab-menu"); boardTap(app, "menu-history")
+        boardEnabled(app.buttons["history-tab-done"], timeout: 30)
+        if !app.buttons["history-tab-done"].isSelected { boardTap(app, "history-tab-done") }
+        _ = task192Reveal(app, "task-title-" + plainID, buttons: true, scrollID: "done-scroll")
+        boardEnabled(plainTitle, timeout: 30)
+        XCTAssertEqual(plainTitle.label, "UI20 plain task")
+        XCTAssertTrue(app.buttons["history-tab-done"].isSelected)
+        XCTAssertFalse(app.buttons["task-status-" + plainID].exists)
+        processEditorObserve(app, "UI20 hidden Status completion is durable on History Done after cold launch")
+        boardTap(app, "history-back")
+        statusVisible(true)
+        XCTAssertTrue(status.waitForExistence(timeout: 10))
+        boardTap(app, "tab-menu"); boardTap(app, "menu-waiting")
+        let waitingTitle = app.buttons["task-title-" + waitingID]
+        revealPagedElement(app, waitingTitle, in: app.scrollViews["waiting-scroll"], outerEdge: true)
+        boardEnabled(waitingTitle, timeout: 30)
+        XCTAssertEqual(waitingTitle.label, "UI20 waiting task")
+        let assignee = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", assigneeName))
+            .allElementsBoundByIndex.first { $0.frame.minY >= waitingTitle.frame.maxY && app.frame.contains($0.frame) }
+        XCTAssertNotNil(assignee)
+        XCTAssertFalse(element("task-description-cue-" + waitingID).exists)
+        XCTAssertFalse(element("task-recurrence-cue-" + waitingID).exists)
+        XCTAssertTrue(app.buttons["task-status-" + waitingID].exists)
+        processEditorObserve(app, "UI20 Waiting assignee emphasis for visual review")
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+extension FoundationUITests {
+    private func calendarAllDayIDs(_ suffix: String) throws -> [String] {
+        let raw = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_CALENDAR_ALL_DAY_UI_" + suffix])
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String])
+    }
+
+    private func calendarAllDayOpen(_ app: XCUIApplication, day: String) {
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        if app.buttons["tab-calendar"].exists { boardTap(app, "tab-calendar") }
+        else {
+            boardTap(app, "tab-menu")
+            let calendar = app.buttons["menu-calendar"]
+            boardEnabled(calendar, timeout: 30)
+            let menuScroll = app.scrollViews.containing(.button, identifier: "menu-calendar").firstMatch
+            if menuScroll.exists { task467Reveal(app, calendar, in: menuScroll, requireHittable: false) }
+            boardTap(app, "menu-calendar")
+        }
+        boardEnabled(app.buttons["calendar-today"], timeout: 30)
+        boardTap(app, "calendar-mode-day"); boardTap(app, "calendar-today"); boardTap(app, "calendar-next")
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: app.buttons["calendar-mode-day"])
+        waitForExpectations(timeout: 30)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-day-free-slot-" + day).firstMatch.waitForExistence(timeout: 30))
+    }
+
+    private func calendarAllDayRevealOuter(_ app: XCUIApplication, _ id: String, buttons: Bool = false) -> XCUIElement {
+        let layout = app.scrollViews["calendar-layout-scroll"], items = app.scrollViews["calendar-all-day-items"]
+        XCTAssertTrue(layout.waitForExistence(timeout: 20))
+        let target = task192Exact(app, id, buttons: buttons)
+        for _ in 0..<48 {
+            let viewport = layout.frame.intersection(app.frame)
+            if target.exists && task192Inside(target.frame, viewport) { return target }
+            let above = target.exists && target.frame.minY < viewport.minY
+            let headers = ["calendar-show-completed", "calendar-today", "calendar-mode-day", "calendar-previous", "calendar-next"]
+                .map { app.buttons[$0].frame.intersection(viewport) }.filter { !$0.isEmpty && $0.height >= 12 }
+            let header = headers.max { left, right in
+                (above ? viewport.maxY - left.midY : left.midY - viewport.minY) < (above ? viewport.maxY - right.midY : right.midY - viewport.minY)
+            }
+            let visibleItems = items.frame.intersection(viewport)
+            let more = app.buttons["calendar-all-day-more"].frame.intersection(viewport)
+            let start: CGPoint
+            if let header { start = CGPoint(x: header.midX, y: header.midY) }
+            else if !visibleItems.isEmpty && items.frame.minX > viewport.minX + 1 {
+                start = CGPoint(x: items.frame.minX - min(5, (items.frame.minX - viewport.minX) / 2), y: visibleItems.midY)
+            } else {
+                XCTAssertFalse(more.isEmpty)
+                start = CGPoint(x: more.midX, y: more.midY)
+            }
+            let endY = min(viewport.maxY - 4, max(viewport.minY + 4, start.y + (above ? 1 : -1) * viewport.height * 0.6))
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: start.x, dy: start.y)).press(forDuration: 0.05,
+                thenDragTo: origin.withOffset(CGVector(dx: start.x, dy: endY)), withVelocity: .slow, thenHoldForDuration: 0.15)
+        }
+        processEditorObserve(app, "UI21 outer Calendar reveal failure")
+        XCTAssertTrue(target.exists && task192Inside(target.frame, layout.frame.intersection(app.frame)))
+        return target
+    }
+
+    func testCalendarAllDayFourWeekThreeExactDayAndCompletedAppearance() throws {
+        continueAfterFailure = false
+        let library = try task371Library("NORMAL", prefix: "MINDWTR_CALENDAR_ALL_DAY_UI_")
+        let environment = ProcessInfo.processInfo.environment
+        let dayA = try XCTUnwrap(environment["MINDWTR_CALENDAR_ALL_DAY_UI_DAY_A"])
+        let dayB = try XCTUnwrap(environment["MINDWTR_CALENDAR_ALL_DAY_UI_DAY_B"])
+        let aIDs = try calendarAllDayIDs("DAY_A_ITEM_IDS"), bIDs = try calendarAllDayIDs("DAY_B_ITEM_IDS")
+        let completedID = try XCTUnwrap(environment["MINDWTR_CALENDAR_ALL_DAY_UI_COMPLETED_ITEM_ID"])
+        XCTAssertEqual(aIDs.count, 6); XCTAssertEqual(bIDs.count, 4)
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        app.launch(); defer { app.terminate() }
+        calendarAllDayOpen(app, day: dayA)
+        let lane = app.scrollViews["calendar-all-day-items"]
+        let toggle = app.buttons["calendar-all-day-more"]
+        let titleA = app.staticTexts["calendar-period-title"].label
+        XCTAssertFalse(titleA.isEmpty)
+        XCTAssertFalse(app.buttons["calendar-show-completed"].isSelected)
+        func item(_ id: String) -> XCUIElement { app.buttons["calendar-item-" + id] }
+        func reveal(_ id: String) -> XCUIElement {
+            task192Reveal(app, "calendar-item-" + id, buttons: true, scrollID: "calendar-all-day-items")
+        }
+        func collapsed() {
+            boardEnabled(toggle, timeout: 30)
+            XCTAssertEqual(toggle.label, "+2 more")
+            XCTAssertEqual(toggle.value as? String, "Expand")
+            for id in aIDs.prefix(4) { XCTAssertTrue(reveal(id).exists) }
+            for id in aIDs.suffix(2) { XCTAssertFalse(item(id).exists) }
+            XCTAssertEqual(lane.buttons.matching(NSPredicate(format: "identifier IN %@", aIDs.map { "calendar-item-" + $0 })).count, 4)
+            XCTAssertGreaterThanOrEqual(toggle.frame.height, 44 - 0.5)
+            XCTAssertGreaterThanOrEqual(toggle.frame.minY, lane.frame.maxY - 0.001)
+        }
+        collapsed()
+        boardTap(app, "calendar-all-day-more")
+        XCTAssertEqual(toggle.label, "Less"); XCTAssertEqual(toggle.value as? String, "Collapse")
+        for id in aIDs { XCTAssertTrue(reveal(id).exists) }
+        processEditorObserve(app, "UI21 Day expanded six ordered all-day chips and independent Less control")
+        boardTap(app, "calendar-next")
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-day-free-slot-" + dayB).firstMatch.waitForExistence(timeout: 30))
+        for id in bIDs { XCTAssertTrue(reveal(id).exists) }
+        XCTAssertFalse(toggle.exists)
+        XCTAssertEqual(lane.buttons.matching(NSPredicate(format: "identifier IN %@", bIDs.map { "calendar-item-" + $0 })).count, 4)
+        boardTap(app, "calendar-previous")
+        boardEnabled(toggle, timeout: 30)
+        XCTAssertEqual(app.staticTexts["calendar-period-title"].label, titleA)
+        XCTAssertEqual(toggle.label, "Less")
+        XCTAssertTrue(reveal(try XCTUnwrap(aIDs.last)).exists)
+        boardTap(app, "calendar-all-day-more"); collapsed()
+        boardTap(app, "calendar-mode-week")
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: app.buttons["calendar-mode-week"])
+        waitForExpectations(timeout: 30)
+        _ = task192Reveal(app, "calendar-week-day-" + dayA, buttons: true, scrollID: "calendar-week-columns", horizontal: true)
+        let weekLaneID = "calendar-week-all-day-" + dayA
+        let weekLane = app.scrollViews[weekLaneID]
+        XCTAssertTrue(weekLane.waitForExistence(timeout: 30))
+        for id in aIDs.prefix(3) { XCTAssertTrue(item(id).exists) }
+        for id in aIDs.suffix(3) { XCTAssertFalse(item(id).exists) }
+        XCTAssertEqual(weekLane.buttons.matching(NSPredicate(format: "identifier IN %@", aIDs.map { "calendar-item-" + $0 })).count, 3)
+        let weekMore = task192Reveal(app, "calendar-week-all-day-more-" + dayA, buttons: true, scrollID: weekLaneID)
+        XCTAssertEqual(weekMore.label, "+3 more")
+        boardEnabled(weekMore); weekMore.tap()
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: app.buttons["calendar-mode-day"])
+        waitForExpectations(timeout: 30)
+        XCTAssertEqual(app.staticTexts["calendar-period-title"].label, titleA)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-day-free-slot-" + dayA).firstMatch.exists)
+        collapsed(); boardTap(app, "calendar-all-day-more")
+        let hidden = reveal(try XCTUnwrap(aIDs.last)); boardEnabled(hidden); hidden.tap()
+        let sheetTitle = app.staticTexts["calendar-item-title"]
+        XCTAssertTrue(sheetTitle.waitForExistence(timeout: 30))
+        XCTAssertEqual(sheetTitle.label, "UI21 A 6")
+        let cancel = app.buttons["calendar-action-cancel"]
+        task467Reveal(app, cancel, in: app.scrollViews.containing(.button, identifier: "calendar-action-cancel").firstMatch)
+        boardTap(app, "calendar-action-cancel")
+        boardTap(app, "calendar-show-completed")
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: app.buttons["calendar-show-completed"])
+        waitForExpectations(timeout: 30)
+        boardTap(app, "calendar-next")
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-day-free-slot-" + dayB).firstMatch.waitForExistence(timeout: 30))
+        let completed = reveal(completedID)
+        XCTAssertTrue(completed.label.contains("UI21 completed"))
+        XCTAssertFalse(completed.isEnabled)
+        XCTAssertFalse(sheetTitle.exists)
+        processEditorObserve(app, "UI21 completed all-day chip disabled with dim and strikethrough for visual review")
+        XCTAssertFalse(app.staticTexts["calendar-error"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+
+    func testCalendarAllDayLargestLandscapeControlsAndTimelineRemainReachable() throws {
+        continueAfterFailure = false
+        let library = try task371Library("LARGEST", prefix: "MINDWTR_CALENDAR_ALL_DAY_UI_")
+        let environment = ProcessInfo.processInfo.environment
+        let dayA = try XCTUnwrap(environment["MINDWTR_CALENDAR_ALL_DAY_UI_DAY_A"])
+        let aIDs = try calendarAllDayIDs("DAY_A_ITEM_IDS")
+        let timedID = try XCTUnwrap(environment["MINDWTR_CALENDAR_ALL_DAY_UI_TIMED_ITEM_ID"])
+        XCTAssertEqual(aIDs.count, 6)
+        let lastID = try XCTUnwrap(aIDs.last)
+        let orientation = XCUIDevice.shared.orientation
+        defer { XCUIDevice.shared.orientation = orientation }
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library, largest: true)
+        app.launch(); defer { app.terminate() }
+        calendarAllDayOpen(app, day: dayA)
+        let toggle = calendarAllDayRevealOuter(app, "calendar-all-day-more", buttons: true)
+        XCTAssertEqual(toggle.label, "+2 more")
+        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44 - 0.5)
+        boardEnabled(toggle); toggle.tap()
+        _ = calendarAllDayRevealOuter(app, "calendar-all-day-items")
+        let last = task192Reveal(app, "calendar-item-" + lastID, buttons: true, scrollID: "calendar-all-day-items")
+        boardEnabled(last)
+        processEditorObserve(app, "UI21 largest text all-day overflow item remains reachable")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        expectation(for: NSPredicate { _, _ in app.frame.width > app.frame.height }, evaluatedWith: app)
+        waitForExpectations(timeout: 20)
+        let less = calendarAllDayRevealOuter(app, "calendar-all-day-more", buttons: true)
+        XCTAssertEqual(less.label, "Less")
+        XCTAssertGreaterThanOrEqual(less.frame.height, 44 - 0.5)
+        boardEnabled(less); less.tap()
+        XCTAssertEqual(less.label, "+2 more")
+        XCTAssertFalse(app.buttons["calendar-item-" + lastID].exists)
+        let layout = app.scrollViews["calendar-layout-scroll"]
+        let timeline = app.scrollViews["calendar-day-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 30))
+        for _ in 0..<6 {
+            let viewport = layout.frame.intersection(app.frame)
+            if timeline.frame.intersection(viewport).height >= min(120, viewport.height / 2) { break }
+            let owner = less.frame.intersection(viewport)
+            XCTAssertFalse(owner.isEmpty)
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: owner.midX, dy: owner.midY)).press(forDuration: 0.05,
+                thenDragTo: origin.withOffset(CGVector(dx: owner.midX, dy: max(viewport.minY, owner.midY - viewport.height * 0.6))),
+                withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        let visibleTimeline = timeline.frame.intersection(layout.frame).intersection(app.frame)
+        XCTAssertGreaterThanOrEqual(visibleTimeline.height, min(120, layout.frame.intersection(app.frame).height / 2))
+        let timed = task192Reveal(app, "calendar-item-" + timedID, buttons: true, scrollID: "calendar-day-timeline", clippingScrollID: "calendar-layout-scroll")
+        boardEnabled(timed); timed.tap()
+        let sheetTitle = app.staticTexts["calendar-item-title"]
+        XCTAssertTrue(sheetTitle.waitForExistence(timeout: 30))
+        XCTAssertEqual(sheetTitle.label, "UI21 timed")
+        let cancel = app.buttons["calendar-action-cancel"]
+        task467Reveal(app, cancel, in: app.scrollViews.containing(.button, identifier: "calendar-action-cancel").firstMatch)
+        boardTap(app, "calendar-action-cancel")
+        let today = calendarAllDayRevealOuter(app, "calendar-today", buttons: true)
+        XCTAssertGreaterThanOrEqual(today.frame.height, 44 - 0.5)
+        XCTAssertTrue(today.isHittable)
+        processEditorObserve(app, "UI21 largest landscape controls and timed lane independently reachable")
+        XCTAssertFalse(app.staticTexts["calendar-error"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+}
+
+
+private struct ReviewLaterUIFixture: Decodable {
+    let projectID: String
+    let sectionProjectID: String
+    let waitingID: String
+    let firstTailID: String
+    let dueTailID: String
+    let sectionAHeadID: String
+    let sectionATailID: String
+    let sectionBHeadID: String
+    let sectionBTailID: String
+    let parallelID: String
+}
+
+extension FoundationUITests {
+    private func reviewLaterFixture() throws -> ReviewLaterUIFixture {
+        let raw = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_REVIEW_LATER_UI_IDS"])
+        return try JSONDecoder().decode(ReviewLaterUIFixture.self, from: Data(raw.utf8))
+    }
+
+    private func reviewLaterOpenOverview(_ app: XCUIApplication) {
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        if app.buttons["tab-review"].exists { boardTap(app, "tab-review") }
+        else {
+            boardTap(app, "tab-menu")
+            let menu = app.buttons["menu-review"]
+            boardEnabled(menu, timeout: 30)
+            let scroll = app.scrollViews.containing(.button, identifier: "menu-review").firstMatch
+            if scroll.exists { task467Reveal(app, menu, in: scroll) }
+            boardTap(app, "menu-review")
+        }
+        boardEnabled(app.buttons["review-start"], timeout: 30)
+    }
+
+    @discardableResult
+    private func reviewLaterReveal(_ app: XCUIApplication, _ id: String, weekly: Bool = false) -> XCUIElement {
+        let button = app.buttons[id]
+        let scroll = weekly ? app.scrollViews["review-guide-content-projects"] : app.scrollViews.firstMatch
+        revealPagedElement(app, button, in: scroll, more: weekly ? "review-guide-more" : "review-more",
+            ready: app.buttons[weekly ? "review-guide-close" : "review-start"], outerEdge: true)
+        return button
+    }
+
+    private func reviewLaterTap(_ app: XCUIApplication, _ id: String, weekly: Bool = false) {
+        _ = reviewLaterReveal(app, id, weekly: weekly)
+        boardTap(app, id)
+    }
+
+    private func reviewLaterDisclosure(_ app: XCUIApplication, _ id: String, count: Int, expanded: Bool, weekly: Bool = false) {
+        let button = reviewLaterReveal(app, id, weekly: weekly)
+        expectation(for: NSPredicate(format: "label == %@ AND selected == %@", "Later in sequence (\(count))", NSNumber(value: expanded)), evaluatedWith: button)
+        waitForExpectations(timeout: 30)
+        XCTAssertEqual(button.value as? String, expanded ? "Collapse" : "Expand")
+        XCTAssertGreaterThanOrEqual(button.frame.height, 44 - 0.5)
+        XCTAssertGreaterThanOrEqual(button.frame.width, 44 - 0.5)
+        XCTAssertTrue(button.isHittable)
+    }
+
+    private func reviewLaterOpenProjects(_ app: XCUIApplication) {
+        reviewLaterTap(app, "review-start")
+        let weekly = app.buttons["review-start-weekly"]
+        boardEnabled(weekly, timeout: 30)
+        let picker = app.scrollViews.containing(.button, identifier: "review-start-weekly").firstMatch
+        if picker.exists { task467Reveal(app, weekly, in: picker) }
+        boardTap(app, "review-start-weekly")
+        boardEnabled(app.buttons["review-guide-close"], timeout: 30)
+        for _ in 0..<8 where !app.scrollViews["review-guide-content-projects"].exists {
+            boardTap(app, "review-guide-next")
+        }
+        XCTAssertTrue(app.scrollViews["review-guide-content-projects"].exists)
+    }
+
+    private func reviewLaterRevealSavedTask(_ app: XCUIApplication, _ savedID: String, anchorIDs: [String]) {
+        let target = app.buttons[savedID]
+        let scroll = app.scrollViews["review-guide-content-projects"]
+        boardEnabled(target, timeout: 30)
+        XCTAssertTrue(scroll.waitForExistence(timeout: 30))
+        func fail(_ reason: String) {
+            processEditorObserve(app, "UI13 anchored saved-row reveal: " + reason)
+            XCTFail(reason)
+        }
+        var stalls = 0
+        for attempt in 1...6 {
+            let viewport = scroll.frame.intersection(app.frame)
+            if task192Inside(target.frame, viewport) && target.isHittable { return }
+            let candidates = anchorIDs.map { app.buttons["task-title-" + $0] }
+            guard let anchor = candidates.first(where: {
+                $0.exists && $0.isEnabled && task192Inside($0.frame, viewport)
+                    && $0.frame.midY - viewport.minY >= 88 && $0.isHittable
+            }) else { fail("No fully visible task-title anchor in the saved task's project"); return }
+            let beforeTarget = target.frame, beforeAnchor = anchor.frame
+            let start = CGPoint(x: beforeAnchor.midX, y: beforeAnchor.midY)
+            let endY = max(viewport.minY + 24, start.y - viewport.height * 0.6)
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: start.x, dy: start.y)).press(forDuration: 0.05,
+                thenDragTo: origin.withOffset(CGVector(dx: start.x, dy: endY)),
+                withVelocity: .slow, thenHoldForDuration: 0.2)
+            let movement = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                target.frame.minY <= beforeTarget.minY - 2 && anchor.frame.minY <= beforeAnchor.minY - 2
+            }, object: nil)
+            let moved = XCTWaiter.wait(for: [movement], timeout: 1) == .completed
+            let afterTarget = target.frame, afterAnchor = anchor.frame
+            print("UI13 anchored reveal attempt=\(attempt) anchor=\(anchor.identifier) start=\(start) endY=\(endY) targetY=\(beforeTarget.minY)->\(afterTarget.minY) anchorY=\(beforeAnchor.minY)->\(afterAnchor.minY) moved=\(moved)")
+            stalls = moved ? 0 : stalls + 1
+            if stalls == 3 { fail("Three card-anchor drags produced no matching upward target and anchor movement"); return }
+        }
+        let viewport = scroll.frame.intersection(app.frame)
+        guard task192Inside(target.frame, viewport) && target.isHittable else {
+            fail("Saved task must be fully contained and hittable after six bounded card-anchor drags"); return
+        }
+    }
+
+    func testReviewLaterDisclosureDueSectionsAndHiddenAddSaveEdit() throws {
+        continueAfterFailure = false
+        let library = try task371Library("NORMAL", prefix: "MINDWTR_REVIEW_LATER_UI_")
+        let fixture = try reviewLaterFixture()
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        app.launch(); defer { app.terminate() }
+        reviewLaterOpenOverview(app)
+        reviewLaterTap(app, "review-scope-all")
+        reviewLaterTap(app, "review-expand-cycle"); reviewLaterTap(app, "review-expand-cycle")
+        let overviewLater = "review-later-project:" + fixture.projectID
+        reviewLaterDisclosure(app, overviewLater, count: 2, expanded: false)
+        XCTAssertTrue(app.buttons["task-title-" + fixture.waitingID].exists)
+        for id in [fixture.firstTailID, fixture.dueTailID] {
+            XCTAssertFalse(app.buttons["task-title-" + id].exists)
+            XCTAssertFalse(app.buttons["review-task-markReviewed-" + id].exists)
+        }
+        reviewLaterTap(app, overviewLater)
+        reviewLaterDisclosure(app, overviewLater, count: 2, expanded: true)
+        let first = reviewLaterReveal(app, "task-title-" + fixture.firstTailID)
+        let due = reviewLaterReveal(app, "task-title-" + fixture.dueTailID)
+        XCTAssertEqual(first.label, "UI13 Z first tail"); XCTAssertEqual(due.label, "UI13 A due tail")
+        XCTAssertLessThan(first.frame.minY, due.frame.minY)
+        processEditorObserve(app, "UI13 overview Later follows manual order instead of title order")
+        reviewLaterTap(app, overviewLater)
+        reviewLaterDisclosure(app, overviewLater, count: 2, expanded: false)
+        XCTAssertTrue(first.waitForNonExistence(timeout: 30)); XCTAssertFalse(due.exists)
+        reviewLaterTap(app, "review-scope-due")
+        let dueCurrent = reviewLaterReveal(app, "task-title-" + fixture.dueTailID)
+        XCTAssertEqual(dueCurrent.label, "UI13 A due tail")
+        XCTAssertFalse(app.buttons[overviewLater].exists)
+        XCTAssertFalse(app.buttons["task-title-" + fixture.firstTailID].exists)
+        processEditorObserve(app, "UI13 explicitly review-due blocked Next remains current in Due overview")
+        reviewLaterTap(app, "review-scope-all")
+        let sectionCard = reviewLaterReveal(app, "review-project-project:" + fixture.sectionProjectID)
+        if !sectionCard.isSelected { reviewLaterTap(app, sectionCard.identifier) }
+        let sectionsLater = "review-later-project:" + fixture.sectionProjectID
+        reviewLaterDisclosure(app, sectionsLater, count: 2, expanded: false)
+        for id in [fixture.sectionAHeadID, fixture.sectionBHeadID, fixture.parallelID] {
+            _ = reviewLaterReveal(app, "task-title-" + id)
+        }
+        for id in [fixture.sectionATailID, fixture.sectionBTailID] { XCTAssertFalse(app.buttons["task-title-" + id].exists) }
+        reviewLaterTap(app, sectionsLater)
+        reviewLaterDisclosure(app, sectionsLater, count: 2, expanded: true)
+        let sectionA = reviewLaterReveal(app, "task-title-" + fixture.sectionATailID)
+        let sectionB = reviewLaterReveal(app, "task-title-" + fixture.sectionBTailID)
+        XCTAssertLessThan(sectionA.frame.minY, sectionB.frame.minY)
+        processEditorObserve(app, "UI13 independent section heads and sectionless parallel task precede disclosed tails")
+        reviewLaterOpenProjects(app)
+        let card = "review-guide-project-" + fixture.projectID
+        let later = "weekly-later-" + fixture.projectID
+        reviewLaterTap(app, card, weekly: true)
+        reviewLaterDisclosure(app, later, count: 2, expanded: false, weekly: true)
+        XCTAssertFalse(app.buttons["task-title-" + fixture.dueTailID].exists)
+        reviewLaterTap(app, later, weekly: true)
+        reviewLaterDisclosure(app, later, count: 2, expanded: true, weekly: true)
+        reviewLaterTap(app, "task-title-" + fixture.firstTailID, weekly: true)
+        boardEnabled(app.buttons["task-view-close"], timeout: 30)
+        boardTap(app, "task-view-close")
+        reviewLaterDisclosure(app, later, count: 2, expanded: true, weekly: true)
+        reviewLaterTap(app, later, weekly: true)
+        reviewLaterDisclosure(app, later, count: 2, expanded: false, weekly: true)
+        let step = app.staticTexts["review-guide-step"].label
+        let original = "UI13 hidden Add " + String(library.prefix(8))
+        let edited = "UI13 hidden saved " + String(library.prefix(8))
+        reviewLaterTap(app, "review-project-add-task-" + fixture.projectID, weekly: true)
+        let input = app.descendants(matching: .any).matching(identifier: "review-project-task-title").firstMatch
+        boardEnabled(input, timeout: 30); input.tap(); input.typeText(original)
+        let saveEdit = app.buttons["review-project-task-save-edit"]
+        revealPagedElement(app, saveEdit, in: app.scrollViews["review-project-task-prompt"], outerEdge: true)
+        boardTap(app, "review-project-task-save-edit")
+        let title = app.descendants(matching: .any).matching(identifier: "task-editor-title").firstMatch
+        boardEnabled(title, timeout: 30)
+        XCTAssertTrue(app.buttons["task-mode-edit"].isSelected)
+        XCTAssertEqual(title.value as? String, original)
+        replaceTextView(title, with: edited); boardTap(app, "task-editor-save")
+        XCTAssertTrue(title.waitForNonExistence(timeout: 30))
+        XCTAssertEqual(app.staticTexts["review-guide-step"].label, step)
+        XCTAssertTrue(app.buttons[card].isSelected)
+        reviewLaterDisclosure(app, later, count: 3, expanded: false, weekly: true)
+        XCTAssertFalse(staleReviewTaskRow(app, edited).exists)
+        reviewLaterTap(app, later, weekly: true)
+        reviewLaterDisclosure(app, later, count: 3, expanded: true, weekly: true)
+        let saved = staleReviewTaskRow(app, edited)
+        boardEnabled(saved, timeout: 30)
+        let savedID = saved.identifier
+        reviewLaterRevealSavedTask(app, savedID, anchorIDs: [fixture.firstTailID, fixture.waitingID, fixture.dueTailID])
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "task-title-", edited)).count, 1)
+        XCTAssertFalse(staleReviewTaskRow(app, original).exists)
+        processEditorObserve(app, "UI13 collapsed sequential Add Save and edit opens the acknowledged hidden task and returns to its guide")
+        boardTap(app, "review-guide-close")
+        app.terminate(); app.launch()
+        reviewLaterOpenOverview(app); reviewLaterOpenProjects(app)
+        reviewLaterTap(app, card, weekly: true)
+        reviewLaterDisclosure(app, later, count: 3, expanded: false, weekly: true)
+        XCTAssertFalse(staleReviewTaskRow(app, edited).exists)
+        reviewLaterTap(app, later, weekly: true)
+        reviewLaterDisclosure(app, later, count: 3, expanded: true, weekly: true)
+        reviewLaterRevealSavedTask(app, savedID, anchorIDs: [fixture.firstTailID, fixture.waitingID, fixture.dueTailID])
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "task-title-", edited)).count, 1)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        XCTAssertFalse(app.staticTexts["review-error"].exists)
+        processEditorObserve(app, "UI13 new guide collapses Later while its added edited task survives cold launch once")
+        boardTap(app, "review-guide-close")
+    }
+
+    func testReviewLaterLargestDisclosureAndTaskReturnRemainReachable() throws {
+        continueAfterFailure = false
+        let library = try task371Library("LARGEST", prefix: "MINDWTR_REVIEW_LATER_UI_")
+        let fixture = try reviewLaterFixture()
+        let orientation = XCUIDevice.shared.orientation
+        defer { XCUIDevice.shared.orientation = orientation }
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library, largest: true)
+        app.launch(); defer { app.terminate() }
+        reviewLaterOpenOverview(app)
+        reviewLaterTap(app, "review-scope-all")
+        reviewLaterTap(app, "review-expand-cycle"); reviewLaterTap(app, "review-expand-cycle")
+        let overviewLater = "review-later-project:" + fixture.projectID
+        reviewLaterDisclosure(app, overviewLater, count: 2, expanded: false)
+        XCTAssertFalse(app.buttons["task-title-" + fixture.firstTailID].exists)
+        XCTAssertFalse(app.buttons["task-title-" + fixture.dueTailID].exists)
+        reviewLaterTap(app, overviewLater)
+        reviewLaterDisclosure(app, overviewLater, count: 2, expanded: true)
+        let tail = reviewLaterReveal(app, "task-title-" + fixture.dueTailID)
+        XCTAssertEqual(tail.label, "UI13 A due tail")
+        processEditorObserve(app, "UI13 largest text overview disclosed tail and full-size toggle remain reachable")
+        reviewLaterTap(app, overviewLater)
+        reviewLaterDisclosure(app, overviewLater, count: 2, expanded: false)
+        XCTAssertTrue(tail.waitForNonExistence(timeout: 30))
+        reviewLaterOpenProjects(app)
+        reviewLaterTap(app, "review-guide-project-" + fixture.projectID, weekly: true)
+        let later = "weekly-later-" + fixture.projectID
+        reviewLaterDisclosure(app, later, count: 2, expanded: false, weekly: true)
+        reviewLaterTap(app, later, weekly: true)
+        reviewLaterDisclosure(app, later, count: 2, expanded: true, weekly: true)
+        reviewLaterTap(app, "task-title-" + fixture.dueTailID, weekly: true)
+        boardEnabled(app.buttons["task-view-close"], timeout: 30)
+        boardTap(app, "task-view-close")
+        reviewLaterDisclosure(app, later, count: 2, expanded: true, weekly: true)
+        _ = reviewLaterReveal(app, "task-title-" + fixture.dueTailID, weekly: true)
+        processEditorObserve(app, "UI13 largest text Weekly Later disclosure survives task return with reachable rows")
+        reviewLaterTap(app, later, weekly: true)
+        reviewLaterDisclosure(app, later, count: 2, expanded: false, weekly: true)
+        XCTAssertFalse(app.buttons["task-title-" + fixture.dueTailID].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        XCTAssertFalse(app.staticTexts["review-error"].exists)
+        boardTap(app, "review-guide-close")
+        boardEnabled(app.buttons["review-start"], timeout: 30)
+    }
+}
+
+private struct ContextsFiltersUIFixture: Decodable {
+    let keepProjectID: String
+    let excludedProjectID: String
+    let firstID: String
+    let secondID: String
+    let excludedID: String
+    let nextID: String
+    let waitingID: String
+    let otherID: String
+    let tailFilterID: String
+}
+
+extension FoundationUITests {
+    private func contextsFiltersFixture() throws -> ContextsFiltersUIFixture {
+        let raw = try XCTUnwrap(ProcessInfo.processInfo.environment["MINDWTR_CONTEXTS_FILTERS_UI_IDS"])
+        return try JSONDecoder().decode(ContextsFiltersUIFixture.self, from: Data(raw.utf8))
+    }
+
+    private func contextsFiltersOpen(_ app: XCUIApplication) {
+        boardEnabled(app.buttons["capture-open"], timeout: 30)
+        boardTap(app, "tab-menu")
+        let menu = app.buttons["menu-contexts"]
+        boardEnabled(menu, timeout: 30)
+        let scroll = app.scrollViews.containing(.button, identifier: "menu-contexts").firstMatch
+        if scroll.exists { task467Reveal(app, menu, in: scroll, requireHittable: false) }
+        boardTap(app, "menu-contexts")
+        boardEnabled(app.buttons["contexts-filters"], timeout: 30)
+    }
+
+    private func contextsFiltersTap(_ app: XCUIApplication, _ id: String, picker: Bool = false) {
+        let button = app.buttons[id]
+        let scroll = app.scrollViews[picker ? "contexts-filter-picker-scroll" : "contexts-filter-overview-scroll"]
+        task467Reveal(app, button, in: scroll, requireHittable: false)
+        boardTap(app, id)
+    }
+
+    private func contextsFiltersSelected(_ app: XCUIApplication, _ id: String, _ selected: Bool) {
+        let button = app.buttons[id]
+        expectation(for: NSPredicate(format: "selected == %@ AND enabled == true", NSNumber(value: selected)), evaluatedWith: button)
+        waitForExpectations(timeout: 30)
+    }
+
+    private func contextsFiltersSomeday(_ app: XCUIApplication) {
+        boardTap(app, "contexts-filters")
+        for status in ["inbox", "next", "waiting", "someday"] {
+            contextsFiltersSelected(app, "contexts-filter-status-" + status, true)
+        }
+        for status in ["inbox", "next", "waiting"] {
+            contextsFiltersTap(app, "contexts-filter-status-" + status)
+            contextsFiltersSelected(app, "contexts-filter-status-" + status, false)
+        }
+        contextsFiltersSelected(app, "contexts-filter-status-someday", true)
+    }
+
+    private func contextsFiltersExclude(_ app: XCUIApplication, _ id: String) {
+        contextsFiltersTap(app, "contexts-filter-projects")
+        let option = "contexts-filter-project-" + id
+        contextsFiltersTap(app, option, picker: true)
+        contextsFiltersSelected(app, option, true)
+        let selected = app.buttons[option]
+        if !selected.isHittable, app.scrollViews["contexts-filter-picker-scroll"].frame.contains(selected.frame) {
+            selected.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        } else {
+            contextsFiltersTap(app, option, picker: true)
+        }
+        expectation(for: NSPredicate(format: "value == %@ AND enabled == true", "Excluded"), evaluatedWith: app.buttons[option])
+        waitForExpectations(timeout: 30)
+        boardTap(app, "contexts-panel-back")
+    }
+
+    private func contextsFiltersSavedTap(_ app: XCUIApplication, _ button: XCUIElement) {
+        let strip = app.scrollViews.containing(.button, identifier: button.identifier).firstMatch
+        task467Reveal(app, button, in: strip, horizontal: true, requireHittable: false)
+        boardEnabled(button, timeout: 30)
+        button.tap()
+    }
+
+    private func contextsFiltersRows(_ app: XCUIApplication, _ fixture: ContextsFiltersUIFixture) {
+        for id in [fixture.firstID, fixture.secondID] {
+            boardEnabled(app.buttons["task-title-" + id], timeout: 30)
+        }
+        for id in [fixture.excludedID, fixture.nextID, fixture.waitingID, fixture.otherID] {
+            XCTAssertFalse(app.buttons["task-title-" + id].exists)
+        }
+        XCTAssertFalse(app.staticTexts["contexts-error"].exists)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+    }
+
+    private func contextsFiltersRoute(_ app: XCUIApplication) {
+        let query = app.textFields["contexts-search"]
+        boardEnabled(query, timeout: 30); query.tap(); query.typeText("@ui10-home")
+        boardEnabled(app.buttons["contexts-chip-@ui10-home"], timeout: 30)
+        boardTap(app, "contexts-chip-@ui10-home")
+        contextsFiltersSelected(app, "contexts-chip-@ui10-home", true)
+        query.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        query.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "@ui10-home".count))
+        XCTAssertNotEqual(query.value as? String, "@ui10-home")
+        contextsFiltersSelected(app, "contexts-chip-@ui10-home", true)
+    }
+
+    private func contextsFiltersSaveDialog(_ app: XCUIApplication, _ name: String, cancel: Bool) {
+        boardEnabled(app.buttons["contexts-filter-save"], timeout: 30)
+        boardTap(app, "contexts-filter-save")
+        let input = app.textFields["focus-saved-name"]
+        boardEnabled(input, timeout: 30); input.tap(); input.typeText(name)
+        let id = cancel ? "focus-saved-cancel" : "focus-saved-confirm"
+        let scroll = app.scrollViews.containing(.button, identifier: id).firstMatch
+        if scroll.exists { task467Reveal(app, app.buttons[id], in: scroll, requireHittable: false) }
+        boardTap(app, id)
+        XCTAssertTrue(input.waitForNonExistence(timeout: 30))
+        boardEnabled(app.buttons["contexts-filters"], timeout: 30)
+    }
+
+    func testContextsFiltersProjectExclusionSaveCancelAndColdApply() throws {
+        continueAfterFailure = false
+        let library = try task371Library("NORMAL", prefix: "MINDWTR_CONTEXTS_FILTERS_UI_")
+        let fixture = try contextsFiltersFixture()
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library)
+        app.launch(); defer { app.terminate() }
+        contextsFiltersOpen(app)
+        let more = app.buttons["contexts-saved-filters-more"]
+        boardEnabled(more, timeout: 30)
+        contextsFiltersSavedTap(app, more)
+        let tail = app.buttons["contexts-saved-filter-" + fixture.tailFilterID]
+        contextsFiltersSavedTap(app, tail)
+        contextsFiltersSelected(app, tail.identifier, true)
+        contextsFiltersRows(app, fixture)
+        contextsFiltersSavedTap(app, tail)
+        contextsFiltersSelected(app, tail.identifier, false)
+        contextsFiltersRoute(app)
+        contextsFiltersSomeday(app)
+        contextsFiltersExclude(app, fixture.excludedProjectID)
+        boardTap(app, "contexts-filters-close")
+        boardEnabled(app.buttons["contexts-sort"], timeout: 30)
+        contextsFiltersRows(app, fixture)
+        XCTAssertTrue(app.buttons["contexts-chip-@ui10-home"].isSelected)
+        boardTap(app, "contexts-sort"); boardTap(app, "contexts-sort-title")
+        XCTAssertTrue(app.buttons["contexts-sort-close"].waitForNonExistence(timeout: 30))
+        contextsFiltersRows(app, fixture)
+        XCTAssertLessThan(app.buttons["task-title-" + fixture.firstID].frame.minY, app.buttons["task-title-" + fixture.secondID].frame.minY)
+        XCTAssertTrue(app.buttons["contexts-chip-@ui10-home"].isSelected)
+        boardTap(app, "contexts-filters")
+        let canceled = "UI10 canceled " + String(library.prefix(8))
+        contextsFiltersSaveDialog(app, canceled, cancel: true)
+        contextsFiltersRows(app, fixture)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "contexts-saved-filter-", canceled)).firstMatch.exists)
+        boardTap(app, "contexts-filters")
+        let name = "UI10 saved " + String(library.prefix(8))
+        contextsFiltersSaveDialog(app, name, cancel: false)
+        let saved = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "contexts-saved-filter-", name)).firstMatch
+        boardEnabled(saved, timeout: 30)
+        let savedID = saved.identifier
+        contextsFiltersSelected(app, savedID, true)
+        contextsFiltersRows(app, fixture)
+        XCTAssertTrue(app.buttons["contexts-chip-all"].isSelected)
+        XCTAssertFalse(app.buttons["contexts-chip-@ui10-home"].isSelected)
+        processEditorObserve(app, "UI10 Contexts Someday/excluded project/route scope saved through the existing durable writer")
+        app.terminate(); app.launch()
+        contextsFiltersOpen(app)
+        if app.buttons["contexts-saved-filters-more"].exists {
+            contextsFiltersSavedTap(app, app.buttons["contexts-saved-filters-more"])
+        }
+        if !app.buttons[savedID].isSelected { contextsFiltersSavedTap(app, app.buttons[savedID]) }
+        contextsFiltersSelected(app, savedID, true)
+        contextsFiltersRows(app, fixture)
+        boardTap(app, "contexts-sort")
+        boardEnabled(app.buttons["contexts-sort-title"], timeout: 30)
+        XCTAssertTrue(app.buttons["contexts-sort-title"].isSelected)
+        boardTap(app, "contexts-sort-close")
+        contextsFiltersRows(app, fixture)
+        processEditorObserve(app, "UI10 named Contexts filter and title sort survive cold launch and saved-chip apply")
+    }
+
+    func testContextsFiltersLargestSheetPickerAndSaveCancelRemainReachable() throws {
+        continueAfterFailure = false
+        let library = try task371Library("LARGEST", prefix: "MINDWTR_CONTEXTS_FILTERS_UI_")
+        let fixture = try contextsFiltersFixture()
+        let orientation = XCUIDevice.shared.orientation
+        defer { XCUIDevice.shared.orientation = orientation }
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication(bundleIdentifier: "tech.dongdongbh.mindwtr.native.dev")
+        app.launchArguments = task192Arguments(library, largest: true)
+        app.launch(); defer { app.terminate() }
+        contextsFiltersOpen(app)
+        contextsFiltersRoute(app)
+        contextsFiltersSomeday(app)
+        contextsFiltersExclude(app, fixture.excludedProjectID)
+        XCTAssertGreaterThanOrEqual(app.buttons["contexts-filter-save"].frame.height, 44 - 0.5)
+        contextsFiltersSaveDialog(app, "UI10 largest canceled", cancel: true)
+        contextsFiltersRows(app, fixture)
+        boardTap(app, "contexts-filters")
+        boardTap(app, "contexts-filters-clear")
+        boardTap(app, "contexts-filters-close")
+        expectation(for: NSPredicate(format: "label == %@ AND enabled == true", "@ui10-home (5)"), evaluatedWith: app.buttons["contexts-chip-@ui10-home"])
+        waitForExpectations(timeout: 30)
+        XCTAssertTrue(app.buttons["contexts-chip-@ui10-home"].isSelected)
+        XCTAssertFalse(app.buttons["persistence-retry"].exists)
+        processEditorObserve(app, "UI10 largest text status, tri-state project picker and save-name cancel remain reachable")
     }
 }

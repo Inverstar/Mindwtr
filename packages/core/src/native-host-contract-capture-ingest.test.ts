@@ -3,7 +3,7 @@ import { createNativeHostContract, type NativeHostResult } from './native-host-c
 import type { PendingCaptureAudioPort, PendingCaptureQueuePort, PendingCaptureRecordPort } from './pending-captures';
 import { acquireWorkspaceTransitionLock } from './sandbox';
 import { openScreenHost, requestId, restartScreenHost, value } from './screen-parity.replay';
-import { flushPendingSave, resetForTests, useTaskStore } from './store';
+import { flushPendingSave, getStorageAdapter, resetForTests, useTaskStore } from './store';
 import type { Task } from './types';
 
 const CAPTURE_ID = '0b6f1c4e-7a3d-4c55-9e21-4f7a8a1d2c01';
@@ -21,7 +21,7 @@ const task = (id: string, props: Partial<Task> = {}): Task => ({
     ...props,
 } as Task);
 
-/** The queue directory as the native file bridge would show it. `failDelete` files throw on their next delete, as a kill before the delete. */
+
 function fakeQueue(files: Record<string, unknown>) {
     const stored = new Map(Object.entries(files).map(([name, body]) => [name, JSON.stringify(body)]));
     const failDelete = new Set<string>();
@@ -36,7 +36,7 @@ function fakeQueue(files: Record<string, unknown>) {
     return { port, stored, failDelete };
 }
 
-// The device's record of applied commands (RN's RKStorage value); it survives a restart.
+
 let deviceRecord: string | null = null;
 const record = (): PendingCaptureRecordPort => ({ read: async () => deviceRecord, write: async (value) => { deviceRecord = value; } });
 
@@ -57,7 +57,7 @@ const storeData = () => {
     return [state._allTasks, state._allProjects, state._allSections, state._allAreas, state._allPeople, state.settings];
 };
 
-/** Replays a request on a new host, as after a restart, and says whether the store changed. */
+
 async function replayAfterRestart<T>(replay: (host: ReturnType<typeof createNativeHostContract>) => Promise<NativeHostResult<T>> | NativeHostResult<T>) {
     const host = await restartScreenHost();
     const before = storeData();
@@ -65,7 +65,7 @@ async function replayAfterRestart<T>(replay: (host: ReturnType<typeof createNati
     return { result, wrote: storeData().some((entry, index) => entry !== before[index]) };
 }
 
-/** As after process death: memory is gone and the store loads what was saved. */
+
 async function reloadStore() {
     await flushPendingSave();
     useTaskStore.setState({ _allTasks: [], _allProjects: [], _allSections: [], _allAreas: [], _allPeople: [], settings: {}, lastDataChangeAt: 0 } as never);
@@ -111,13 +111,29 @@ describe('ingestPendingCaptures', () => {
         expect(vi.mocked(queue.port.delete).mock.calls.map(([name]) => name)).not.toContain('timer.json');
     });
 
+    it('validates the optional audio port before queue access and passes an owned port to shared assembly', async () => {
+        const host = await openScreenHost({ data: {}, record: {}, log: [] });
+        const queue = fakeQueue({ [`${AUDIO_ID}.json`]: queueItems[`${AUDIO_ID}.json`] });
+        for (const audio of [null, {}, { resolvePath: () => '/owned', delete: async () => undefined, transcribe: true },
+            { resolvePath: () => '/owned', delete: async () => undefined, extra: true }]) {
+            expect(await host.ingestPendingCaptures({ requestId: requestId(), queue: queue.port, lastApplied: record(), audio } as never))
+                .toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+        }
+        expect(queue.port.list).not.toHaveBeenCalled();
+        const audio = { resolvePath: () => '/owned', transcribe: vi.fn(async () => 'Transcript /next'), delete: vi.fn(async () => undefined) };
+        expect(value(await host.ingestPendingCaptures({ requestId: requestId(), queue: queue.port, lastApplied: record(), audio })))
+            .toEqual({ ingested: 1 });
+        expect(useTaskStore.getState()._allTasks.find(task => task.id === AUDIO_ID)).toMatchObject({ title: 'Transcript', status: 'next' });
+        expect(audio.transcribe).toHaveBeenCalledOnce(); expect(audio.delete).toHaveBeenCalledOnce();
+    });
+
     it('replayed after a restart that followed a kill between the save and the deletes, stores nothing twice', async () => {
         const host = await openScreenHost({ data: { tasks: [task('open'), task('later')] }, record: {}, log: [] });
         const queue = fakeQueue(queueItems);
         for (const name of Object.keys(queueItems)) queue.failDelete.add(name);
         const request = requestId();
 
-        // Stored, but every file stays: owed (the journal keeps the request), not a success.
+
         expect(await host.ingestPendingCaptures({ requestId: request, queue: queue.port, lastApplied: record() }))
             .toMatchObject({ ok: false, error: { code: 'SAVE_FAILED' } });
         expect(queue.stored.size).toBe(6);
@@ -145,7 +161,7 @@ describe('ingestPendingCaptures', () => {
 
         const first = host.ingestPendingCaptures({ requestId: requestId(), queue: queue.port, lastApplied: record() });
         await vi.advanceTimersByTimeAsync(30_000);
-        // Stored but not saved: owed (the journal keeps the request), never a success.
+
         expect(await first).toMatchObject({ ok: false, error: { code: 'SAVE_FAILED' } });
         expect(queue.port.delete).not.toHaveBeenCalled();
         expect(useTaskStore.getState().persistenceFailure).not.toBeNull();
@@ -161,7 +177,7 @@ describe('ingestPendingCaptures', () => {
 
     it('owes a check-off whose applied-command record did not reach the disk, removes its file, so a reopen stays open', async () => {
         const host = await openScreenHost({ data: { tasks: [task('open')] }, record: {}, log: [] });
-        // Tapped a minute ago: an older completion would be archived by the reload's auto-archive.
+
         const checkOff = { kind: 'complete', id: 'c9', taskId: 'open', createdAt: new Date(Date.now() - 60_000).toISOString(), source: 'android-widget' };
         const queue = fakeQueue({ 'c.json': checkOff });
         let failRecord = true;
@@ -171,20 +187,19 @@ describe('ingestPendingCaptures', () => {
         };
         const request = requestId();
 
-        // The check-off is stored and saved, but its record is not on disk: a retryable failure, never a success. Its file goes
-        // anyway, so nothing can apply it again.
+
         expect(await host.ingestPendingCaptures({ requestId: request, queue: queue.port, lastApplied: flaky }))
             .toMatchObject({ ok: false, error: { code: 'SAVE_FAILED' } });
         expect(queue.stored.has('c.json')).toBe(false);
         expect(deviceRecord).toBeNull();
 
-        // The journal kept the request: its replay after a restart finds nothing left.
+
         failRecord = false;
         await reloadStore();
         const restarted = await restartScreenHost();
         expect(value(await restarted.ingestPendingCaptures({ requestId: request, queue: queue.port, lastApplied: flaky }))).toEqual({ ingested: 0 });
 
-        // Reopened after the recovery, the task stays open through the next restart's drain.
+
         await useTaskStore.getState().updateTask('open', { status: 'next' });
         await reloadStore();
         const again = await restartScreenHost();
@@ -219,7 +234,7 @@ describe('ingestPendingCaptures', () => {
 
     it('never lets a later item\'s throw hide an earlier item that landed unfinished', async () => {
         const host = await openScreenHost({ data: { tasks: [task('open')] }, record: {}, log: [] });
-        // A: a check-off that lands, but its record write fails. B: a capture whose store write throws.
+
         const checkOff = { kind: 'complete', id: 'a1', taskId: 'open', createdAt: new Date(Date.now() - 60_000).toISOString(), source: 'android-widget' };
         const queue = fakeQueue({ 'a.json': checkOff, [`b-${CAPTURE_ID}.json`]: { kind: 'text', id: CAPTURE_ID, title: 'B', source: 'android-capture-intent' } });
         let failRecord = true;
@@ -237,13 +252,58 @@ describe('ingestPendingCaptures', () => {
         }
         expect(useTaskStore.getState()._allTasks.find((entry) => entry.id === 'open')?.status).toBe('done');
 
-        // The user reopens A (after the owed retry, on the native host); a fresh drain keeps it open and stores B.
+
         failRecord = false;
         await useTaskStore.getState().updateTask('open', { status: 'next' });
         expect(value(await host.ingestPendingCaptures({ requestId: requestId(), queue: queue.port, lastApplied: flaky }))).toEqual({ ingested: 1 });
         expect(useTaskStore.getState()._allTasks.find((entry) => entry.id === 'open')?.status).toBe('next');
         expect(useTaskStore.getState()._allTasks.filter((entry) => entry.id === CAPTURE_ID)).toHaveLength(1);
         expect(queue.stored.size).toBe(0);
+    });
+
+    it('settles Watch checklist only after durable task and ordering writes, and retains a failed receipt for replay', async () => {
+        const original = task('checklist', { checklist: [{ id: 'item', title: 'Milk', isCompleted: false }] });
+        const host = await openScreenHost({ data: { tasks: [original] }, record: {}, log: [] });
+        const command = { kind: 'checklist', id: CAPTURE_ID, taskId: original.id,
+            taskCreatedAt: original.createdAt, itemId: 'item', itemTitle: 'Milk', isCompleted: true,
+            createdAt: '2026-10-30T12:00:00.000Z', source: 'apple-watch' };
+        const queue = fakeQueue({ 'checklist.json': command });
+        let failReceipt = true;
+        const settleWatchChecklist = vi.fn(async (id: string, outcome: string) => {
+            expect(id).toBe(CAPTURE_ID);
+            expect(outcome).toBe('applied');
+            expect(deviceRecord).toContain(CAPTURE_ID);
+            const saved = await getStorageAdapter().getData();
+            expect(saved?.tasks.find(t => t.id === original.id)?.checklist?.[0].isCompleted).toBe(true);
+            expect(queue.stored.has('checklist.json')).toBe(true);
+            if (failReceipt) throw new Error('receipt not durable');
+        });
+        expect(await host.ingestPendingCaptures({ requestId: requestId(), queue: queue.port,
+            lastApplied: record(), settleWatchChecklist })).toMatchObject({ ok: false, error: { code: 'SAVE_FAILED' } });
+        expect(queue.stored.has('checklist.json')).toBe(true);
+        failReceipt = false;
+        const restarted = await restartScreenHost();
+        const before = useTaskStore.getState()._allTasks;
+        expect(value(await restarted.ingestPendingCaptures({ requestId: requestId(), queue: queue.port,
+            lastApplied: record(), settleWatchChecklist }))).toEqual({ ingested: 1 });
+        expect(useTaskStore.getState()._allTasks).toEqual(before);
+        expect(settleWatchChecklist).toHaveBeenCalledTimes(2);
+        expect(queue.stored.size).toBe(0);
+    });
+
+    it('retains Watch checklist without a settlement port and rejects a malformed port before reading', async () => {
+        const original = task('checklist', { checklist: [{ id: 'item', title: 'Milk', isCompleted: false }] });
+        const host = await openScreenHost({ data: { tasks: [original] }, record: {}, log: [] });
+        const queue = fakeQueue({ 'checklist.json': { kind: 'checklist', id: CAPTURE_ID, taskId: original.id,
+            taskCreatedAt: original.createdAt, itemId: 'item', itemTitle: 'Milk', isCompleted: true,
+            createdAt: '2026-10-30T12:00:00.000Z', source: 'apple-watch' } });
+        expect(await host.ingestPendingCaptures({ requestId: requestId(), queue: queue.port,
+            lastApplied: record(), settleWatchChecklist: true as never })).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+        expect(queue.port.list).not.toHaveBeenCalled();
+        expect(await host.ingestPendingCaptures({ requestId: requestId(), queue: queue.port,
+            lastApplied: record() })).toMatchObject({ ok: false, error: { code: 'ACTION_FAILED' } });
+        expect(queue.stored.size).toBe(1);
+        expect(useTaskStore.getState()._allTasks.find(t => t.id === original.id)?.checklist?.[0].isCompleted).toBe(false);
     });
 
     it('reads nothing during a workspace switch', async () => {
@@ -259,7 +319,7 @@ describe('ingestPendingCaptures', () => {
     });
 });
 
-/** The widget's WAVs as Kotlin's files would show them; `transcript` is what the host's speech provider answers (null: none set up). */
+
 function fakeAudio(transcript: () => string | null) {
     const wavs = new Set([`file:///data/files/quick-capture-audio/${AUDIO_ID}.wav`]);
     const port: PendingCaptureAudioPort = {
@@ -282,11 +342,11 @@ describe('ingestPendingAudio', () => {
         expect(created.map((entry) => [entry.title, entry.status])).toEqual([['Buy milk', 'inbox']]);
         expect(queue.stored.has(`${AUDIO_ID}.json`)).toBe(false);
         expect(audio.wavs.size).toBe(0);
-        // Text captures, check-offs, defers and Pomodoro commands stay for the journaled ingest.
+
         expect([...queue.stored.keys()].sort()).toEqual([`${CAPTURE_ID}.json`, `${INTENT_ID}.json`, 'c.json', 'd.json', 'timer.json']);
         expect(useTaskStore.getState()._allTasks.find((entry) => entry.id === 'open')?.status).toBe('next');
 
-        // Again (the file already gone): nothing twice.
+
         expect(value(await host.ingestPendingAudio({ queue: queue.port, lastApplied: record(), audio: audio.port }))).toEqual({ ingested: 0 });
         expect(useTaskStore.getState()._allTasks.filter((entry) => entry.id === AUDIO_ID)).toHaveLength(1);
     });

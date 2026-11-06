@@ -1,8 +1,9 @@
 import CoreFoundation
+import CryptoKit
 import Darwin
 import Foundation
 
-/// Independent callback acceptance only. Domain admission and receipt protection belong to the dispatcher.
+
 public actor NativeReminderInbox {
     public enum Stage: String, Sendable { case captured, admitting }
     public struct Item: Equatable, Sendable {
@@ -10,15 +11,115 @@ public actor NativeReminderInbox {
         public let stage: Stage
     }
 
-    private let files: ReminderInboxFiles
+    struct Seal: Equatable, Sendable { fileprivate let identifier: UUID }
+    struct SealedExport: Sendable {
+        struct Active: Sendable { let sequence: Int64; let item: Item }
+        struct Terminal: Sendable { let requestID: String; let deliveredAtBits: String }
+        let namespace: String
+        let nextSequence: Int64
+        let active: [Active]
+        let terminal: [Terminal]
+        let retiredThrough: String?
+        let sourceGeneration: Data
+    }
+    struct HeldReplayProof: Equatable, Sendable {
+        let origin: Data
+        let generation: Data
+        fileprivate init(origin: Data, generation: Data) { self.origin = origin; self.generation = generation }
+    }
+    struct SealDiagnostic: Sendable {
+        let message = "Native iOS legacy reminder owner sealed"
+        let releaseCheck = "v1.3.9/ios-personal-intake-seal"
+        let operation = "seal"
+        let outcome = "confirmed"
+    }
+    struct ImportDiagnostic: Sendable {
+        let message = "Native iOS sealed reminder import completed"
+        let releaseCheck = "v1.3.9/ios-personal-intake-import"
+        let operation = "import"
+        let outcome = "confirmed"
+    }
 
-    /// The selected container must already exist; only its selected library descendants may be created.
+    private let files: ReminderInboxFiles
+    private var sealed: (token: Seal, origin: Data, generation: Data)?
+    private weak var confirmedImportDestination: NativePersonalIntake?
+    private var confirmedImportGeneration: Data?
+    #if DEBUG
+    private var importAcknowledgementBarrier: (@Sendable () async -> Void)?
+    #endif
+
+    public static func validateForPersonalIntake(_ response: NativeReminderResponse, namespace: String) throws {
+        try ReminderInboxState.validate(response, namespace: namespace)
+    }
+    static func validateTerminalForPersonalIntake(_ id: String, deliveredAtBits: String) throws -> Double {
+        guard ReminderInboxState.uuid(id) else { throw ReminderInboxFiles.failure }
+        return try ReminderInboxState.delivery(deliveredAtBits)
+    }
+    static func deliveryForPersonalIntake(_ bits: String) throws -> Double { try ReminderInboxState.delivery(bits) }
+
+
     public init(selection: NativeLaunchSelection) throws {
         do { files = try ReminderInboxFiles(selection: selection) }
         catch { throw ReminderInboxFiles.failure }
     }
 
+    public static func openExistingForHandover(selection: NativeLaunchSelection) throws -> NativeReminderInbox {
+        try NativeReminderInbox(existingSelection: selection)
+    }
+    private init(existingSelection selection: NativeLaunchSelection) throws {
+        do { files = try ReminderInboxFiles(selection: selection, requireExisting: true) }
+        catch { throw ReminderInboxFiles.failure }
+    }
+    public enum CaptureHandoverFailure: Error, Equatable, Sendable { case refused, unavailable }
+    public func prepareEmptySourceForPersonalIntake(route: NativePersonalIntakeRoute) throws {
+        do {
+            try files.prepareEmptySourceForPersonalIntake(route: route)
+            if let sealed { _ = try exportSealed(sealed.token, route: route) }
+        } catch let failure as CaptureHandoverFailure { throw failure }
+        catch { throw CaptureHandoverFailure.unavailable }
+    }
+    public func handoverCaptures(into destination: NativePersonalIntake, route: NativePersonalIntakeRoute) async throws {
+        let alreadySealed = sealed != nil
+        let token: Seal
+        do { token = try sealForPersonalIntake(route: route, diagnostic: { _ in }) }
+        catch { throw alreadySealed ? CaptureHandoverFailure.unavailable : CaptureHandoverFailure.refused }
+        do { try await importSealed(token, into: destination, route: route, diagnostic: { _ in }) }
+        catch { throw CaptureHandoverFailure.unavailable }
+    }
+
+    public func admitHeldReminder(_ item: NativePersonalIntake.Item, in destination: NativePersonalIntake,
+                                  route: NativePersonalIntakeRoute) async throws -> NativePersonalIntake.Item {
+        let proof = try heldReplayProof(destination: destination, route: route)
+        let admitted = try await destination.admitHeldReminder(item, proof: proof)
+        guard try heldReplayProof(destination: destination, route: route) == proof else { throw ReminderInboxFiles.failure }
+        return admitted
+    }
+
+    public func heldReminderDispatchItem(_ admitted: NativePersonalIntake.Item, in destination: NativePersonalIntake,
+                                         route: NativePersonalIntakeRoute) async throws -> Item {
+        let proof = try heldReplayProof(destination: destination, route: route)
+        let response = try await destination.heldReminderResponse(admitted, proof: proof)
+        guard try heldReplayProof(destination: destination, route: route) == proof else { throw ReminderInboxFiles.failure }
+        return .init(response: response, stage: .admitting)
+    }
+
+    public func finishHeldReminder(_ originalAdmittingItem: NativePersonalIntake.Item, outcome: NativePersonalIntake.Outcome,
+                                   in destination: NativePersonalIntake, route: NativePersonalIntakeRoute) async throws -> NativePersonalIntake.FinishSettlement {
+        let proof = try heldReplayProof(destination: destination, route: route)
+        let settlement = try await destination.finishHeldReminder(originalAdmittingItem, outcome: outcome, proof: proof)
+        guard try heldReplayProof(destination: destination, route: route) == proof else { throw ReminderInboxFiles.failure }
+        return settlement
+    }
+
+    private func heldReplayProof(destination: NativePersonalIntake, route: NativePersonalIntakeRoute) throws -> HeldReplayProof {
+        guard !Task.isCancelled, let sealed, confirmedImportDestination === destination,
+              confirmedImportGeneration == sealed.generation else { throw ReminderInboxFiles.failure }
+        let source = try exportSealed(sealed.token, route: route)
+        return .init(origin: route.descriptor, generation: source.sourceGeneration)
+    }
+
     public func capture(_ response: NativeReminderResponse) throws -> Item? {
+        try requireUnsealed()
         try files.check()
         do { try ReminderInboxState.validate(response, namespace: files.namespace) }
         catch { throw ReminderInboxFiles.failure }
@@ -48,6 +149,7 @@ public actor NativeReminderInbox {
     }
 
     public func markAdmitting(_ requestID: String) throws -> Item {
+        try requireUnsealed()
         try files.check()
         guard let index = files.state.active.firstIndex(where: { $0.response.requestID == requestID }) else {
             throw ReminderInboxFiles.failure
@@ -60,6 +162,7 @@ public actor NativeReminderInbox {
     }
 
     public func finish(_ item: Item) throws {
+        try requireUnsealed()
         try files.check()
         guard item.stage == .admitting else { throw ReminderInboxFiles.failure }
         do { try ReminderInboxState.validate(item.response, namespace: files.namespace) }
@@ -89,7 +192,7 @@ public actor NativeReminderInbox {
                 try ReminderInboxState.delivery($0.deliveredAtBits) < ReminderInboxState.delivery($1.deliveredAtBits)
             }
             let floor = ordered[next.tombstones.count - 16_384 - 1].deliveredAtBits
-            // shortcut: deliveries at or below the terminal-capacity floor refuse, raise the bound if late callbacks need longer retention.
+
             next.retiredThrough = floor
             next.tombstones = try next.tombstones.filter {
                 try ReminderInboxState.delivery($0.deliveredAtBits) > ReminderInboxState.delivery(floor)
@@ -98,11 +201,58 @@ public actor NativeReminderInbox {
         try files.publish(next)
     }
 
-    public func retry() throws { try files.retry() }
+    public func retry() throws { try requireUnsealed(); try files.retry() }
     public func close() { files.close() }
 
+    func sealForPersonalIntake(route: NativePersonalIntakeRoute,
+                               diagnostic: @Sendable (SealDiagnostic) -> Void) throws -> Seal {
+        let generation = try files.checkedSealGeneration(route: route)
+        if let sealed {
+            guard sealed.origin == route.descriptor, sealed.generation == generation else { throw ReminderInboxFiles.failure }
+            return sealed.token
+        }
+        let token = Seal(identifier: UUID())
+        sealed = (token, route.descriptor, generation)
+        diagnostic(.init())
+        return token
+    }
+
+    func exportSealed(_ token: Seal, route: NativePersonalIntakeRoute) throws -> SealedExport {
+        guard let sealed, sealed.token == token, sealed.origin == route.descriptor else { throw ReminderInboxFiles.failure }
+        let exported = SealedExport(namespace: files.namespace, nextSequence: files.state.nextSequence,
+            active: files.state.active.map { .init(sequence: $0.sequence, item: $0.item) },
+            terminal: files.state.tombstones.map { .init(requestID: $0.requestID, deliveredAtBits: $0.deliveredAtBits) },
+            retiredThrough: files.state.retiredThrough, sourceGeneration: sealed.generation)
+        guard try files.checkedSealGeneration(route: route) == sealed.generation else { throw ReminderInboxFiles.failure }
+        return exported
+    }
+
+    func importSealed(_ token: Seal, into destination: NativePersonalIntake, route: NativePersonalIntakeRoute,
+                      diagnostic: @Sendable (ImportDiagnostic) -> Void) async throws {
+        guard !Task.isCancelled else { throw ReminderInboxFiles.failure }
+        let original = try exportSealed(token, route: route)
+        let acknowledgement = try await destination.importSealedReminders(from: self, seal: token, route: route)
+        #if DEBUG
+        await importAcknowledgementBarrier?()
+        #endif
+        try acknowledgement.confirm {
+            guard !Task.isCancelled else { throw ReminderInboxFiles.failure }
+            let current = try exportSealed(token, route: route)
+            guard current.sourceGeneration == original.sourceGeneration else { throw ReminderInboxFiles.failure }
+            if confirmedImportDestination !== destination || confirmedImportGeneration != original.sourceGeneration {
+                confirmedImportDestination = destination; confirmedImportGeneration = original.sourceGeneration
+                diagnostic(.init())
+            }
+        }
+    }
+
+    private func requireUnsealed() throws {
+        guard sealed == nil else { throw ReminderInboxFiles.failure }
+    }
+
     #if DEBUG
-    func setIOFaults(beforePublication: (() throws -> Void)? = nil, afterPublication: (() throws -> Void)? = nil) {
+    public func setImportAcknowledgementBarrier(_ barrier: (@Sendable () async -> Void)?) { importAcknowledgementBarrier = barrier }
+    public func setIOFaults(beforePublication: (() throws -> Void)? = nil, afterPublication: (() throws -> Void)? = nil) {
         files.beforePublication = beforePublication
         files.afterPublication = afterPublication
     }
@@ -236,7 +386,7 @@ private struct ReminderInboxState {
     }
 
     func encode(namespace: String) throws -> Data {
-        // Bound the outer JSON's escaping before materializing its entire encoded file.
+
         func quotedBound(_ text: String) -> Int {
             text.unicodeScalars.reduce(2) { size, scalar in
                 size + ([8, 9, 10, 12, 13].contains(scalar.value) ? 2 : scalar.value < 32 ? 6 : scalar.value == 34 || scalar.value == 92 ? 2
@@ -263,7 +413,7 @@ private struct ReminderInboxState {
     }
 }
 
-/// Synchronous FD ownership keeps actor operations free of suspension during a disk transaction.
+
 private final class ReminderInboxFiles {
     static let byteLimit = 24 * 1024 * 1024
     static var failure: HostFailure { HostFailure("Native reminder response storage is unavailable") }
@@ -287,6 +437,7 @@ private final class ReminderInboxFiles {
     }
 
     let namespace: String
+    private let selection: NativeLaunchSelection
     private let rootPath: String
     private var directories: [Directory] = []
     private var lockFD: Int32 = -1
@@ -296,15 +447,20 @@ private final class ReminderInboxFiles {
     private var attempt: Attempt?
     private var closed = false
     private var poisoned = false
+    private var initiallyAbsent = false
     private(set) var state = ReminderInboxState()
     #if DEBUG
     var beforePublication: (() throws -> Void)?
     var afterPublication: (() throws -> Void)?
     #endif
 
-    init(selection: NativeLaunchSelection) throws {
+    init(selection: NativeLaunchSelection, requireExisting: Bool = false) throws {
+        self.selection = selection
         let database: URL, container: URL
         switch selection {
+        case let .production(owner):
+            database = owner.appendingPathComponent("Documents/SQLite/mindwtr.db")
+            container = owner; namespace = NativeLaunchSelection.productionNamespace
         case let .standard(databaseURL, containerURL, name), let .isolated(databaseURL, containerURL, name, _):
             database = databaseURL; container = containerURL; namespace = name
         case .rehearsal: throw Self.failure
@@ -322,9 +478,9 @@ private final class ReminderInboxFiles {
             guard fd >= 0 else { throw Self.failure }
             do { directories.append(.init(name: "", fd: fd, identity: Identity(try Self.directoryStat(fd)))) }
             catch { Darwin.close(fd); throw error }
-            for name in parentParts.dropFirst(rootParts.count) { try appendDirectory(name) }
-            try appendDirectory("NotificationResponses")
-            lockFD = openat(try directoryFD(), ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+            for name in parentParts.dropFirst(rootParts.count) { try appendDirectory(name, creating: !requireExisting) }
+            try appendDirectory("NotificationResponses", creating: !requireExisting)
+            lockFD = openat(try directoryFD(), ".lock", O_RDWR | (requireExisting ? 0 : O_CREAT) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
             guard lockFD >= 0 else { throw Self.failure }
             lockGeneration = try Self.fileStat(lockFD)
             guard flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { throw Self.failure }
@@ -336,8 +492,9 @@ private final class ReminderInboxFiles {
                 state = try ReminderInboxState.decode(snapshot.bytes, namespace: namespace)
                 try synchronize(snapshot)
             } else {
-                guard fsync(try directoryFD()) == 0 else { throw Self.failure }
+                guard !requireExisting, fsync(try directoryFD()) == 0 else { throw Self.failure }
                 try verifyNamespace(); try verifyAbsent()
+                initiallyAbsent = true
             }
         } catch { close(); throw Self.failure }
     }
@@ -359,6 +516,42 @@ private final class ReminderInboxFiles {
             try verifyNamespace()
             guard Self.matches(try read(), snapshot) else { throw Self.failure }
         } catch { poisoned = true; throw Self.failure }
+    }
+    func checkedSealGeneration(route: NativePersonalIntakeRoute) throws -> Data {
+        try check()
+        guard hasLease, let snapshot, let lockGeneration,
+              try Self.sameSelection(selection, route.selection) else { throw Self.failure }
+        let values = [route.fingerprint, SHA256.hash(data: snapshot.bytes).map { String(format: "%02x", $0) }.joined(),
+                      Self.generationText(snapshot.generation), Self.generationText(lockGeneration)]
+            + directories.map { "\($0.identity.device):\($0.identity.inode)" }
+        return Data(SHA256.hash(data: Data(values.joined(separator: "|").utf8)))
+    }
+    func prepareEmptySourceForPersonalIntake(route: NativePersonalIntakeRoute) throws {
+        try check()
+        guard try Self.sameSelection(selection, route.selection) else { throw NativeReminderInbox.CaptureHandoverFailure.refused }
+        guard snapshot == nil else { return }
+        guard hasLease, lockGeneration != nil, initiallyAbsent,
+              state.nextSequence == 1, state.active.isEmpty, state.tombstones.isEmpty,
+              state.retiredThrough == nil else { throw Self.failure }
+        initiallyAbsent = false
+        try publish(state)
+    }
+    private static func sameSelection(_ lhs: NativeLaunchSelection, _ rhs: NativeLaunchSelection) throws -> Bool {
+        func same(_ a: URL, _ b: URL) throws -> Bool {
+            try Data(NativeAttachmentFiles.filePath(a.absoluteString).utf8) == Data(NativeAttachmentFiles.filePath(b.absoluteString).utf8)
+        }
+        switch (lhs, rhs) {
+        case let (.production(a), .production(b)):
+            return try same(a, b)
+        case let (.standard(a, b, c), .standard(x, y, z)):
+            return try c == z && same(a, x) && same(b, y)
+        case let (.isolated(a, b, c, d), .isolated(x, y, z, w)):
+            return try c == z && d == w && same(a, x) && same(b, y)
+        default: return false
+        }
+    }
+    private static func generationText(_ value: stat) -> String {
+        "\(value.st_dev):\(value.st_ino):\(value.st_mode):\(value.st_nlink):\(value.st_size):\(value.st_mtimespec.tv_sec):\(value.st_mtimespec.tv_nsec):\(value.st_ctimespec.tv_sec):\(value.st_ctimespec.tv_nsec)"
     }
     func publish(_ state: ReminderInboxState) throws {
         let bytes: Data
@@ -391,7 +584,7 @@ private final class ReminderInboxFiles {
             #if DEBUG
             try beforePublication?()
             #endif
-            // Recheck after the seam and immediately before writing through the pinned directory.
+
             try verifyNamespace()
             guard Self.matches(try read(), pending.before) else { poisoned = true; throw Self.failure }
             pending.release()
@@ -424,11 +617,13 @@ private final class ReminderInboxFiles {
             guard Self.matches(try read(), file) else { poisoned = true; throw Self.failure }
         } catch { throw Self.failure }
     }
-    private func appendDirectory(_ name: String) throws {
+    private func appendDirectory(_ name: String, creating: Bool = true) throws {
         guard let parent = directories.last else { throw Self.failure }
-        if mkdirat(parent.fd, name, 0o700) == 0 {
-            guard fsync(parent.fd) == 0 else { throw Self.failure }
-        } else if errno != EEXIST { throw Self.failure }
+        if creating {
+            if mkdirat(parent.fd, name, 0o700) == 0 {
+                guard fsync(parent.fd) == 0 else { throw Self.failure }
+            } else if errno != EEXIST { throw Self.failure }
+        }
         let fd = openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw Self.failure }
         do { directories.append(.init(name: name, fd: fd, identity: Identity(try Self.directoryStat(fd)))) }

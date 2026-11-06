@@ -7,6 +7,17 @@ import {
 } from './filter-criteria';
 
 describe('filter-criteria', () => {
+    it('round trips optional status and project exclusion selections without adding empty legacy fields', () => {
+        const selections = { projects: ['included'], excludedProjects: ['excluded'], statuses: ['someday' as const] };
+        const criteria = criteriaFromSelections(selections);
+        expect(criteria).toEqual(selections);
+        expect(selectionsFromCriteria(criteria)).toMatchObject(selections);
+        expect(countActiveFilterCriteria(criteria)).toBe(3);
+        expect(criteriaFromSelections({})).toEqual({});
+        expect(selectionsFromCriteria({})).not.toHaveProperty('excludedProjects');
+        expect(selectionsFromCriteria({})).not.toHaveProperty('statuses');
+    });
+
     it('splits mixed tokens into contexts and tags and omits empty groups', () => {
         expect(criteriaFromSelections({ tokens: ['@office', '#deep', '@phone'] })).toEqual({
             contexts: ['@office', '@phone'],
@@ -68,8 +79,8 @@ describe('filter-criteria', () => {
     });
 
     it('drops an excluded token that is also included (include wins)', () => {
-        // criteriaFromSelections keeps both sides verbatim; normalization (used
-        // when the criteria is read back) is where include wins.
+
+
         const criteria = criteriaFromSelections({ tokens: ['@office'], excludedTokens: ['@office'] });
         expect(selectionsFromCriteria(criteria)).toMatchObject({
             tokens: ['@office'],
@@ -85,12 +96,12 @@ describe('filter-criteria', () => {
             energy: ['low', 'bogus' as never],
             timeEstimates: ['30min', { minutes: 45 } as never],
         });
-        // Bare tokens gain their prefix so rebuilding criteria keeps them.
+
         expect(selections.tokens).toEqual(['@office', '#deep']);
-        // 'none' and unknown enum values never reach the pickers.
+
         expect(selections.priorities).toEqual(['high']);
         expect(selections.energyLevels).toEqual(['low']);
-        // Custom estimates have no picker option and are dropped.
+
         expect(selections.timeEstimates).toEqual(['30min']);
         expect(selections.contextMatchMode).toBe('all');
         expect(selections.tagMatchMode).toBe('all');

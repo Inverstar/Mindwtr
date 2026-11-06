@@ -17,7 +17,7 @@ protocol NativeSearchIndexPort: AnyObject {
     func add(_ items: [NativeSearchIndexEntry], domain: String) async throws
 }
 
-/// Completion reports acceptance by the OS journal, not search visibility.
+
 @MainActor
 public final class NativeSearchIndex {
     static let domain = "tech.dongdongbh.mindwtr.native.search"
@@ -26,7 +26,8 @@ public final class NativeSearchIndex {
     private let event: (String, Int) -> Void
     private var desired: NativeSearchSnapshot?
     private var epoch: UInt64 = 0
-    private var running = false
+    private var drainTask: Task<Void, Never>?
+    private var retired = false
     private var dirty = true
     private var acceptedFingerprint: String?
     private var acceptedCount = 0
@@ -43,20 +44,22 @@ public final class NativeSearchIndex {
     }
 
     public func replace(_ snapshot: NativeSearchSnapshot) {
+        guard !retired else { return }
         if desired?.fingerprint == snapshot.fingerprint,
-           running || !dirty && acceptedFingerprint == snapshot.fingerprint { return }
+           drainTask != nil || !dirty && acceptedFingerprint == snapshot.fingerprint { return }
         desired = snapshot; epoch &+= 1; dirty = true
         start()
     }
 
     public func withdraw() {
-        if desired == nil, running || status == "removalQueued" { return }
+        guard !retired else { return }
+        if desired == nil, drainTask != nil || status == "removalQueued" { return }
         desired = nil; epoch &+= 1; dirty = true
         start()
     }
 
     public func retry() {
-        guard !running else { return }
+        guard !retired, drainTask == nil else { return }
         epoch &+= 1; dirty = true
         start()
     }
@@ -67,6 +70,15 @@ public final class NativeSearchIndex {
     }
 
     public func taskID(for identifier: String) -> String? {
+        Self.taskID(for: identifier, scope: scope)
+    }
+
+    public static func taskID(for identifier: String, selection: NativeLaunchSelection) -> String? {
+        guard let scope = try? scope(selection) else { return nil }
+        return taskID(for: identifier, scope: scope)
+    }
+
+    private static func taskID(for identifier: String, scope: String) -> String? {
         let prefix = scope + "."
         guard identifier.utf8.count <= prefix.utf8.count + 2_668, identifier.hasPrefix(prefix) else { return nil }
         let encoded = String(identifier.dropFirst(prefix.count))
@@ -85,6 +97,8 @@ public final class NativeSearchIndex {
     private static func scope(_ selection: NativeLaunchSelection) throws -> String {
         let namespace: String
         switch selection {
+        case .production:
+            namespace = NativeLaunchSelection.productionNamespace
         case let .standard(_, _, value):
             guard value == "tech.dongdongbh.mindwtr.native.dev" else { throw unavailable }
             namespace = value
@@ -101,17 +115,31 @@ public final class NativeSearchIndex {
     }
 
     private func start() {
-        guard !running, dirty else { return }
-        running = true
-        Task { await drain() }
+        guard !retired, drainTask == nil, dirty else { return }
+        drainTask = Task { await drain() }
     }
+
+    public func sealForRetirement() {
+        guard !retired else { return }
+        retired = true
+        dirty = false
+        epoch &+= 1
+    }
+
+    public func retireAndDrain() async {
+        sealForRetirement()
+        let admitted = drainTask
+        await admitted?.value
+        status = "retired"
+    }
+
     private func drain() async {
-        defer { running = false; if dirty { start() } }
-        while dirty {
+        defer { drainTask = nil; if dirty { start() } }
+        while !retired && dirty {
             dirty = false
             let currentEpoch = epoch, snapshot = desired
             do {
-                // Replacing only our domain also removes tasks absent from the new snapshot.
+
                 try await port.remove(domain: Self.domain)
                 acceptedFingerprint = nil
                 let removedCount = acceptedCount; acceptedCount = 0
@@ -133,7 +161,7 @@ public final class NativeSearchIndex {
                 acceptedFingerprint = nil
                 guard epoch == currentEpoch else { continue }
                 status = "failed"; event(status, snapshot?.items.count ?? acceptedCount)
-                // Keep desired state for an explicit Retry or fresh lifecycle request; never spin.
+
                 return
             }
         }
