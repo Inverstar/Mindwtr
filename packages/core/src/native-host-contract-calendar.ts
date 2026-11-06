@@ -58,15 +58,20 @@ import { CALENDAR_TIME_ESTIMATE_OPTIONS, timeEstimateToMinutes } from './calenda
 import {
     CALENDAR_DONE_UPDATES,
     CALENDAR_DAY_MINUTES,
+    CALENDAR_GRID_STEP_OPTIONS,
+    CALENDAR_TIMELINE_ZOOM_OPTIONS,
     CALENDAR_UNSCHEDULE_UPDATES,
     CALENDAR_VIEW_MODES,
     CALENDAR_WEEK_DENSITY_VALUES,
     calendarDateKey,
+    coerceCalendarGridStep,
+    coerceCalendarTimelineZoom,
     coerceCalendarViewMode,
     coerceCalendarWeekVisibleDays,
     createCalendarSourceColorResolver,
     findCalendarFreeSlot,
     formatCalendarDurationChip,
+    formatCalendarTimelineZoomLabel,
     formatCalendarComposerClockValue,
     formatCalendarMonthTitle,
     formatCalendarScheduleDayTitle,
@@ -135,6 +140,7 @@ import {
     needsCalendarSelectedDate,
     planCalendarEventTask,
     planCalendarTaskMove,
+    planCalendarTaskResize,
     selectCalendarViewMode,
     setCalendarViewComposerStartTime,
     toCalendarViewComposer,
@@ -328,6 +334,15 @@ export type NativeCalendarView = {
             nowMinutes: number | null;
             query: string;
             searchTitle: string | null;
+            /** The timeline's grid step and zoom choices, as the screen's chips draw them. */
+            timeline: {
+                gridStep: number;
+                gridStepLabel: string;
+                gridStepChoices: { minutes: number; label: string; selected: boolean }[];
+                zoom: number;
+                zoomLabel: string;
+                zoomChoices: { zoom: number; label: string; selected: boolean }[];
+            };
         }
         | {
             mode: 'schedule';
@@ -394,6 +409,8 @@ export type NativeCalendarAction =
      * task's revision the view showed (an item's `row.taskRevision`, the sheet's `taskRevision`).
      */
     | { type: 'moveTask'; taskId: string; day: string; startMinutes: number; durationMinutes: number; taskRevision: string }
+    /** A timeline block's bottom edge dragged to `durationMinutes`; the start stays at `startMinutes`. */
+    | { type: 'resizeTask'; taskId: string; day: string; startMinutes: number; durationMinutes: number; taskRevision: string }
     | { type: 'unscheduleTask'; taskId: string; taskRevision: string }
     | { type: 'completeTask'; taskId: string; taskRevision: string }
     | { type: 'deleteTask'; taskId: string; taskRevision: string }
@@ -401,7 +418,9 @@ export type NativeCalendarAction =
     | { type: 'createTaskFromEvent'; event: ExternalCalendarEvent }
     | { type: 'setViewMode'; viewMode: CalendarViewMode }
     | { type: 'setShowCompleted'; on: boolean }
-    | { type: 'setWeekVisibleDays'; days: number };
+    | { type: 'setWeekVisibleDays'; days: number }
+    | { type: 'setTimelineGridStep'; minutes: number }
+    | { type: 'setTimelineZoom'; zoom: number };
 
 export type NativeCalendarActionResult = {
     /** False when the action had nothing to write, or was refused (see `toast` and `composer`). */
@@ -1561,6 +1580,8 @@ export function createCalendarViewMethods(deps: CalendarViewDeps) {
                 }, entry.task, null) });
             }
             for (const task of searchResults) entries.push(scheduleRow(task, 'search'));
+            const gridStep = coerceCalendarGridStep(ctx.settings.calendar?.timelineGridStep);
+            const zoom = coerceCalendarTimelineZoom(ctx.settings.calendar?.timelineZoom);
             content = {
                 mode: 'day',
                 dayKey: dayKey(day),
@@ -1570,6 +1591,14 @@ export function createCalendarViewMethods(deps: CalendarViewDeps) {
                 nowMinutes: isSameCalendarDate(day, now) ? getCalendarNowMinutes(now) : null,
                 query,
                 searchTitle: searchResults.length > 0 ? screen.searchResultsTitle : null,
+                timeline: {
+                    gridStep,
+                    gridStepLabel: t('calendar.mobile.timelineGridStep'),
+                    gridStepChoices: CALENDAR_GRID_STEP_OPTIONS.map((minutes) => ({ minutes, label: formatCalendarDurationChip(minutes), selected: minutes === gridStep })),
+                    zoom,
+                    zoomLabel: t('calendar.mobile.timelineZoom'),
+                    zoomChoices: CALENDAR_TIMELINE_ZOOM_OPTIONS.map((choice) => ({ zoom: choice, label: formatCalendarTimelineZoomLabel(choice), selected: choice === zoom })),
+                },
             };
         } else {
             title = screen.scheduleTitle;
@@ -1734,6 +1763,11 @@ export function createCalendarViewMethods(deps: CalendarViewDeps) {
         currentStart: safeParseDate(taskById(taskId)?.startTime),
         isSlotFree: (day, start, durationMinutes, excludeTaskId) => isCalendarSlotFree(day, start, durationMinutes, slotOptions(ctx, eventsByDay(feed)(day), excludeTaskId)),
     });
+    const isResizeFree = (ctx: Context, feed: Feed, action: Extract<NativeCalendarAction, { type: 'resizeTask' }>, taskId: string) => planCalendarTaskResize({
+        taskId, dayStartMs: parseDayKey(action.day)!.getTime(), startMinutes: action.startMinutes, durationMinutes: action.durationMinutes,
+        currentStart: safeParseDate(taskById(taskId)?.startTime),
+        isSlotFree: (day, start, durationMinutes, excludeTaskId) => isCalendarSlotFree(day, start, durationMinutes, slotOptions(ctx, eventsByDay(feed)(day), excludeTaskId)),
+    });
 
     /** Compare-and-set, right before a write to an existing task: one changed since the view showed it is not written. */
     const stale = (task: Task, taskRevision: string | null): Outcome | null => refuseStale([task], [taskRevision ?? undefined]);
@@ -1806,6 +1840,15 @@ export function createCalendarViewMethods(deps: CalendarViewDeps) {
                 if (isMoveFree(ctx, feed, action, task.id).kind !== 'move') return fail('ACTION_FAILED', getCalendarToasts(ctx.t).timeConflict.message);
                 return stale(task, action.taskRevision) ?? written(() => store.updateTask(task.id, { startTime: target }));
             }
+            case 'resizeTask': {
+                if (isProjectedRecurringTaskId(action.taskId)) return fail('INVALID_INPUT', 'A projected occurrence cannot resize');
+                const task = liveTask(action.taskId);
+                if (!task) return fail('TASK_NOT_FOUND', 'Task not found');
+                if (ctx.estimateMinutes(task.timeEstimate) === action.durationMinutes) return unchanged();
+                const plan = isResizeFree(ctx, feed, action, task.id);
+                if (plan.kind !== 'resize') return fail('ACTION_FAILED', getCalendarToasts(ctx.t).timeConflict.message);
+                return stale(task, action.taskRevision) ?? written(() => store.updateTask(task.id, plan.updates));
+            }
             case 'unscheduleTask':
             case 'completeTask': {
                 if (isProjectedRecurringTaskId(action.taskId)) return fail('INVALID_INPUT', 'A projected occurrence cannot change');
@@ -1845,18 +1888,28 @@ export function createCalendarViewMethods(deps: CalendarViewDeps) {
             }
             case 'setViewMode':
             case 'setShowCompleted':
-            case 'setWeekVisibleDays': {
+            case 'setWeekVisibleDays':
+            case 'setTimelineGridStep':
+            case 'setTimelineZoom': {
                 const calendar = ctx.settings.calendar;
                 const patch = action.type === 'setViewMode'
                     ? { viewMode: action.viewMode }
                     : action.type === 'setShowCompleted'
                         ? { showCompleted: action.on }
-                        : { weekVisibleDays: coerceCalendarWeekVisibleDays(action.days) };
+                        : action.type === 'setWeekVisibleDays'
+                            ? { weekVisibleDays: coerceCalendarWeekVisibleDays(action.days) }
+                            : action.type === 'setTimelineGridStep'
+                                ? { timelineGridStep: coerceCalendarGridStep(action.minutes) }
+                                : { timelineZoom: coerceCalendarTimelineZoom(action.zoom) };
                 const current = action.type === 'setViewMode'
                     ? calendar?.viewMode
                     : action.type === 'setShowCompleted'
                         ? calendar?.showCompleted === true
-                        : coerceCalendarWeekVisibleDays(calendar?.weekVisibleDays);
+                        : action.type === 'setWeekVisibleDays'
+                            ? coerceCalendarWeekVisibleDays(calendar?.weekVisibleDays)
+                            : action.type === 'setTimelineGridStep'
+                                ? coerceCalendarGridStep(calendar?.timelineGridStep)
+                                : coerceCalendarTimelineZoom(calendar?.timelineZoom);
                 if (Object.values(patch)[0] === current) return unchanged();
                 return written(() => store.updateSettings({ calendar: { ...calendar, ...patch } }));
             }
@@ -1895,6 +1948,18 @@ export function createCalendarViewMethods(deps: CalendarViewDeps) {
                 if (task.startTime === moveTarget(action)) return null;
                 return isMoveFree(ctx, feed, action, task.id).kind === 'move' ? null : unchanged({ toast: getCalendarToasts(ctx.t).timeConflict });
             }
+            case 'resizeTask': {
+                if (!parseDayKey(action.day) || !Number.isSafeInteger(action.startMinutes) || action.startMinutes < 0
+                    || !Number.isSafeInteger(action.durationMinutes) || action.durationMinutes < 1
+                    || action.startMinutes + action.durationMinutes > 24 * 60 || !isRevision(action.taskRevision)) {
+                    return fail('INVALID_INPUT', 'A day, a start minute and a duration inside the day, and the revision the view showed, are required');
+                }
+                if (isProjectedRecurringTaskId(action.taskId)) return fail('INVALID_INPUT', 'A projected occurrence cannot resize');
+                const task = liveTask(action.taskId);
+                if (!task) return fail('TASK_NOT_FOUND', 'Task not found');
+                if (ctx.estimateMinutes(task.timeEstimate) === action.durationMinutes) return null;
+                return isResizeFree(ctx, feed, action, task.id).kind === 'resize' ? null : unchanged({ toast: getCalendarToasts(ctx.t).timeConflict });
+            }
             case 'unscheduleTask':
             case 'completeTask':
             case 'deleteTask':
@@ -1907,6 +1972,10 @@ export function createCalendarViewMethods(deps: CalendarViewDeps) {
                 return typeof action.on === 'boolean' ? null : fail('INVALID_INPUT', 'on must be a boolean');
             case 'setWeekVisibleDays':
                 return CALENDAR_WEEK_DENSITY_VALUES.includes(action.days) ? null : fail('INVALID_INPUT', 'A week density from the view is required');
+            case 'setTimelineGridStep':
+                return CALENDAR_GRID_STEP_OPTIONS.includes(action.minutes) ? null : fail('INVALID_INPUT', 'A grid step the timeline offers is required');
+            case 'setTimelineZoom':
+                return CALENDAR_TIMELINE_ZOOM_OPTIONS.includes(action.zoom) ? null : fail('INVALID_INPUT', 'A zoom the timeline offers is required');
             default:
                 return fail('INVALID_INPUT', 'The calendar does not offer that action');
         }

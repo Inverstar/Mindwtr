@@ -470,6 +470,11 @@ export interface CalendarSettings {
      *  like the rest of this group: which window you are looking back from is not
      *  a property of the data. */
     showCompleted?: boolean;
+    /** The day timeline's grid step in minutes (5/10/15/30/60): blocks snap to it and the
+     *  timeline draws its sub-hour lines at it. Device-local view preference. */
+    timelineGridStep?: number;
+    /** The day timeline's zoom: a multiplier on the screen's base pixels per minute. */
+    timelineZoom?: number;
 }
 
 export interface WindowSettings {
